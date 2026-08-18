@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, unique
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @unique
@@ -68,10 +68,10 @@ class Operation:
 
     id: int
     opcode: OpCode
-    inputs: List[int]
-    outputs: List[int]
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    name: Optional[str] = None
+    inputs: list[int]
+    outputs: list[int]
+    attributes: dict[str, Any] = field(default_factory=dict)
+    name: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.id, int):
@@ -85,7 +85,4 @@ class Operation:
 
     def __repr__(self) -> str:
         attrs = f", attrs={self.attributes}" if self.attributes else ""
-        return (
-            f"Op(id={self.id}, {self.opcode.name}, "
-            f"in={self.inputs}, out={self.outputs}{attrs})"
-        )
+        return f"Op(id={self.id}, {self.opcode.name}, in={self.inputs}, out={self.outputs}{attrs})"

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import torch
 from torch.export import ExportedProgram
-from torch.fx import GraphModule, Node
+from torch.fx import Node
 
 from ggmlc.frontend.pytorch.operators import get_opcode_for_aten
 from ggmlc.ir.dtype import DType
@@ -13,13 +13,10 @@ from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
 from ggmlc.ir.shape import (
     AddDim,
-    CeilDivDim,
     Dim,
-    FloorDivDim,
     MulDim,
     Shape,
     StaticDim,
-    SubDim,
     SymbolDim,
 )
 from ggmlc.ir.tensor import StorageClass, Tensor
@@ -67,8 +64,8 @@ def _torch_shape_to_shape(shape: Any) -> Shape:
 def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Graph:
     """Imports a torch.export.ExportedProgram into a ggmlc Canonical IR Graph."""
     g = Graph(name=graph_name)
-    node_to_tensor: Dict[Node, Tensor] = {}
-    name_to_tensor: Dict[str, Tensor] = {}
+    node_to_tensor: dict[Node, Tensor] = {}
+    name_to_tensor: dict[str, Tensor] = {}
 
     # Extract signature info
     sig = ep.graph_signature
@@ -109,7 +106,9 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             data = buf_tensor.detach().cpu().numpy() if buf_tensor is not None else None
             t = g.add_tensor(
                 name=buf_name,
-                shape=Shape.from_tuple(tuple(buf_tensor.shape)) if buf_tensor is not None else shape,
+                shape=Shape.from_tuple(tuple(buf_tensor.shape))
+                if buf_tensor is not None
+                else shape,
                 dtype=DType.from_torch(buf_tensor.dtype) if buf_tensor is not None else dtype,
                 storage=StorageClass.CONSTANT,
                 data=data,
@@ -166,36 +165,90 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             dtype = DType.from_torch(val.dtype)
 
         # Collect input tensor IDs and attributes
-        input_tensor_ids: List[int] = []
-        attributes: Dict[str, Any] = {}
+        input_tensor_ids: list[int] = []
+        attributes: dict[str, Any] = {}
 
-        for arg_idx, arg in enumerate(node.args):
-            if isinstance(arg, Node):
-                if arg in node_to_tensor:
-                    input_tensor_ids.append(node_to_tensor[arg].id)
-                else:
-                    raise RuntimeError(f"Referenced node {arg.name} was not imported.")
-            elif isinstance(arg, (int, float, bool)):
-                # Scalar argument - create constant tensor or add to attributes
-                c_name = f"const_{node.name}_arg{arg_idx}"
-                dt = DType.F32 if isinstance(arg, float) else (DType.I64 if isinstance(arg, int) else DType.BOOL)
-                np_val = np.array(arg, dtype=np.float32 if dt == DType.F32 else np.int64)
-                c_t = g.add_tensor(
-                    name=c_name,
-                    shape=Shape([]),
-                    dtype=dt,
-                    storage=StorageClass.CONSTANT,
-                    data=np_val,
-                )
-                g.parameters.append(c_t.id)
-                input_tensor_ids.append(c_t.id)
-            elif isinstance(arg, (list, tuple)):
-                # List of nodes or ints (e.g. for reshape/permute)
-                if all(isinstance(x, Node) for x in arg):
-                    for sub_node in arg:
-                        input_tensor_ids.append(node_to_tensor[sub_node].id)
-                elif all(isinstance(x, (int, torch.SymInt)) for x in arg):
-                    attributes[f"arg_{arg_idx}_dims"] = tuple(_symint_to_dim(x) for x in arg)
+        if opcode == OpCode.TRANSPOSE:
+            # aten.transpose.int(self, dim0, dim1) or aten.t(self)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 2:
+                attributes["dim0"] = int(node.args[1])
+                attributes["dim1"] = int(node.args[2])
+            else:
+                attributes["dim0"] = 0
+                attributes["dim1"] = 1
+        elif opcode == OpCode.PERMUTE:
+            # aten.permute.default(self, dims)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            attributes["dims"] = [int(d) for d in node.args[1]]
+        elif opcode == OpCode.SLICE:
+            # aten.slice.Tensor(self, dim=0, start=None, end=None, step=1)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            dim = int(node.args[1]) if len(node.args) > 1 else 0
+            start = int(node.args[2]) if len(node.args) > 2 and node.args[2] is not None else 0
+            end = (
+                int(node.args[3])
+                if len(node.args) > 3
+                and node.args[3] is not None
+                and node.args[3] < 9223372036854775800
+                else -1
+            )
+            step = int(node.args[4]) if len(node.args) > 4 and node.args[4] is not None else 1
+            attributes["dim"] = dim
+            attributes["start"] = start
+            attributes["end"] = end
+            attributes["step"] = step
+        elif opcode == OpCode.CONCAT:
+            # aten.cat.default(tensors, dim=0)
+            tensors_arg = node.args[0]
+            for sub_node in tensors_arg:
+                input_tensor_ids.append(node_to_tensor[sub_node].id)
+            attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else 0
+        elif opcode == OpCode.EXPAND:
+            # aten.expand.default(self, size)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            attributes["shape"] = tuple(_symint_to_dim(d) for d in node.args[1])
+        elif opcode in (OpCode.SQUEEZE, OpCode.UNSQUEEZE):
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 1 and node.args[1] is not None:
+                attributes["dim"] = int(node.args[1])
+        elif opcode in (OpCode.RESHAPE, OpCode.VIEW):
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            attributes["shape"] = tuple(_symint_to_dim(d) for d in node.args[1])
+        elif opcode == OpCode.SOFTMAX:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
+        else:
+            # Default generic arg parsing
+            for arg_idx, arg in enumerate(node.args):
+                if isinstance(arg, Node):
+                    if arg in node_to_tensor:
+                        input_tensor_ids.append(node_to_tensor[arg].id)
+                    else:
+                        raise RuntimeError(f"Referenced node {arg.name} was not imported.")
+                elif isinstance(arg, (int, float, bool)):
+                    c_name = f"const_{node.name}_arg{arg_idx}"
+                    dt = (
+                        DType.F32
+                        if isinstance(arg, float)
+                        else (DType.I64 if isinstance(arg, int) else DType.BOOL)
+                    )
+                    np_val = np.array(arg, dtype=np.float32 if dt == DType.F32 else np.int64)
+                    c_t = g.add_tensor(
+                        name=c_name,
+                        shape=Shape([]),
+                        dtype=dt,
+                        storage=StorageClass.CONSTANT,
+                        data=np_val,
+                    )
+                    g.parameters.append(c_t.id)
+                    input_tensor_ids.append(c_t.id)
+                elif isinstance(arg, (list, tuple)):
+                    if all(isinstance(x, Node) for x in arg):
+                        for sub_node in arg:
+                            input_tensor_ids.append(node_to_tensor[sub_node].id)
+                    elif all(isinstance(x, (int, torch.SymInt)) for x in arg):
+                        attributes[f"arg_{arg_idx}_dims"] = tuple(_symint_to_dim(x) for x in arg)
 
         for k, v in node.kwargs.items():
             if isinstance(v, Node):

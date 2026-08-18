@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
 
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.op import OpCode, Operation
-from ggmlc.ir.shape import Dim, Shape, StaticDim, SymbolDim
+from ggmlc.ir.shape import Shape
 from ggmlc.ir.state import StateDeclaration
 from ggmlc.ir.tensor import StorageClass, Tensor
 
@@ -15,13 +14,13 @@ class Graph:
     """Canonical Intermediate Representation Graph."""
 
     name: str = "main"
-    inputs: List[int] = field(default_factory=list)
-    outputs: List[int] = field(default_factory=list)
-    parameters: List[int] = field(default_factory=list)
-    states: List[StateDeclaration] = field(default_factory=list)
-    nodes: List[Operation] = field(default_factory=list)
-    tensors: Dict[int, Tensor] = field(default_factory=dict)
-    metadata: Dict[str, str] = field(default_factory=dict)
+    inputs: list[int] = field(default_factory=list)
+    outputs: list[int] = field(default_factory=list)
+    parameters: list[int] = field(default_factory=list)
+    states: list[StateDeclaration] = field(default_factory=list)
+    nodes: list[Operation] = field(default_factory=list)
+    tensors: dict[int, Tensor] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
 
     _next_tensor_id: int = 0
     _next_op_id: int = 0
@@ -42,10 +41,10 @@ class Graph:
         shape: Shape,
         dtype: DType,
         storage: StorageClass,
-        producer_id: Optional[int] = None,
-        data: Optional[any] = None,
-        role: Optional[str] = None,
-        tensor_id: Optional[int] = None,
+        producer_id: int | None = None,
+        data: any | None = None,
+        role: str | None = None,
+        tensor_id: int | None = None,
     ) -> Tensor:
         if tensor_id is None:
             tensor_id = self.new_tensor_id()
@@ -68,11 +67,11 @@ class Graph:
     def add_op(
         self,
         opcode: OpCode,
-        inputs: List[int],
-        outputs: List[int],
-        attributes: Optional[Dict[str, any]] = None,
-        name: Optional[str] = None,
-        op_id: Optional[int] = None,
+        inputs: list[int],
+        outputs: list[int],
+        attributes: dict[str, any] | None = None,
+        name: str | None = None,
+        op_id: int | None = None,
     ) -> Operation:
         if op_id is None:
             op_id = self.new_op_id()
@@ -116,7 +115,7 @@ class Graph:
             self.get_tensor(tid)
 
         # 2. Check SSA and topological ordering
-        defined_tensors: Set[int] = set(self.inputs) | set(self.parameters)
+        defined_tensors: set[int] = set(self.inputs) | set(self.parameters)
         for state in self.states:
             defined_tensors.add(state.id)
 

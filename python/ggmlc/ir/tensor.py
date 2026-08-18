@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, unique
-from typing import Any, Optional
 
 import numpy as np
 
@@ -29,9 +28,9 @@ class Tensor:
     shape: Shape
     dtype: DType
     storage: StorageClass
-    producer_id: Optional[int] = None
-    data: Optional[np.ndarray] = None
-    role: Optional[str] = None
+    producer_id: int | None = None
+    data: np.ndarray | None = None
+    role: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.id, int):

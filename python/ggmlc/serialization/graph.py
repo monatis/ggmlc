@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import io
 import struct
-from typing import Dict, List, Tuple
 
-import numpy as np
-
-from ggmlc.dialect.ggml.lowering import GGMLExecutionGraph, GGMLOpDef, GGMLTensorDef
-from ggmlc.dialect.ggml.ops import GGMLOpCode, GGMLType
+from ggmlc.dialect.ggml.lowering import GGMLExecutionGraph
 from ggmlc.ir.shape import (
     AddDim,
     CeilDivDim,
     Dim,
     FloorDivDim,
     MulDim,
-    Shape,
     StaticDim,
     SubDim,
     SymbolDim,
@@ -46,22 +41,42 @@ def _read_str(f: io.BytesIO) -> str:
     return b.decode("utf-8")
 
 
-def _serialize_dim(dim: Dim, symbol_map: Dict[str, int]) -> bytes:
+def _serialize_dim(dim: Dim, symbol_map: dict[str, int]) -> bytes:
     if isinstance(dim, StaticDim):
         return struct.pack("<Bq", DIM_STATIC, dim.value)
     elif isinstance(dim, SymbolDim):
         s_idx = symbol_map.get(dim.name, 0)
         return struct.pack("<Bq", DIM_SYMBOL, s_idx)
     elif isinstance(dim, AddDim):
-        return struct.pack("<B", DIM_ADD) + _serialize_dim(dim.left, symbol_map) + _serialize_dim(dim.right, symbol_map)
+        return (
+            struct.pack("<B", DIM_ADD)
+            + _serialize_dim(dim.left, symbol_map)
+            + _serialize_dim(dim.right, symbol_map)
+        )
     elif isinstance(dim, SubDim):
-        return struct.pack("<B", DIM_SUB) + _serialize_dim(dim.left, symbol_map) + _serialize_dim(dim.right, symbol_map)
+        return (
+            struct.pack("<B", DIM_SUB)
+            + _serialize_dim(dim.left, symbol_map)
+            + _serialize_dim(dim.right, symbol_map)
+        )
     elif isinstance(dim, MulDim):
-        return struct.pack("<B", DIM_MUL) + _serialize_dim(dim.left, symbol_map) + _serialize_dim(dim.right, symbol_map)
+        return (
+            struct.pack("<B", DIM_MUL)
+            + _serialize_dim(dim.left, symbol_map)
+            + _serialize_dim(dim.right, symbol_map)
+        )
     elif isinstance(dim, FloorDivDim):
-        return struct.pack("<B", DIM_FLOORDIV) + _serialize_dim(dim.left, symbol_map) + _serialize_dim(dim.right, symbol_map)
+        return (
+            struct.pack("<B", DIM_FLOORDIV)
+            + _serialize_dim(dim.left, symbol_map)
+            + _serialize_dim(dim.right, symbol_map)
+        )
     elif isinstance(dim, CeilDivDim):
-        return struct.pack("<B", DIM_CEILDIV) + _serialize_dim(dim.left, symbol_map) + _serialize_dim(dim.right, symbol_map)
+        return (
+            struct.pack("<B", DIM_CEILDIV)
+            + _serialize_dim(dim.left, symbol_map)
+            + _serialize_dim(dim.right, symbol_map)
+        )
     else:
         return struct.pack("<Bq", DIM_STATIC, 1)
 

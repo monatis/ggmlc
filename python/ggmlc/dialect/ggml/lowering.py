@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
-
 from ggmlc.dialect.ggml.ops import GGMLOpCode, GGMLType, GGMLUnaryOpCode
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode, Operation
-from ggmlc.ir.shape import Dim, Shape, StaticDim, SymbolDim
-from ggmlc.ir.tensor import StorageClass, Tensor
+from ggmlc.ir.shape import Dim, Shape, StaticDim
+from ggmlc.ir.tensor import StorageClass
 
 
 def dtype_to_ggml_type(dtype: DType) -> GGMLType:
@@ -26,7 +25,7 @@ def dtype_to_ggml_type(dtype: DType) -> GGMLType:
     return mapping.get(dtype, GGMLType.GGML_TYPE_F32)
 
 
-def canonical_shape_to_ggml_ne(shape: Shape) -> Tuple[Dim, Dim, Dim, Dim]:
+def canonical_shape_to_ggml_ne(shape: Shape) -> tuple[Dim, Dim, Dim, Dim]:
     """Converts a Canonical N-D shape [d0, d1, ..., d_k] (row-major) to GGML 4D ne[0..3].
 
     GGML ne[0] is the innermost dimension (contiguous, stride 1), so we reverse the dimensions.
@@ -44,21 +43,21 @@ class GGMLTensorDef:
     id: int
     name: str
     ggml_type: GGMLType
-    ne: Tuple[Dim, Dim, Dim, Dim]
+    ne: tuple[Dim, Dim, Dim, Dim]
     storage: StorageClass
-    producer_id: Optional[int] = None
-    data: Optional[np.ndarray] = None
-    role: Optional[str] = None
+    producer_id: int | None = None
+    data: np.ndarray | None = None
+    role: str | None = None
 
 
 @dataclass
 class GGMLOpDef:
     id: int
     opcode: GGMLOpCode
-    inputs: List[int]
-    outputs: List[int]
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    name: Optional[str] = None
+    inputs: list[int]
+    outputs: list[int]
+    attributes: dict[str, Any] = field(default_factory=dict)
+    name: str | None = None
 
 
 @dataclass
@@ -66,13 +65,13 @@ class GGMLExecutionGraph:
     """Target execution graph ready for binary serialization and generic C++ runtime."""
 
     name: str
-    inputs: List[int] = field(default_factory=list)
-    outputs: List[int] = field(default_factory=list)
-    parameters: List[int] = field(default_factory=list)
-    tensors: Dict[int, GGMLTensorDef] = field(default_factory=dict)
-    nodes: List[GGMLOpDef] = field(default_factory=list)
-    symbol_table: List[str] = field(default_factory=list)
-    metadata: Dict[str, str] = field(default_factory=dict)
+    inputs: list[int] = field(default_factory=list)
+    outputs: list[int] = field(default_factory=list)
+    parameters: list[int] = field(default_factory=list)
+    tensors: dict[int, GGMLTensorDef] = field(default_factory=dict)
+    nodes: list[GGMLOpDef] = field(default_factory=list)
+    symbol_table: list[str] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
 
     def get_tensor(self, tid: int) -> GGMLTensorDef:
         return self.tensors[tid]
@@ -113,14 +112,22 @@ def lower_to_ggml(canonical_graph: Graph) -> GGMLExecutionGraph:
         if op.opcode == OpCode.MATMUL:
             b_id = op.inputs[1]
             b_t = ggml_graph.tensors[b_id]
-            if b_t.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT) and b_t.data is not None and b_t.data.ndim == 2:
+            if (
+                b_t.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
+                and b_t.data is not None
+                and b_t.data.ndim == 2
+            ):
                 k_val, n_val = b_t.data.shape
                 c_dims = canonical_graph.get_tensor(b_id).shape.dims
-                if len(c_dims) == 2 and c_dims[0].evaluate({}) == k_val and c_dims[1].evaluate({}) == n_val:
+                if (
+                    len(c_dims) == 2
+                    and c_dims[0].evaluate({}) == k_val
+                    and c_dims[1].evaluate({}) == n_val
+                ):
                     b_t.data = np.ascontiguousarray(b_t.data.T)
                     b_t.ne = (StaticDim(k_val), StaticDim(n_val), StaticDim(1), StaticDim(1))
 
-    ggml_graph.symbol_table = sorted(list(symbols))
+    ggml_graph.symbol_table = sorted(symbols)
 
     # 2. Lower operations
     for op in canonical_graph.nodes:
@@ -186,22 +193,75 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         w_id = in_ids[1]
         b_id = in_ids[2] if len(in_ids) > 2 else None
         if b_id is not None:
-            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id, b_id], out_ids, attrs, op.name)
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id, b_id], out_ids, attrs, op.name
+            )
         else:
-            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name)
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
+            )
     elif opcode == OpCode.MATMUL:
-        t_in0 = c_graph.get_tensor(in_ids[0])
         t_in1 = c_graph.get_tensor(in_ids[1])
         if t_in1.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT):
             mapped_inputs = [in_ids[1], in_ids[0]]
         else:
             mapped_inputs = [in_ids[0], in_ids[1]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
-    elif opcode in (OpCode.RESHAPE, OpCode.VIEW):
+    elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.PERMUTE:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        p = attrs.get("dims", list(range(R)))
+        axes = [0, 1, 2, 3]
+        for i in range(4):
+            if i < R:
+                in_k = R - 1 - i
+                out_j = p.index(in_k)
+                axes[i] = R - 1 - out_j
+            else:
+                axes[i] = i
+        attrs["axis0"] = axes[0]
+        attrs["axis1"] = axes[1]
+        attrs["axis2"] = axes[2]
+        attrs["axis3"] = axes[3]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_PERMUTE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.TRANSPOSE:
-        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_TRANSPOSE, in_ids, out_ids, attrs, op.name)
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        d0 = attrs.get("dim0", 0)
+        d1 = attrs.get("dim1", 1)
+        p = list(range(R))
+        if 0 <= d0 < R and 0 <= d1 < R:
+            p[d0], p[d1] = p[d1], p[d0]
+        axes = [0, 1, 2, 3]
+        for i in range(4):
+            if i < R:
+                in_k = R - 1 - i
+                out_j = p.index(in_k)
+                axes[i] = R - 1 - out_j
+            else:
+                axes[i] = i
+        attrs["axis0"] = axes[0]
+        attrs["axis1"] = axes[1]
+        attrs["axis2"] = axes[2]
+        attrs["axis3"] = axes[3]
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_PERMUTE, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SLICE:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", 0)
+        ggml_dim = R - 1 - dim if dim >= 0 else -1 - dim
+        attrs["ggml_dim"] = ggml_dim
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_VIEW, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.CONCAT:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", 0)
+        ggml_dim = R - 1 - dim if dim >= 0 else -1 - dim
+        attrs["ggml_dim"] = ggml_dim
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.EXPAND:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_REPEAT, in_ids, out_ids, attrs, op.name)
     else:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NONE, in_ids, out_ids, attrs, op.name)

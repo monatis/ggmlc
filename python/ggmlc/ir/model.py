@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
 
 from ggmlc.ir.graph import Graph
 
@@ -11,9 +10,9 @@ class Model:
     """Represents a compiled neural-network model with one or more subgraphs."""
 
     name: str
-    graphs: Dict[str, Graph] = field(default_factory=dict)
+    graphs: dict[str, Graph] = field(default_factory=dict)
     main_graph_name: str = "main"
-    metadata: Dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
 
     @property
     def main_graph(self) -> Graph:

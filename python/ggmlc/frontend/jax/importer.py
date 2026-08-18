@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
-from ggmlc.ir.shape import Shape, StaticDim
+from ggmlc.ir.shape import Shape
 from ggmlc.ir.tensor import StorageClass, Tensor
 
 # JAX Primitive -> Canonical OpCode mapping
-JAX_PRIMITIVE_MAP: Dict[str, OpCode] = {
+JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
     "add": OpCode.ADD,
     "add_any": OpCode.ADD,
     "sub": OpCode.SUB,
@@ -51,7 +52,7 @@ def _jax_dtype_to_dtype(dtype: Any) -> DType:
 def _import_equations(
     eqns: Sequence[Any],
     g: Graph,
-    var_to_tensor: Dict[Any, Tensor],
+    var_to_tensor: dict[Any, Tensor],
 ) -> None:
     for eqn in eqns:
         prim_name = eqn.primitive.name
@@ -93,7 +94,7 @@ def _import_equations(
             )
 
         # Collect inputs
-        in_tids: List[int] = []
+        in_tids: list[int] = []
         for in_var in eqn.invars:
             if hasattr(in_var, "val"):
                 np_val = np.asarray(in_var.val)
@@ -135,12 +136,12 @@ def _import_equations(
 def import_jaxpr(
     closed_jaxpr: Any,
     graph_name: str = "main",
-    input_names: Optional[Sequence[str]] = None,
-    params: Optional[Dict[str, np.ndarray]] = None,
+    input_names: Sequence[str] | None = None,
+    params: dict[str, np.ndarray] | None = None,
 ) -> Graph:
     """Imports a JAX ClosedJaxpr into a ggmlc Canonical IR Graph."""
     g = Graph(name=graph_name)
-    var_to_tensor: Dict[Any, Tensor] = {}
+    var_to_tensor: dict[Any, Tensor] = {}
     params = params or {}
 
     jaxpr = closed_jaxpr.jaxpr

@@ -1,11 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
-from ggmlc.frontend.jax import export_jax_fn, import_jaxpr
-from ggmlc.ir.dtype import DType
-from ggmlc.ir.op import OpCode
+from ggmlc.frontend.jax import export_jax_fn
 from ggmlc.ir.tensor import StorageClass
 
 

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import jax
 import numpy as np
 
 from ggmlc.frontend.jax.importer import import_jaxpr
-from ggmlc.ir.graph import Graph
 from ggmlc.ir.model import Model
 
 
 def export_jax_fn(
     fn: Callable[..., Any],
     example_args: Sequence[Any],
-    input_names: Optional[Sequence[str]] = None,
-    params: Optional[Dict[str, np.ndarray]] = None,
+    input_names: Sequence[str] | None = None,
+    params: dict[str, np.ndarray] | None = None,
     model_name: str = "jax_model",
 ) -> Model:
     """Exports a JAX function into a ggmlc Model containing Canonical IR graphs."""

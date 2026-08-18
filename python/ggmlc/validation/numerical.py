@@ -1,20 +1,11 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import torch
-
-from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.frontend.pytorch.exporter import export_torch_model
-from ggmlc.ir.graph import Graph
-from ggmlc.ir.model import Model
-from ggmlc.serialization.graph import serialize_ggml_graph
 
 
 @dataclass
@@ -28,11 +19,11 @@ class NumericalComparisonResult:
 
 def run_compiled_model_wsl(
     serialized_bytes: bytes,
-    inputs: Dict[str, np.ndarray],
-    output_tensor_ids: List[int],
-    symbols: Optional[Dict[str, int]] = None,
-    executable_path: Optional[str] = None,
-) -> Dict[int, np.ndarray]:
+    inputs: dict[str, np.ndarray],
+    output_tensor_ids: list[int],
+    symbols: dict[str, int] | None = None,
+    executable_path: str | None = None,
+) -> dict[int, np.ndarray]:
     """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
     if executable_path is None:
         # Default to build path
@@ -58,7 +49,7 @@ def run_compiled_model_wsl(
 
         # Prepare outputs
         output_args = []
-        out_files: Dict[int, Path] = {}
+        out_files: dict[int, Path] = {}
         for tid in output_tensor_ids:
             out_file = tmp_path / f"out_{tid}.bin"
             out_files[tid] = out_file
@@ -79,11 +70,13 @@ def run_compiled_model_wsl(
             f"{executable_path} {wsl_model} {' '.join(input_args)} {' '.join(output_args)} {' '.join(symbol_args)}",
         ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
-            raise RuntimeError(f"ggmlc-run failed (exit code {res.returncode}):\n{res.stderr}\n{res.stdout}")
+            raise RuntimeError(
+                f"ggmlc-run failed (exit code {res.returncode}):\n{res.stderr}\n{res.stdout}"
+            )
 
-        results: Dict[int, np.ndarray] = {}
+        results: dict[int, np.ndarray] = {}
         for tid, out_file in out_files.items():
             if not out_file.exists():
                 raise RuntimeError(f"Expected output file not generated for tensor {tid}")

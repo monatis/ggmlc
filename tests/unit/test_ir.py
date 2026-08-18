@@ -1,5 +1,3 @@
-import pytest
-
 from ggmlc.ir import (
     DType,
     Graph,

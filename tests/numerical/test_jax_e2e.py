@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.jax import export_jax_fn
 from ggmlc.serialization.graph import serialize_ggml_graph

@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Sequence, Union
+from typing import Any
 
 
 class Dim(ABC):
     """Base class for dimension expressions."""
 
     @abstractmethod
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         """Evaluate dimension given symbol values."""
-        pass
 
     @abstractmethod
     def is_static(self) -> bool:
@@ -22,26 +22,26 @@ class Dim(ABC):
     def free_symbols(self) -> set[str]:
         pass
 
-    def __add__(self, other: Union[Dim, int]) -> Dim:
+    def __add__(self, other: Dim | int) -> Dim:
         return AddDim(self, _to_dim(other))
 
-    def __radd__(self, other: Union[Dim, int]) -> Dim:
+    def __radd__(self, other: Dim | int) -> Dim:
         return AddDim(_to_dim(other), self)
 
-    def __sub__(self, other: Union[Dim, int]) -> Dim:
+    def __sub__(self, other: Dim | int) -> Dim:
         return SubDim(self, _to_dim(other))
 
-    def __mul__(self, other: Union[Dim, int]) -> Dim:
+    def __mul__(self, other: Dim | int) -> Dim:
         return MulDim(self, _to_dim(other))
 
-    def __rmul__(self, other: Union[Dim, int]) -> Dim:
+    def __rmul__(self, other: Dim | int) -> Dim:
         return MulDim(_to_dim(other), self)
 
-    def __floordiv__(self, other: Union[Dim, int]) -> Dim:
+    def __floordiv__(self, other: Dim | int) -> Dim:
         return FloorDivDim(self, _to_dim(other))
 
 
-def _to_dim(val: Union[Dim, int, str]) -> Dim:
+def _to_dim(val: Dim | int | str) -> Dim:
     if isinstance(val, Dim):
         return val
     if isinstance(val, int):
@@ -61,7 +61,7 @@ class StaticDim(Dim):
         if self.value < 0:
             raise ValueError(f"StaticDim value must be non-negative, got {self.value}")
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         return self.value
 
     def is_static(self) -> bool:
@@ -82,7 +82,7 @@ class SymbolDim(Dim):
         if not isinstance(self.name, str) or not self.name:
             raise ValueError(f"SymbolDim name must be non-empty string, got {self.name}")
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         if self.name not in env:
             raise KeyError(f"Symbol '{self.name}' not found in environment: {env}")
         val = env[self.name]
@@ -105,7 +105,7 @@ class AddDim(Dim):
     left: Dim
     right: Dim
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         return self.left.evaluate(env) + self.right.evaluate(env)
 
     def is_static(self) -> bool:
@@ -123,7 +123,7 @@ class SubDim(Dim):
     left: Dim
     right: Dim
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         res = self.left.evaluate(env) - self.right.evaluate(env)
         if res < 0:
             raise ValueError(f"Negative dimension evaluated: {self} with {env} -> {res}")
@@ -144,7 +144,7 @@ class MulDim(Dim):
     left: Dim
     right: Dim
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         return self.left.evaluate(env) * self.right.evaluate(env)
 
     def is_static(self) -> bool:
@@ -162,7 +162,7 @@ class FloorDivDim(Dim):
     left: Dim
     right: Dim
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         r = self.right.evaluate(env)
         if r == 0:
             raise ZeroDivisionError("Division by zero in dimension expression")
@@ -183,7 +183,7 @@ class CeilDivDim(Dim):
     left: Dim
     right: Dim
 
-    def evaluate(self, env: Dict[str, int]) -> int:
+    def evaluate(self, env: dict[str, int]) -> int:
         r = self.right.evaluate(env)
         if r == 0:
             raise ZeroDivisionError("Division by zero in dimension expression")
@@ -205,7 +205,7 @@ class Shape:
 
     dims: tuple[Dim, ...]
 
-    def __init__(self, dims: Sequence[Union[Dim, int, str]]):
+    def __init__(self, dims: Sequence[Dim | int | str]):
         object.__setattr__(self, "dims", tuple(_to_dim(d) for d in dims))
 
     @property
@@ -221,11 +221,11 @@ class Shape:
             res |= d.free_symbols()
         return res
 
-    def evaluate(self, env: Dict[str, int] | None = None) -> tuple[int, ...]:
+    def evaluate(self, env: dict[str, int] | None = None) -> tuple[int, ...]:
         env = env or {}
         return tuple(d.evaluate(env) for d in self.dims)
 
-    def numel(self, env: Dict[str, int] | None = None) -> int:
+    def numel(self, env: dict[str, int] | None = None) -> int:
         concrete = self.evaluate(env)
         prod = 1
         for d in concrete:

@@ -1,13 +1,10 @@
-import pytest
 import torch
-import torch.nn as nn
-
-from ggmlc.frontend.pytorch import export_torch_model, import_exported_program
-from ggmlc.ir import DType, OpCode, StorageClass
+from ggmlc.frontend.pytorch import export_torch_model
+from ggmlc.ir import OpCode
+from torch import nn
 
 
 class SimpleModel(nn.Module):
-
     def __init__(self):
         super().__init__()
         self.fc = nn.Linear(32, 64)
@@ -35,7 +32,6 @@ def test_export_simple_model():
 
 
 class DynamicModel(nn.Module):
-
     def forward(self, a, b):
         return (a + b) * 2.0
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -17,8 +16,8 @@ class StateDeclaration:
     name: str
     shape: Shape
     dtype: DType
-    initial_data: Optional[np.ndarray] = None
-    role: Optional[str] = None
+    initial_data: np.ndarray | None = None
+    role: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.id, int):

@@ -1,16 +1,12 @@
-import numpy as np
-import pytest
 import torch
-import torch.nn as nn
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch.exporter import export_torch_model
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy, run_compiled_model_wsl
+from torch import nn
 
 
 class ArithmeticModel(nn.Module):
-
     def forward(self, x):
         return (x + 3.0) * 2.0
 
@@ -43,7 +39,6 @@ def test_e2e_elementwise_arithmetic():
 
 
 class MatMulModel(nn.Module):
-
     def __init__(self):
         super().__init__()
         self.fc = nn.Linear(32, 64)
@@ -80,7 +75,6 @@ def test_e2e_linear_matmul():
 
 
 class ReshapeReluModel(nn.Module):
-
     def forward(self, x):
         reshaped = torch.reshape(x, (8, 8))
         return torch.relu(reshaped)

@@ -163,15 +163,57 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_RESHAPE: {
                 const auto& ne = concrete_shapes_[out_id];
+                if (!ggml_is_contiguous(in0)) {
+                    in0 = ggml_cont(ctx_, in0);
+                }
                 result = ggml_reshape_4d(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
                 break;
             }
-            case GGML_OP_PERMUTE:
-                result = ggml_permute(ctx_, in0, 1, 0, 2, 3);
+            case GGML_OP_PERMUTE: {
+                int ax0 = op.attributes.count("axis0") ? static_cast<int>(op.attributes.at("axis0")) : 1;
+                int ax1 = op.attributes.count("axis1") ? static_cast<int>(op.attributes.at("axis1")) : 0;
+                int ax2 = op.attributes.count("axis2") ? static_cast<int>(op.attributes.at("axis2")) : 2;
+                int ax3 = op.attributes.count("axis3") ? static_cast<int>(op.attributes.at("axis3")) : 3;
+                result = ggml_cont(ctx_, ggml_permute(ctx_, in0, ax0, ax1, ax2, ax3));
                 break;
+            }
             case GGML_OP_TRANSPOSE:
-                result = ggml_transpose(ctx_, in0);
+                result = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
                 break;
+            case GGML_OP_VIEW: {
+                const auto& out_ne = concrete_shapes_[out_id];
+                int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                int64_t start = op.attributes.count("start") ? op.attributes.at("start") : 0;
+                int64_t step = op.attributes.count("step") ? op.attributes.at("step") : 1;
+                if (!ggml_is_contiguous(in0)) {
+                    in0 = ggml_cont(ctx_, in0);
+                }
+                size_t offset = start * in0->nb[g_dim];
+                size_t nb1 = in0->nb[1] * (g_dim == 1 ? step : 1);
+                size_t nb2 = in0->nb[2] * (g_dim == 2 ? step : 1);
+                size_t nb3 = in0->nb[3] * (g_dim == 3 ? step : 1);
+                result = ggml_cont(ctx_, ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset));
+                break;
+            }
+            case GGML_OP_CONCAT: {
+                int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                if (op.inputs.size() >= 2) {
+                    result = ggml_concat(ctx_, in0, in1, g_dim);
+                    for (size_t k = 2; k < op.inputs.size(); ++k) {
+                        struct ggml_tensor* next_in = ggml_tensors_[op.inputs[k]];
+                        result = ggml_concat(ctx_, result, next_in, g_dim);
+                    }
+                } else {
+                    result = in0;
+                }
+                result = ggml_cont(ctx_, result);
+                break;
+            }
+            case GGML_OP_REPEAT: {
+                const auto& ne = concrete_shapes_[out_id];
+                result = ggml_repeat_4d(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
+                break;
+            }
             default:
                 // Fallback copy or identity
                 result = ggml_dup(ctx_, in0);

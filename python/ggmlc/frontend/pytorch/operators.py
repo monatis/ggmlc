@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
-
-import torch
+from typing import Any
 
 from ggmlc.ir.op import OpCode
 
 # Map ATen Target -> (OpCode, attribute_extractor)
-ATEN_OP_MAP: Dict[str, OpCode] = {
+ATEN_OP_MAP: dict[str, OpCode] = {
     "aten.add.Tensor": OpCode.ADD,
     "aten.add.Scalar": OpCode.ADD,
     "aten.sub.Tensor": OpCode.SUB,
