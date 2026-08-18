@@ -60,6 +60,7 @@ class GGMLOpCode(IntEnum):
     GGML_OP_CLAMP = 50
     GGML_OP_FLASH_ATTN_EXT = 75
     GGML_OP_UNARY = 91
+    GGML_OP_GLU = 99
 
 
 @unique

@@ -1,6 +1,7 @@
 #include "ggmlc/executor.h"
 #include <iostream>
 #include <cstring>
+#include <cmath>
 #include <stdexcept>
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -87,6 +88,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
         auto match_broadcast = [&](struct ggml_tensor* a, struct ggml_tensor* b) -> std::pair<struct ggml_tensor*, struct ggml_tensor*> {
             if (!a || !b) return {a, b};
+            if (ggml_are_same_shape(a, b)) return {a, b};
             if (ggml_can_repeat(b, a)) {
                 b = ggml_repeat(ctx_, b, a);
             } else if (ggml_can_repeat(a, b)) {
@@ -116,8 +118,25 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_div(ctx_, p.first, p.second);
                 break;
             }
-            case GGML_OP_SQRT:
+            case GGML_OP_SQRT: {
                 result = ggml_sqrt(ctx_, in0);
+                if (op.attributes.count("is_rsqrt") && op.attributes.at("is_rsqrt")) {
+                    struct ggml_tensor* one = ggml_new_f32(ctx_, 1.0f);
+                    if (ggml_can_repeat(one, result)) {
+                        one = ggml_repeat(ctx_, one, result);
+                    }
+                    result = ggml_div(ctx_, one, result);
+                }
+                break;
+            }
+            case GGML_OP_SQR:
+                result = ggml_sqr(ctx_, in0);
+                break;
+            case GGML_OP_MEAN:
+                result = ggml_mean(ctx_, in0);
+                break;
+            case GGML_OP_CONT:
+                result = ggml_cont(ctx_, in0);
                 break;
             case GGML_OP_LOG:
                 result = ggml_log(ctx_, in0);
@@ -136,18 +155,85 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 break;
             }
-            case GGML_OP_RMS_NORM:
-                result = ggml_rms_norm(ctx_, in0, 1e-5f);
-                if (in1) {
-                    result = ggml_mul(ctx_, result, in1);
+            case GGML_OP_NORM: {
+                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+                result = ggml_norm(ctx_, in0, eps);
+                if (op.inputs.size() > 1) {
+                    struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
+                    if (w) {
+                        if (ggml_can_repeat(w, result)) {
+                            w = ggml_repeat(ctx_, w, result);
+                        }
+                        result = ggml_mul(ctx_, result, w);
+                    }
                 }
+                if (op.inputs.size() > 2) {
+                    struct ggml_tensor* b = ggml_tensors_[op.inputs[2]];
+                    if (b) {
+                        if (ggml_can_repeat(b, result)) {
+                            b = ggml_repeat(ctx_, b, result);
+                        }
+                        result = ggml_add(ctx_, result, b);
+                    }
+                }
+                break;
+            }
+            case GGML_OP_RMS_NORM: {
+                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+                result = ggml_rms_norm(ctx_, in0, eps);
+                if (op.inputs.size() > 1) {
+                    struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
+                    if (w) {
+                        if (ggml_can_repeat(w, result)) {
+                            w = ggml_repeat(ctx_, w, result);
+                        }
+                        result = ggml_mul(ctx_, result, w);
+                    }
+                }
+                break;
+            }
+            case GGML_OP_GET_ROWS: {
+                if (in1 && in1->type != GGML_TYPE_I32) {
+                    in1 = ggml_cast(ctx_, in1, GGML_TYPE_I32);
+                }
+                int64_t total_indices = in1->ne[0] * in1->ne[1] * in1->ne[2] * in1->ne[3];
+                struct ggml_tensor* in1_flat = ggml_reshape_1d(ctx_, in1, total_indices);
+                struct ggml_tensor* raw_rows = ggml_get_rows(ctx_, in0, in1_flat);
+                const auto& out_ne = concrete_shapes_[out_id];
+                result = ggml_reshape_4d(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                break;
+            }
+            case GGML_OP_ROPE: {
+                int n_dims = op.attributes.count("n_dims") ? static_cast<int>(op.attributes.at("n_dims")) : in0->ne[0];
+                int mode = op.attributes.count("mode") ? static_cast<int>(op.attributes.at("mode")) : 0;
+                result = ggml_rope(ctx_, in0, in1, n_dims, mode);
+                break;
+            }
+            case GGML_OP_FLASH_ATTN_EXT: {
+                struct ggml_tensor* q = in0;
+                struct ggml_tensor* k = in1;
+                struct ggml_tensor* v = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
+                struct ggml_tensor* mask = op.inputs.size() > 3 ? ggml_tensors_[op.inputs[3]] : nullptr;
+                float scale = op.attributes.count("scale") ? static_cast<float>(op.attributes.at("scale")) : 1.0f / sqrtf((float)q->ne[0]);
+                result = ggml_flash_attn_ext(ctx_, q, k, v, mask, scale, 0.0f, 0.0f);
+                break;
+            }
+            case GGML_OP_GLU:
+                result = ggml_swiglu(ctx_, in0);
                 break;
             case GGML_OP_SOFT_MAX:
                 result = ggml_soft_max(ctx_, in0);
                 break;
             case GGML_OP_MUL_MAT: {
                 if (in0 && in1 && in0->ne[0] != in1->ne[0]) {
-                    in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    if (in0->ne[1] == in1->ne[0]) {
+                        in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    } else if (in1->ne[1] == in0->ne[0]) {
+                        in1 = ggml_cont(ctx_, ggml_transpose(ctx_, in1));
+                    }
+                }
+                if (in0 && !ggml_is_contiguous(in0)) {
+                    in0 = ggml_cont(ctx_, in0);
                 }
                 result = ggml_mul_mat(ctx_, in0, in1);
                 if (op.inputs.size() > 2) {

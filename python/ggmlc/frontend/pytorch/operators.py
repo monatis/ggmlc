@@ -48,6 +48,12 @@ ATEN_OP_MAP: dict[str, OpCode] = {
     "aten.sum.dim_IntList": OpCode.SUM,
     "aten.mean.dim": OpCode.MEAN,
     "aten.scaled_dot_product_attention.default": OpCode.SDPA,
+    "aten.native_layer_norm.default": OpCode.LAYER_NORM,
+    "aten.layer_norm.default": OpCode.LAYER_NORM,
+    "aten.rms_norm.default": OpCode.RMS_NORM,
+    "aten.contiguous.default": OpCode.CONTIGUOUS,
+    "aten.pow.Tensor_Scalar": OpCode.POW,
+    "aten.pow.Tensor_Tensor": OpCode.POW,
 }
 
 

@@ -25,7 +25,9 @@ from ggmlc.ir.tensor import StorageClass, Tensor
 def _symint_to_dim(sym: Any) -> Dim:
     """Convert torch.SymInt or int/expression to Dim."""
     if isinstance(sym, int):
-        return StaticDim(sym)
+        if sym >= 0:
+            return StaticDim(sym)
+        return SymbolDim(str(sym))
     if isinstance(sym, torch.SymInt):
         node = sym.node
         expr = node.expr
@@ -218,6 +220,57 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
+        elif opcode == OpCode.EMBEDDING:
+            # aten.embedding.default(weight, indices)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+        elif opcode == OpCode.RMS_NORM:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 2 and isinstance(node.args[2], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[2]].id)
+            eps = (
+                node.args[3]
+                if len(node.args) > 3 and isinstance(node.args[3], (int, float))
+                else 1e-5
+            )
+            attributes["eps"] = float(eps)
+        elif opcode == OpCode.LAYER_NORM:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 2 and isinstance(node.args[2], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[2]].id)
+            if len(node.args) > 3 and isinstance(node.args[3], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[3]].id)
+            eps = (
+                node.args[4]
+                if len(node.args) > 4 and isinstance(node.args[4], (int, float))
+                else 1e-5
+            )
+            attributes["eps"] = float(eps)
+        elif opcode == OpCode.SDPA:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[2]].id)
+            if len(node.args) > 3 and isinstance(node.args[3], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[3]].id)
+            scale = node.kwargs.get("scale") or (node.args[6] if len(node.args) > 6 else None)
+            if scale is not None:
+                attributes["scale"] = float(scale)
+        elif opcode == OpCode.CONTIGUOUS:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+        elif opcode == OpCode.POW:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 1:
+                if isinstance(node.args[1], (int, float)):
+                    attributes["exponent"] = float(node.args[1])
+                elif isinstance(node.args[1], Node):
+                    input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+        elif opcode == OpCode.ROPE:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            if "n_dims" in node.kwargs:
+                attributes["n_dims"] = int(node.kwargs["n_dims"])
+            if "mode" in node.kwargs:
+                attributes["mode"] = int(node.kwargs["mode"])
         else:
             # Default generic arg parsing
             for arg_idx, arg in enumerate(node.args):

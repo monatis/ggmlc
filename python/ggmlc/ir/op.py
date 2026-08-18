@@ -23,6 +23,8 @@ class OpCode(Enum):
     SIN = "sin"
     COS = "cos"
     TANH = "tanh"
+    POW = "pow"
+    CONTIGUOUS = "contiguous"
 
     # Neural network activations & norms
     RELU = "relu"

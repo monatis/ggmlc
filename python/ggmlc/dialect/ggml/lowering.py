@@ -153,6 +153,16 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_DIV, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.SQRT:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SQRT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.RSQRT:
+        return GGMLOpDef(
+            op.id, GGMLOpCode.GGML_OP_SQRT, in_ids, out_ids, {"is_rsqrt": 1, **attrs}, op.name
+        )
+    elif opcode == OpCode.POW:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SQR, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.MEAN:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MEAN, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.CONTIGUOUS:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LOG:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_LOG, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RELU, OpCode.MAXIMUM):
@@ -201,11 +211,7 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
                 op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
             )
     elif opcode == OpCode.MATMUL:
-        t_in1 = c_graph.get_tensor(in_ids[1])
-        if t_in1.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT):
-            mapped_inputs = [in_ids[1], in_ids[0]]
-        else:
-            mapped_inputs = [in_ids[0], in_ids[1]]
+        mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
@@ -263,5 +269,15 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.EXPAND:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_REPEAT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.LAYER_NORM:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NORM, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.EMBEDDING:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GET_ROWS, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SDPA:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.ROPE:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ROPE, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SWIGLU:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GLU, in_ids, out_ids, attrs, op.name)
     else:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NONE, in_ids, out_ids, attrs, op.name)
