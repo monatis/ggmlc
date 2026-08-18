@@ -145,6 +145,11 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         if node.op != "call_function":
             continue
 
+        target_str = str(node.target)
+        if "sym_size" in target_str or "sym_numel" in target_str:
+            # Symbolic scalar query node (e.g. B, S = x.shape)
+            continue
+
         opcode = get_opcode_for_aten(node.target)
         if opcode is None:
             raise NotImplementedError(
@@ -209,14 +214,31 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.EXPAND:
             # aten.expand.default(self, size)
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            attributes["shape"] = tuple(_symint_to_dim(d) for d in node.args[1])
+            dims = []
+            for d in node.args[1]:
+                if isinstance(d, Node):
+                    dims.append(_symint_to_dim(d.meta.get("val")))
+                else:
+                    dims.append(_symint_to_dim(d))
+            attributes["shape"] = tuple(dims)
         elif opcode in (OpCode.SQUEEZE, OpCode.UNSQUEEZE):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             if len(node.args) > 1 and node.args[1] is not None:
                 attributes["dim"] = int(node.args[1])
         elif opcode in (OpCode.RESHAPE, OpCode.VIEW):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            attributes["shape"] = tuple(_symint_to_dim(d) for d in node.args[1])
+            dims = []
+            if len(node.args) > 1:
+                shape_arg = node.args[1]
+                if isinstance(shape_arg, (list, tuple)):
+                    for d in shape_arg:
+                        if isinstance(d, Node):
+                            dims.append(_symint_to_dim(d.meta.get("val")))
+                        else:
+                            dims.append(_symint_to_dim(d))
+                else:
+                    dims.append(_symint_to_dim(shape_arg))
+            attributes["shape"] = tuple(dims)
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
@@ -297,11 +319,20 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                     g.parameters.append(c_t.id)
                     input_tensor_ids.append(c_t.id)
                 elif isinstance(arg, (list, tuple)):
-                    if all(isinstance(x, Node) for x in arg):
+                    if all(isinstance(x, Node) and x in node_to_tensor for x in arg):
                         for sub_node in arg:
                             input_tensor_ids.append(node_to_tensor[sub_node].id)
-                    elif all(isinstance(x, (int, torch.SymInt)) for x in arg):
-                        attributes[f"arg_{arg_idx}_dims"] = tuple(_symint_to_dim(x) for x in arg)
+                    else:
+                        dims = []
+                        for x in arg:
+                            if isinstance(x, Node):
+                                val = x.meta.get("val")
+                                dims.append(
+                                    _symint_to_dim(val) if val is not None else StaticDim(1)
+                                )
+                            else:
+                                dims.append(_symint_to_dim(x))
+                        attributes[f"arg_{arg_idx}_dims"] = tuple(dims)
 
         for k, v in node.kwargs.items():
             if isinstance(v, Node):

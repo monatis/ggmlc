@@ -211,6 +211,9 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
                 op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
             )
     elif opcode == OpCode.MATMUL:
+        t_in1 = c_graph.get_tensor(in_ids[1])
+        is_param = t_in1.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
+        attrs["transpose_in0"] = 0 if is_param else 1
         mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
@@ -237,6 +240,10 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         R = len(in_t.shape.dims)
         d0 = attrs.get("dim0", 0)
         d1 = attrs.get("dim1", 1)
+        if d0 < 0:
+            d0 += R
+        if d1 < 0:
+            d1 += R
         p = list(range(R))
         if 0 <= d0 < R and 0 <= d1 < R:
             p[d0], p[d1] = p[d1], p[d0]

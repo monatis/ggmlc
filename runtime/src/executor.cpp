@@ -225,12 +225,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_soft_max(ctx_, in0);
                 break;
             case GGML_OP_MUL_MAT: {
-                if (in0 && in1 && in0->ne[0] != in1->ne[0]) {
-                    if (in0->ne[1] == in1->ne[0]) {
-                        in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
-                    } else if (in1->ne[1] == in0->ne[0]) {
-                        in1 = ggml_cont(ctx_, ggml_transpose(ctx_, in1));
-                    }
+                bool transpose_in0 = op.attributes.count("transpose_in0") && op.attributes.at("transpose_in0") != 0;
+                if (in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
+                    in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
                 }
                 if (in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
