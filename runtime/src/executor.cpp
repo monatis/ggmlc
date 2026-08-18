@@ -70,6 +70,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         // If parameter/constant with initial data, copy bytes
         if (t.data_ptr && t.data_size > 0) {
             std::memcpy(g_t->data, t.data_ptr, std::min<size_t>(t.data_size, ggml_nbytes(g_t)));
+        } else if (t.storage == StorageClass::STATE) {
+            auto s_it = persistent_states_.find(tid);
+            if (s_it != persistent_states_.end() && s_it->second.size() == ggml_nbytes(g_t)) {
+                std::memcpy(g_t->data, s_it->second.data(), s_it->second.size());
+            } else {
+                persistent_states_[tid].assign(ggml_nbytes(g_t), 0);
+                std::memset(g_t->data, 0, ggml_nbytes(g_t));
+            }
         }
 
         ggml_tensors_[tid] = g_t;
@@ -341,6 +349,73 @@ void ModelExecutor::run(int n_threads) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
     ggml_graph_compute_with_ctx(ctx_, cgraph_, n_threads);
+
+    // Save persistent states
+    for (const auto& pair : model_graph_.tensors) {
+        uint32_t tid = pair.first;
+        if (pair.second.storage == StorageClass::STATE) {
+            auto it = ggml_tensors_.find(tid);
+            if (it != ggml_tensors_.end()) {
+                size_t sz = ggml_nbytes(it->second);
+                persistent_states_[tid].resize(sz);
+                std::memcpy(persistent_states_[tid].data(), it->second->data, sz);
+            }
+        }
+    }
+}
+
+void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_bytes) {
+    persistent_states_[tensor_id].resize(size_bytes);
+    std::memcpy(persistent_states_[tensor_id].data(), data, size_bytes);
+    auto it = ggml_tensors_.find(tensor_id);
+    if (it != ggml_tensors_.end() && ggml_nbytes(it->second) == size_bytes) {
+        std::memcpy(it->second->data, data, size_bytes);
+    }
+}
+
+void ModelExecutor::set_state_by_name(const std::string& name, const void* data, size_t size_bytes) {
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.name == name) {
+            set_state(pair.first, data, size_bytes);
+            return;
+        }
+    }
+    throw std::runtime_error("State tensor name not found in model: " + name);
+}
+
+const void* ModelExecutor::get_state_data(uint32_t tensor_id) const {
+    auto it = persistent_states_.find(tensor_id);
+    if (it != persistent_states_.end() && !it->second.empty()) {
+        return it->second.data();
+    }
+    auto t_it = ggml_tensors_.find(tensor_id);
+    if (t_it != ggml_tensors_.end()) {
+        return t_it->second->data;
+    }
+    throw std::runtime_error("State tensor ID not found in executor: " + std::to_string(tensor_id));
+}
+
+const void* ModelExecutor::get_state_data_by_name(const std::string& name) const {
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.name == name) {
+            return get_state_data(pair.first);
+        }
+    }
+    throw std::runtime_error("State tensor name not found in model: " + name);
+}
+
+void ModelExecutor::reset_state() {
+    for (auto& pair : persistent_states_) {
+        std::fill(pair.second.begin(), pair.second.end(), 0);
+    }
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.storage == StorageClass::STATE) {
+            auto it = ggml_tensors_.find(pair.first);
+            if (it != ggml_tensors_.end()) {
+                std::memset(it->second->data, 0, ggml_nbytes(it->second));
+            }
+        }
+    }
 }
 
 const void* ModelExecutor::get_output_data(uint32_t tensor_id) const {

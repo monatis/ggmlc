@@ -23,6 +23,13 @@ public:
     // Run execution graph
     void run(int n_threads = 1);
 
+    // State tensor access
+    void set_state(uint32_t tensor_id, const void* data, size_t size_bytes);
+    void set_state_by_name(const std::string& name, const void* data, size_t size_bytes);
+    const void* get_state_data(uint32_t tensor_id) const;
+    const void* get_state_data_by_name(const std::string& name) const;
+    void reset_state();
+
     // Get output tensor data pointer and concrete shape
     const void* get_output_data(uint32_t tensor_id) const;
     std::array<int64_t, 4> get_tensor_shape(uint32_t tensor_id) const;
@@ -34,6 +41,7 @@ private:
     struct ggml_cgraph* cgraph_ = nullptr;
     std::unordered_map<uint32_t, struct ggml_tensor*> ggml_tensors_;
     std::unordered_map<uint32_t, std::array<int64_t, 4>> concrete_shapes_;
+    std::unordered_map<uint32_t, std::vector<uint8_t>> persistent_states_;
     std::vector<uint8_t> memory_pool_;
 };
 

@@ -13,6 +13,8 @@ int main(int argc, char** argv) {
                   << "Options:\n"
                   << "  --input <name:file.bin>     Set input tensor from binary file\n"
                   << "  --output <id:file.bin>      Save output tensor ID to binary file\n"
+                  << "  --state-in <name:file.bin>  Load initial state tensor from binary file\n"
+                  << "  --state-out <name:file.bin> Save final state tensor to binary file\n"
                   << "  --symbol <key=value>        Bind dynamic symbol\n"
                   << "  --threads <N>               Number of threads (default: 1)\n";
         return 1;
@@ -21,6 +23,8 @@ int main(int argc, char** argv) {
     std::string model_path = argv[1];
     std::unordered_map<std::string, std::string> input_files;
     std::unordered_map<uint32_t, std::string> output_files;
+    std::unordered_map<std::string, std::string> state_in_files;
+    std::unordered_map<std::string, std::string> state_out_files;
     std::unordered_map<std::string, int64_t> symbol_env;
     int n_threads = 1;
 
@@ -38,6 +42,18 @@ int main(int argc, char** argv) {
             if (colon != std::string::npos) {
                 uint32_t tid = std::stoul(val.substr(0, colon));
                 output_files[tid] = val.substr(colon + 1);
+            }
+        } else if (arg == "--state-in" && i + 1 < argc) {
+            std::string val = argv[++i];
+            size_t colon = val.find(':');
+            if (colon != std::string::npos) {
+                state_in_files[val.substr(0, colon)] = val.substr(colon + 1);
+            }
+        } else if (arg == "--state-out" && i + 1 < argc) {
+            std::string val = argv[++i];
+            size_t colon = val.find(':');
+            if (colon != std::string::npos) {
+                state_out_files[val.substr(0, colon)] = val.substr(colon + 1);
             }
         } else if (arg == "--symbol" && i + 1 < argc) {
             std::string val = argv[++i];
@@ -58,6 +74,22 @@ int main(int argc, char** argv) {
 
         ggmlc::ModelExecutor executor(model_graph);
         executor.prepare(symbol_env);
+
+        // Load initial state data if provided
+        for (const auto& pair : state_in_files) {
+            std::ifstream fin(pair.second, std::ios::binary | std::ios::ate);
+            if (!fin.is_open()) {
+                std::cerr << "Failed to open state-in file: " << pair.second << "\n";
+                return 1;
+            }
+            size_t sz = fin.tellg();
+            fin.seekg(0, std::ios::beg);
+            std::vector<uint8_t> buf(sz);
+            fin.read(reinterpret_cast<char*>(buf.data()), sz);
+
+            executor.set_state_by_name(pair.first, buf.data(), sz);
+            std::cout << "[ggmlc-run] Loaded state '" << pair.first << "' (" << sz << " bytes)\n";
+        }
 
         // Load input data
         for (const auto& pair : input_files) {
@@ -92,6 +124,28 @@ int main(int argc, char** argv) {
             }
             fout.write(reinterpret_cast<const char*>(data), sz);
             std::cout << "[ggmlc-run] Saved output tensor " << tid << " (" << sz << " bytes) to " << pair.second << "\n";
+        }
+
+        // Save state-out data
+        for (const auto& pair : state_out_files) {
+            const void* data = executor.get_state_data_by_name(pair.first);
+            // Find tensor size
+            size_t sz = 0;
+            for (const auto& t_pair : model_graph.tensors) {
+                if (t_pair.second.name == pair.first) {
+                    sz = executor.get_tensor_size_bytes(t_pair.first);
+                    break;
+                }
+            }
+            if (sz > 0) {
+                std::ofstream fout(pair.second, std::ios::binary);
+                if (!fout.is_open()) {
+                    std::cerr << "Failed to write state-out file: " << pair.second << "\n";
+                    return 1;
+                }
+                fout.write(reinterpret_cast<const char*>(data), sz);
+                std::cout << "[ggmlc-run] Saved state '" << pair.first << "' (" << sz << " bytes) to " << pair.second << "\n";
+            }
         }
 
         // If no explicit output files, dump primary graph outputs

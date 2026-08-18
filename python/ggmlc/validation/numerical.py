@@ -22,14 +22,18 @@ def run_compiled_model_wsl(
     inputs: dict[str, np.ndarray],
     output_tensor_ids: list[int],
     symbols: dict[str, int] | None = None,
+    states_in: dict[str, np.ndarray] | None = None,
+    states_out: list[str] | None = None,
     executable_path: str | None = None,
-) -> dict[int, np.ndarray]:
+) -> dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[str, np.ndarray]]:
     """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
     if executable_path is None:
         # Default to build path
         executable_path = "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run"
 
     symbols = symbols or {}
+    states_in = states_in or {}
+    states_out = states_out or []
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -40,12 +44,19 @@ def run_compiled_model_wsl(
         input_args = []
         for name, arr in inputs.items():
             in_file = tmp_path / f"in_{name}.bin"
-            # Ensure C-contiguous
             arr_c = np.ascontiguousarray(arr)
             in_file.write_bytes(arr_c.tobytes())
-            # Convert Windows path to WSL path
             wsl_in = in_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
             input_args.extend(["--input", f"{name}:{wsl_in}"])
+
+        # Write initial states
+        state_in_args = []
+        for name, arr in states_in.items():
+            s_file = tmp_path / f"state_in_{name}.bin"
+            arr_c = np.ascontiguousarray(arr)
+            s_file.write_bytes(arr_c.tobytes())
+            wsl_s = s_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
+            state_in_args.extend(["--state-in", f"{name}:{wsl_s}"])
 
         # Prepare outputs
         output_args = []
@@ -56,6 +67,15 @@ def run_compiled_model_wsl(
             wsl_out = out_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
             output_args.extend(["--output", f"{tid}:{wsl_out}"])
 
+        # Prepare state outputs
+        state_out_args = []
+        sout_files: dict[str, Path] = {}
+        for sname in states_out:
+            s_file = tmp_path / f"state_out_{sname}.bin"
+            sout_files[sname] = s_file
+            wsl_s = s_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
+            state_out_args.extend(["--state-out", f"{sname}:{wsl_s}"])
+
         # Symbol args
         symbol_args = []
         for k, v in symbols.items():
@@ -63,11 +83,12 @@ def run_compiled_model_wsl(
 
         wsl_model = model_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
 
+        all_args = input_args + state_in_args + output_args + state_out_args + symbol_args
         cmd = [
             "wsl",
             "bash",
             "-c",
-            f"{executable_path} {wsl_model} {' '.join(input_args)} {' '.join(output_args)} {' '.join(symbol_args)}",
+            f"{executable_path} {wsl_model} {' '.join(all_args)}",
         ]
 
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -82,6 +103,15 @@ def run_compiled_model_wsl(
                 raise RuntimeError(f"Expected output file not generated for tensor {tid}")
             raw_bytes = out_file.read_bytes()
             results[tid] = np.frombuffer(raw_bytes, dtype=np.float32)
+
+        if states_out:
+            res_states: dict[str, np.ndarray] = {}
+            for sname, sfile in sout_files.items():
+                if not sfile.exists():
+                    raise RuntimeError(f"Expected state file not generated for state {sname}")
+                raw_bytes = sfile.read_bytes()
+                res_states[sname] = np.frombuffer(raw_bytes, dtype=np.float32)
+            return results, res_states
 
         return results
 
