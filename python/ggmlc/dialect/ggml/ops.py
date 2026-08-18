@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from enum import IntEnum, unique
+
+
+@unique
+class GGMLOpCode(IntEnum):
+    """GGML C-API matching opcodes from ggml.h."""
+
+    GGML_OP_NONE = 0
+    GGML_OP_DUP = 1
+    GGML_OP_ADD = 2
+    GGML_OP_ADD_ID = 3
+    GGML_OP_ADD1 = 4
+    GGML_OP_ACC = 5
+    GGML_OP_SUB = 6
+    GGML_OP_MUL = 7
+    GGML_OP_DIV = 8
+    GGML_OP_SQR = 9
+    GGML_OP_SQRT = 10
+    GGML_OP_LOG = 11
+    GGML_OP_SIN = 12
+    GGML_OP_COS = 13
+    GGML_OP_SUM = 14
+    GGML_OP_SUM_ROWS = 15
+    GGML_OP_CUMSUM = 16
+    GGML_OP_MEAN = 17
+    GGML_OP_ARGMAX = 18
+    GGML_OP_COUNT_EQUAL = 19
+    GGML_OP_REPEAT = 20
+    GGML_OP_REPEAT_BACK = 21
+    GGML_OP_CONCAT = 22
+    GGML_OP_SILU_BACK = 23
+    GGML_OP_NORM = 24
+    GGML_OP_RMS_NORM = 25
+    GGML_OP_RMS_NORM_BACK = 26
+    GGML_OP_GROUP_NORM = 27
+    GGML_OP_L2_NORM = 28
+    GGML_OP_MUL_MAT = 29
+    GGML_OP_MUL_MAT_ID = 30
+    GGML_OP_OUT_PROD = 31
+    GGML_OP_SCALE = 32
+    GGML_OP_SET = 33
+    GGML_OP_CPY = 34
+    GGML_OP_CONT = 35
+    GGML_OP_RESHAPE = 36
+    GGML_OP_VIEW = 37
+    GGML_OP_PERMUTE = 38
+    GGML_OP_TRANSPOSE = 39
+    GGML_OP_GET_ROWS = 40
+    GGML_OP_GET_ROWS_BACK = 41
+    GGML_OP_SET_ROWS = 42
+    GGML_OP_DIAG = 43
+    GGML_OP_DIAG_MASK_INF = 44
+    GGML_OP_DIAG_MASK_ZERO = 45
+    GGML_OP_SOFT_MAX = 46
+    GGML_OP_SOFT_MAX_BACK = 47
+    GGML_OP_ROPE = 48
+    GGML_OP_ROPE_BACK = 49
+    GGML_OP_CLAMP = 50
+    GGML_OP_FLASH_ATTN_EXT = 75
+    GGML_OP_UNARY = 91
+
+
+@unique
+class GGMLUnaryOpCode(IntEnum):
+    """GGML Unary Opcodes from ggml.h."""
+
+    GGML_UNARY_OP_ABS = 0
+    GGML_UNARY_OP_SGN = 1
+    GGML_UNARY_OP_NEG = 2
+    GGML_UNARY_OP_STEP = 3
+    GGML_UNARY_OP_TANH = 4
+    GGML_UNARY_OP_ELU = 5
+    GGML_UNARY_OP_RELU = 6
+    GGML_UNARY_OP_SIGMOID = 7
+    GGML_UNARY_OP_GELU = 8
+    GGML_UNARY_OP_GELU_QUICK = 9
+    GGML_UNARY_OP_SILU = 10
+
+
+@unique
+class GGMLType(IntEnum):
+    """GGML tensor data types matching ggml_type enum in ggml.h."""
+
+    GGML_TYPE_F32 = 0
+    GGML_TYPE_F16 = 1
+    GGML_TYPE_Q4_0 = 2
+    GGML_TYPE_Q4_1 = 3
+    GGML_TYPE_Q5_0 = 6
+    GGML_TYPE_Q5_1 = 7
+    GGML_TYPE_Q8_0 = 8
+    GGML_TYPE_Q8_1 = 9
+    GGML_TYPE_Q2_K = 10
+    GGML_TYPE_Q3_K = 11
+    GGML_TYPE_Q4_K = 12
+    GGML_TYPE_Q5_K = 13
+    GGML_TYPE_Q6_K = 14
+    GGML_TYPE_Q8_K = 15
+    GGML_TYPE_IQ2_XXS = 16
+    GGML_TYPE_IQ2_XS = 17
+    GGML_TYPE_IQ3_XXS = 18
+    GGML_TYPE_IQ1_S = 19
+    GGML_TYPE_IQ4_NL = 20
+    GGML_TYPE_IQ3_S = 21
+    GGML_TYPE_IQ2_S = 22
+    GGML_TYPE_IQ4_XS = 23
+    GGML_TYPE_I8 = 24
+    GGML_TYPE_I16 = 25
+    GGML_TYPE_I32 = 26
+    GGML_TYPE_I64 = 27
+    GGML_TYPE_F64 = 28
+    GGML_TYPE_BF16 = 29
