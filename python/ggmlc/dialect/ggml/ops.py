@@ -58,9 +58,11 @@ class GGMLOpCode(IntEnum):
     GGML_OP_ROPE = 48
     GGML_OP_ROPE_BACK = 49
     GGML_OP_CLAMP = 50
-    GGML_OP_FLASH_ATTN_EXT = 75
+    GGML_OP_CONV_2D = 56
+    GGML_OP_POOL_2D = 61
+    GGML_OP_FLASH_ATTN_EXT = 74
     GGML_OP_UNARY = 91
-    GGML_OP_GLU = 99
+    GGML_OP_GLU = 100
 
 
 @unique

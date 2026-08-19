@@ -2,3 +2,7 @@
 build
 .pytest_cache
 __pycache__
+*.bin
+*.ggmlc
+*.gguf
+scratch/

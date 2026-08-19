@@ -24,6 +24,7 @@ class OpCode(Enum):
     COS = "cos"
     TANH = "tanh"
     POW = "pow"
+    CAST = "cast"
     CONTIGUOUS = "contiguous"
 
     # Neural network activations & norms
@@ -57,11 +58,21 @@ class OpCode(Enum):
     CONCAT = "concat"
     SPLIT = "split"
     EXPAND = "expand"
+    REPEAT = "repeat"
     SQUEEZE = "squeeze"
     UNSQUEEZE = "unsqueeze"
+    ARANGE = "arange"
 
     # Custom/Special
     SWIGLU = "swiglu"
+
+    # Vision & Convolution
+    CONV2D = "conv2d"
+    MAX_POOL2D = "max_pool2d"
+    AVG_POOL2D = "avg_pool2d"
+    ADAPTIVE_AVG_POOL2D = "adaptive_avg_pool2d"
+    BATCH_NORM = "batch_norm"
+    GATHER = "gather"
 
 
 @dataclass

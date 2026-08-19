@@ -107,37 +107,60 @@ def lower_to_ggml(canonical_graph: Graph) -> GGMLExecutionGraph:
         )
         ggml_graph.tensors[tid] = ggml_tensor
 
-    # Optimize MATMUL weight tensor layouts (for JAX [K, N] weights -> GGML [K, N] with transposed data)
+    # 1.1 Convert parameter weights for Linear layers
+    converted_weights: set[int] = set()
     for op in canonical_graph.nodes:
-        if op.opcode == OpCode.MATMUL:
-            b_id = op.inputs[1]
-            b_t = ggml_graph.tensors[b_id]
-            if (
-                b_t.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
-                and b_t.data is not None
-                and b_t.data.ndim == 2
-            ):
-                k_val, n_val = b_t.data.shape
-                c_dims = canonical_graph.get_tensor(b_id).shape.dims
-                if (
-                    len(c_dims) == 2
-                    and c_dims[0].evaluate({}) == k_val
-                    and c_dims[1].evaluate({}) == n_val
-                ):
-                    b_t.data = np.ascontiguousarray(b_t.data.T)
-                    b_t.ne = (StaticDim(k_val), StaticDim(n_val), StaticDim(1), StaticDim(1))
+        if op.opcode == OpCode.LINEAR:
+            x_id = op.inputs[0]
+            w_id = op.inputs[1]
+            if w_id in converted_weights:
+                continue
+            converted_weights.add(w_id)
+            x_t = canonical_graph.get_tensor(x_id)
+            w_t = ggml_graph.tensors[w_id]
+            c_w = canonical_graph.get_tensor(w_id)
+            if w_t.data is not None and w_t.data.ndim == 2:
+                k_val = x_t.shape.dims[-1].evaluate({})
+                d0 = c_w.shape.dims[0].evaluate({})
+                d1 = c_w.shape.dims[1].evaluate({})
+                is_addmm = op.attributes.get("is_addmm", 0) != 0
+                if is_addmm or (d0 == k_val and d1 != k_val):
+                    # Hugging Face Conv1D / addmm: weight shape in PyTorch is (in_features, out_features)
+                    # We transpose to (out_features, in_features) so GGML ne = [in_features, out_features]
+                    # gets contiguous rows of in_features elements.
+                    w_t.data = np.ascontiguousarray(w_t.data.T)
+                    w_t.ne = (
+                        StaticDim(k_val),
+                        StaticDim(d1 if d0 == k_val else d0),
+                        StaticDim(1),
+                        StaticDim(1),
+                    )
+                else:
+                    # Standard PyTorch Linear: weight shape in PyTorch is (out_features, in_features)
+                    # PyTorch C-order memory already has out_features rows of in_features elements.
+                    # GGML ne = [in_features, out_features] consumes these contiguous rows directly.
+                    w_t.data = np.ascontiguousarray(w_t.data)
+                    w_t.ne = (
+                        StaticDim(k_val),
+                        StaticDim(d0 if d1 == k_val else d1),
+                        StaticDim(1),
+                        StaticDim(1),
+                    )
 
     ggml_graph.symbol_table = sorted(symbols)
 
     # 2. Lower operations
+    op_by_id = {op.id: op for op in canonical_graph.nodes}
     for op in canonical_graph.nodes:
-        ggml_op = _lower_op(op, canonical_graph, ggml_graph)
+        ggml_op = _lower_op(op, canonical_graph, ggml_graph, op_by_id)
         ggml_graph.nodes.append(ggml_op)
 
     return ggml_graph
 
 
-def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGMLOpDef:
+def _lower_op(
+    op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph, op_by_id: dict[int, Operation]
+) -> GGMLOpDef:
     opcode = op.opcode
     in_ids = list(op.inputs)
     out_ids = list(op.outputs)
@@ -160,6 +183,13 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
     elif opcode == OpCode.POW:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SQR, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.MEAN:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", -1)
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim
+        attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MEAN, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.CONTIGUOUS:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONT, in_ids, out_ids, attrs, op.name)
@@ -192,6 +222,28 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
             {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SILU)},
             op.name,
         )
+    elif opcode == OpCode.TANH:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_TANH)},
+            op.name,
+        )
+    elif opcode == OpCode.NEG:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_NEG)},
+            op.name,
+        )
+    elif opcode == OpCode.SIN:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SIN, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.COS:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_COS, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.RMS_NORM:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RMS_NORM, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.SOFTMAX:
@@ -216,6 +268,20 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         attrs["transpose_in0"] = 0 if is_param else 1
         mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
+    elif opcode == OpCode.CONV2D:
+        # PyTorch conv2d: in_ids = [x, weight, bias (optional)]
+        # In GGML conv_2d: first arg is weight [KW, KH, IC, OC], second arg is x [W, H, C, N]
+        x_id = in_ids[0]
+        w_id = in_ids[1]
+        mapped_inputs = [w_id, x_id]
+        if len(in_ids) > 2:
+            mapped_inputs.append(in_ids[2])
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONV_2D, mapped_inputs, out_ids, attrs, op.name)
+    elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.ADAPTIVE_AVG_POOL2D:
+        attrs["is_adaptive"] = 1
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.PERMUTE:
@@ -237,9 +303,9 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_PERMUTE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.TRANSPOSE:
         in_t = c_graph.get_tensor(in_ids[0])
-        R = len(in_t.shape.dims)
         d0 = attrs.get("dim0", 0)
         d1 = attrs.get("dim1", 1)
+        R = len(in_t.shape.dims)
         if d0 < 0:
             d0 += R
         if d1 < 0:
@@ -264,22 +330,28 @@ def _lower_op(op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph) -> GGM
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
         dim = attrs.get("dim", 0)
-        ggml_dim = R - 1 - dim if dim >= 0 else -1 - dim
+        if dim < 0:
+            dim += R
+        ggml_dim = max(0, R - 1 - dim)
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_VIEW, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.CONCAT:
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
         dim = attrs.get("dim", 0)
-        ggml_dim = R - 1 - dim if dim >= 0 else -1 - dim
+        if dim < 0:
+            dim += R
+        ggml_dim = max(0, R - 1 - dim)
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
-    elif opcode == OpCode.EXPAND:
+    elif opcode in (OpCode.EXPAND, OpCode.REPEAT):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_REPEAT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LAYER_NORM:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NORM, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.EMBEDDING:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GET_ROWS, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.CAST:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CPY, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.SDPA:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ROPE:

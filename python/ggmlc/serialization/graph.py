@@ -161,8 +161,12 @@ def serialize_ggml_graph(graph: GGMLExecutionGraph) -> bytes:
         for out_id in op.outputs:
             f.write(struct.pack("<I", out_id))
 
-        # Serialized attributes (int attributes e.g. unary_op)
-        int_attrs = {k: int(v) for k, v in op.attributes.items() if isinstance(v, (int, bool))}
+        # Serialized attributes (int/float attributes e.g. unary_op, exponent)
+        int_attrs = {
+            k: round(v) if isinstance(v, float) else int(v)
+            for k, v in op.attributes.items()
+            if isinstance(v, (int, bool, float))
+        }
         f.write(struct.pack("<I", len(int_attrs)))
         for k, v in int_attrs.items():
             _write_str(f, k)

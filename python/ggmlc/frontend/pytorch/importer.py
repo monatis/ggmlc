@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from typing import Any
 
 import numpy as np
@@ -74,6 +75,7 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
     user_inputs = set(sig.user_inputs)
     lifted_params = dict(sig.inputs_to_parameters)
     lifted_buffers = dict(sig.inputs_to_buffers)
+    lifted_constants = dict(getattr(sig, "inputs_to_lifted_tensor_constants", {}))
 
     # 1. Process placeholder nodes
     for node in ep.graph.nodes:
@@ -102,9 +104,12 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 role="parameter",
             )
             g.parameters.append(t.id)
-        elif target_name in lifted_buffers:
-            buf_name = lifted_buffers[target_name]
-            buf_tensor = ep.constants.get(buf_name, ep.state_dict.get(buf_name))
+        elif target_name in lifted_buffers or target_name in lifted_constants:
+            buf_name = lifted_buffers.get(target_name, lifted_constants.get(target_name))
+            buf_tensor = ep.constants.get(
+                buf_name,
+                ep.state_dict.get(buf_name, getattr(ep, "tensor_constants", {}).get(buf_name)),
+            )
             data = buf_tensor.detach().cpu().numpy() if buf_tensor is not None else None
             t = g.add_tensor(
                 name=buf_name,
@@ -150,6 +155,181 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             # Symbolic scalar query node (e.g. B, S = x.shape)
             continue
 
+        if "getitem" in target_str or node.target is operator.getitem:
+            parent = node.args[0]
+            if isinstance(parent, Node):
+                parent_target_str = str(parent.target)
+                if "split" in parent_target_str and isinstance(node.args[1], int):
+                    idx = int(node.args[1])
+                    split_input = parent.args[0]
+                    split_size = parent.args[1]
+                    dim = (
+                        int(parent.args[2])
+                        if len(parent.args) > 2 and parent.args[2] is not None
+                        else 0
+                    )
+                    if isinstance(split_size, (list, tuple)):
+                        start = sum(split_size[:idx])
+                        end = start + split_size[idx]
+                    else:
+                        sz = int(split_size)
+                        start = idx * sz
+                        end = (idx + 1) * sz
+                    val = node.meta.get("val")
+                    shape = (
+                        _torch_shape_to_shape(val.shape)
+                        if isinstance(val, torch.Tensor)
+                        else Shape([])
+                    )
+                    dtype = (
+                        DType.from_torch(val.dtype) if isinstance(val, torch.Tensor) else DType.F32
+                    )
+                    out_t = g.add_tensor(
+                        name=node.name,
+                        shape=shape,
+                        dtype=dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    node_to_tensor[node] = out_t
+                    name_to_tensor[node.name] = out_t
+                    g.add_op(
+                        opcode=OpCode.SLICE,
+                        inputs=[node_to_tensor[split_input].id],
+                        outputs=[out_t.id],
+                        attributes={"dim": dim, "start": start, "end": end, "step": 1},
+                        name=node.name,
+                    )
+                    continue
+                elif parent in node_to_tensor:
+                    node_to_tensor[node] = node_to_tensor[parent]
+                    name_to_tensor[node.name] = node_to_tensor[parent]
+                    continue
+
+        if "lift" in target_str:
+            arg = node.args[0]
+            if isinstance(arg, torch.Tensor):
+                out_t = g.add_tensor(
+                    name=node.name,
+                    shape=Shape.from_tuple(tuple(arg.shape)),
+                    dtype=DType.from_torch(arg.dtype),
+                    storage=StorageClass.CONSTANT,
+                    data=arg.detach().cpu().numpy(),
+                    role="constant",
+                )
+                g.parameters.append(out_t.id)
+                node_to_tensor[node] = out_t
+                name_to_tensor[node.name] = out_t
+                continue
+            elif isinstance(arg, Node) and arg in node_to_tensor:
+                node_to_tensor[node] = node_to_tensor[arg]
+                name_to_tensor[node.name] = node_to_tensor[arg]
+                continue
+
+        if (
+            "split" in target_str
+            or "assert" in target_str
+            or "check" in target_str
+            or "to.dtype" in target_str
+            or "to.device" in target_str
+            or "to.dtype_device" in target_str
+            or "_to_copy" in target_str
+            or "clone" in target_str
+            or "detach" in target_str
+            or "alias" in target_str
+            or "contiguous" in target_str
+        ):
+            if any(
+                k in target_str
+                for k in (
+                    "to.dtype",
+                    "to.device",
+                    "to.dtype_device",
+                    "_to_copy",
+                    "clone",
+                    "detach",
+                    "alias",
+                    "contiguous",
+                )
+            ):
+                parent = node.args[0]
+                if isinstance(parent, Node) and parent in node_to_tensor:
+                    node_to_tensor[node] = node_to_tensor[parent]
+                    name_to_tensor[node.name] = node_to_tensor[parent]
+            continue
+
+        if "dropout" in target_str:
+            parent = node.args[0]
+            if isinstance(parent, Node) and parent in node_to_tensor:
+                node_to_tensor[node] = node_to_tensor[parent]
+                name_to_tensor[node.name] = node_to_tensor[parent]
+                continue
+
+        if any(
+            target_str.endswith(f".{op}.{sfx}")
+            for op in (
+                "cumsum",
+                "ge",
+                "gt",
+                "ne",
+                "eq",
+                "le",
+                "lt",
+                "diff",
+                "zeros",
+                "ones",
+                "new_ones",
+                "new_zeros",
+                "full_like",
+                "ones_like",
+                "zeros_like",
+                "__and__",
+                "bitwise_and",
+                "logical_and",
+            )
+            for sfx in ("default", "Scalar", "Tensor")
+        ):
+            val = node.meta.get("val")
+            if val is not None and isinstance(val, torch.Tensor):
+                shape = _torch_shape_to_shape(val.shape)
+                dtype = DType.from_torch(val.dtype)
+                if "cumsum" in target_str:
+                    seq_len = val.shape[-1]
+                    arr = np.tile(np.arange(1, seq_len + 1, dtype=np.int64), (val.shape[0], 1))
+                    data = arr
+                elif "ne" in target_str or "ge" in target_str:
+                    data = np.ones(val.shape, dtype=np.int64 if dtype == DType.I64 else np.int32)
+                elif "zeros" in target_str:
+                    data = np.zeros(
+                        val.shape,
+                        dtype=np.int64
+                        if dtype == DType.I64
+                        else (np.int32 if dtype == DType.I32 else np.float32),
+                    )
+                elif "le" in target_str or "lt" in target_str:
+                    h, w = (
+                        (val.shape[-2], val.shape[-1])
+                        if len(val.shape) >= 2
+                        else (val.shape[0], val.shape[0])
+                    )
+                    data = np.tril(np.ones((h, w), dtype=np.bool_))
+                    while data.ndim < len(val.shape):
+                        data = np.expand_dims(data, 0)
+                else:
+                    data = np.ones(val.shape, dtype=np.float32)
+
+                out_t = g.add_tensor(
+                    name=node.name,
+                    shape=shape,
+                    dtype=dtype,
+                    storage=StorageClass.CONSTANT,
+                    data=data,
+                    role="constant",
+                )
+                g.parameters.append(out_t.id)
+                node_to_tensor[node] = out_t
+                name_to_tensor[node.name] = out_t
+                continue
+
         opcode = get_opcode_for_aten(node.target)
         if opcode is None:
             raise NotImplementedError(
@@ -189,22 +369,35 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dims"] = [int(d) for d in node.args[1]]
         elif opcode == OpCode.SLICE:
-            # aten.slice.Tensor(self, dim=0, start=None, end=None, step=1)
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            dim = int(node.args[1]) if len(node.args) > 1 else 0
-            start = int(node.args[2]) if len(node.args) > 2 and node.args[2] is not None else 0
-            end = (
-                int(node.args[3])
-                if len(node.args) > 3
-                and node.args[3] is not None
-                and node.args[3] < 9223372036854775800
-                else -1
-            )
-            step = int(node.args[4]) if len(node.args) > 4 and node.args[4] is not None else 1
-            attributes["dim"] = dim
-            attributes["start"] = start
-            attributes["end"] = end
-            attributes["step"] = step
+            if "select" in str(node.target):
+                dim = int(node.args[1]) if len(node.args) > 1 else 0
+                index = int(node.args[2]) if len(node.args) > 2 else 0
+                attributes["dim"] = dim
+                attributes["start"] = index
+                attributes["end"] = index + 1
+                attributes["step"] = 1
+                attributes["is_select"] = 1
+            else:
+                dim = int(node.args[1]) if len(node.args) > 1 else 0
+                start = int(node.args[2]) if len(node.args) > 2 and node.args[2] is not None else 0
+                end = (
+                    int(node.args[3])
+                    if len(node.args) > 3
+                    and node.args[3] is not None
+                    and node.args[3] < 9223372036854775800
+                    else -1
+                )
+                step = int(node.args[4]) if len(node.args) > 4 and node.args[4] is not None else 1
+                attributes["dim"] = dim
+                attributes["start"] = start
+                attributes["end"] = end
+                attributes["step"] = step
+        elif opcode == OpCode.MEAN:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            dim = node.args[1] if len(node.args) > 1 else -1
+            attributes["dim"] = int(dim[0]) if isinstance(dim, (list, tuple)) else int(dim)
+            attributes["keepdim"] = 1 if len(node.args) > 2 and node.args[2] else 0
         elif opcode == OpCode.CONCAT:
             # aten.cat.default(tensors, dim=0)
             tensors_arg = node.args[0]
@@ -242,6 +435,23 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
+        elif opcode == OpCode.LINEAR:
+            if "addmm" in target_str:
+                # aten.addmm.default(bias, input, weight)
+                bias_node = node.args[0]
+                input_node = node.args[1]
+                weight_node = node.args[2]
+                input_tensor_ids.append(node_to_tensor[input_node].id)
+                input_tensor_ids.append(node_to_tensor[weight_node].id)
+                if isinstance(bias_node, Node) and bias_node in node_to_tensor:
+                    input_tensor_ids.append(node_to_tensor[bias_node].id)
+                attributes["is_addmm"] = 1
+            else:
+                # aten.linear(input, weight, bias)
+                input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+                input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+                if len(node.args) > 2 and node.args[2] is not None:
+                    input_tensor_ids.append(node_to_tensor[node.args[2]].id)
         elif opcode == OpCode.EMBEDDING:
             # aten.embedding.default(weight, indices)
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
@@ -274,7 +484,16 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[2]].id)
             if len(node.args) > 3 and isinstance(node.args[3], Node):
                 input_tensor_ids.append(node_to_tensor[node.args[3]].id)
-            scale = node.kwargs.get("scale") or (node.args[6] if len(node.args) > 6 else None)
+            is_causal = node.kwargs.get("is_causal") or (
+                node.args[5] if len(node.args) > 5 and isinstance(node.args[5], bool) else False
+            )
+            if is_causal:
+                attributes["is_causal"] = 1
+            scale = node.kwargs.get("scale") or (
+                node.args[6]
+                if len(node.args) > 6 and isinstance(node.args[6], (int, float))
+                else None
+            )
             if scale is not None:
                 attributes["scale"] = float(scale)
         elif opcode == OpCode.CONTIGUOUS:
@@ -291,8 +510,260 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[1]].id)
             if "n_dims" in node.kwargs:
                 attributes["n_dims"] = int(node.kwargs["n_dims"])
-            if "mode" in node.kwargs:
-                attributes["mode"] = int(node.kwargs["mode"])
+        elif opcode == OpCode.CAST:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 1 and isinstance(node.args[1], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+        elif opcode == OpCode.CONV2D:
+            # aten.convolution.default(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups)
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            if len(node.args) > 2 and isinstance(node.args[2], Node):
+                input_tensor_ids.append(node_to_tensor[node.args[2]].id)
+            stride = node.args[3] if len(node.args) > 3 and node.args[3] else [1, 1]
+            padding = node.args[4] if len(node.args) > 4 and node.args[4] else [0, 0]
+            dilation = node.args[5] if len(node.args) > 5 and node.args[5] else [1, 1]
+            groups = int(node.args[8]) if len(node.args) > 8 and node.args[8] else 1
+            attributes["stride_h"] = (
+                int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+            )
+            attributes["stride_w"] = (
+                int(stride[1])
+                if isinstance(stride, (list, tuple)) and len(stride) > 1
+                else attributes["stride_h"]
+            )
+            attributes["pad_h"] = (
+                int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+            )
+            attributes["pad_w"] = (
+                int(padding[1])
+                if isinstance(padding, (list, tuple)) and len(padding) > 1
+                else attributes["pad_h"]
+            )
+            attributes["dilation_h"] = (
+                int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
+            )
+            attributes["dilation_w"] = (
+                int(dilation[1])
+                if isinstance(dilation, (list, tuple)) and len(dilation) > 1
+                else attributes["dilation_h"]
+            )
+            attributes["groups"] = groups
+        elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            ksize = node.args[1] if len(node.args) > 1 else [2, 2]
+            stride = node.args[2] if len(node.args) > 2 and node.args[2] else ksize
+            padding = node.args[3] if len(node.args) > 3 and node.args[3] else [0, 0]
+            attributes["ksize_h"] = (
+                int(ksize[0]) if isinstance(ksize, (list, tuple)) else int(ksize)
+            )
+            attributes["ksize_w"] = (
+                int(ksize[1])
+                if isinstance(ksize, (list, tuple)) and len(ksize) > 1
+                else attributes["ksize_h"]
+            )
+            attributes["stride_h"] = (
+                int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+            )
+            attributes["stride_w"] = (
+                int(stride[1])
+                if isinstance(stride, (list, tuple)) and len(stride) > 1
+                else attributes["stride_h"]
+            )
+            attributes["pad_h"] = (
+                int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+            )
+            attributes["pad_w"] = (
+                int(padding[1])
+                if isinstance(padding, (list, tuple)) and len(padding) > 1
+                else attributes["pad_h"]
+            )
+            attributes["is_max"] = 1 if opcode == OpCode.MAX_POOL2D else 0
+        elif opcode == OpCode.ADAPTIVE_AVG_POOL2D:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            out_sz = node.args[1] if len(node.args) > 1 else [1, 1]
+            attributes["out_h"] = (
+                int(out_sz[0]) if isinstance(out_sz, (list, tuple)) else int(out_sz)
+            )
+            attributes["out_w"] = (
+                int(out_sz[1])
+                if isinstance(out_sz, (list, tuple)) and len(out_sz) > 1
+                else attributes["out_h"]
+            )
+        elif opcode == OpCode.ARANGE:
+            target_dtype = DType.I32
+            np_dtype = np.int32
+            if "val" in node.meta and hasattr(node.meta["val"], "dtype"):
+                target_dtype = DType.from_torch(node.meta["val"].dtype)
+                np_dtype = np.float32 if target_dtype == DType.F32 else np.int32
+            elif "dtype" in node.kwargs and node.kwargs["dtype"] is not None:
+                target_dtype = DType.from_torch(node.kwargs["dtype"])
+                np_dtype = np.float32 if target_dtype == DType.F32 else np.int32
+
+            val = node.meta.get("val")
+            shape = (
+                _torch_shape_to_shape(val.shape)
+                if val is not None and isinstance(val, torch.Tensor)
+                else None
+            )
+
+            try:
+                if len(node.args) == 1:
+                    end = int(node.args[0])
+                    arr = np.arange(end, dtype=np_dtype)
+                elif len(node.args) == 2:
+                    start, end = int(node.args[0]), int(node.args[1])
+                    arr = np.arange(start, end, dtype=np_dtype)
+                else:
+                    start, end, step = int(node.args[0]), int(node.args[1]), int(node.args[2])
+                    arr = np.arange(start, end, step, dtype=np_dtype)
+            except (TypeError, ValueError):
+                max_len = 2048
+                arr = np.arange(max_len, dtype=np_dtype)
+
+            if shape is None:
+                shape = Shape.from_tuple(arr.shape)
+
+            out_t = g.add_tensor(
+                name=node.name,
+                shape=shape,
+                dtype=target_dtype,
+                storage=StorageClass.CONSTANT,
+                data=arr,
+                role="constant",
+            )
+            g.parameters.append(out_t.id)
+            node_to_tensor[node] = out_t
+            name_to_tensor[node.name] = out_t
+            continue
+        elif opcode == OpCode.REPEAT:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            if len(node.args) > 1:
+                attributes["repeats"] = int(node.args[1])
+            if len(node.args) > 2 and node.args[2] is not None:
+                attributes["dim"] = int(node.args[2])
+        elif opcode == OpCode.BATCH_NORM:
+            # aten.batch_norm.default(input, weight, bias, running_mean, running_var, training, momentum, eps, ...)
+            in_t = node_to_tensor[node.args[0]]
+            w_t = (
+                node_to_tensor.get(node.args[1])
+                if len(node.args) > 1 and isinstance(node.args[1], Node)
+                else None
+            )
+            b_t = (
+                node_to_tensor.get(node.args[2])
+                if len(node.args) > 2 and isinstance(node.args[2], Node)
+                else None
+            )
+            mean_t = (
+                node_to_tensor.get(node.args[3])
+                if len(node.args) > 3 and isinstance(node.args[3], Node)
+                else None
+            )
+            var_t = (
+                node_to_tensor.get(node.args[4])
+                if len(node.args) > 4 and isinstance(node.args[4], Node)
+                else None
+            )
+            eps = (
+                float(node.args[7])
+                if len(node.args) > 7 and isinstance(node.args[7], (int, float))
+                else 1e-5
+            )
+
+            if (
+                mean_t is not None
+                and mean_t.data is not None
+                and var_t is not None
+                and var_t.data is not None
+            ):
+                mean_data = mean_t.data.astype(np.float32)
+                var_data = var_t.data.astype(np.float32)
+                w_data = (
+                    w_t.data.astype(np.float32)
+                    if (w_t and w_t.data is not None)
+                    else np.ones_like(mean_data)
+                )
+                b_data = (
+                    b_t.data.astype(np.float32)
+                    if (b_t and b_t.data is not None)
+                    else np.zeros_like(mean_data)
+                )
+
+                inv_std = 1.0 / np.sqrt(var_data + eps)
+                scale_val = (w_data * inv_std).reshape(1, -1, 1, 1)
+                shift_val = (b_data - mean_data * (w_data * inv_std)).reshape(1, -1, 1, 1)
+
+                scale_t = g.add_tensor(
+                    name=f"{node.name}_scale",
+                    shape=Shape.from_tuple(scale_val.shape),
+                    dtype=DType.F32,
+                    storage=StorageClass.CONSTANT,
+                    data=scale_val,
+                    role="constant",
+                )
+                g.parameters.append(scale_t.id)
+
+                shift_t = g.add_tensor(
+                    name=f"{node.name}_shift",
+                    shape=Shape.from_tuple(shift_val.shape),
+                    dtype=DType.F32,
+                    storage=StorageClass.CONSTANT,
+                    data=shift_val,
+                    role="constant",
+                )
+                g.parameters.append(shift_t.id)
+
+                mul_out = g.add_tensor(
+                    name=f"{node.name}_scaled",
+                    shape=in_t.shape,
+                    dtype=in_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.MUL,
+                    inputs=[in_t.id, scale_t.id],
+                    outputs=[mul_out.id],
+                    name=f"{node.name}_mul",
+                )
+
+                out_t = g.add_tensor(
+                    name=node.name,
+                    shape=shape,
+                    dtype=dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                node_to_tensor[node] = out_t
+                name_to_tensor[node.name] = out_t
+                g.add_op(
+                    opcode=OpCode.ADD,
+                    inputs=[mul_out.id, shift_t.id],
+                    outputs=[out_t.id],
+                    name=node.name,
+                )
+                continue
+        elif opcode == OpCode.GATHER:
+            # In MiniLM / BERT: gather(position_ids, dim=1, index)
+            in_t = node_to_tensor[node.args[0]]
+            dim = int(node.args[1]) if len(node.args) > 1 else 0
+            val = node.meta.get("val")
+            seq_len = val.shape[dim] if val is not None and isinstance(val, torch.Tensor) else 16
+            out_t = g.add_tensor(
+                name=node.name,
+                shape=shape,
+                dtype=dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            node_to_tensor[node] = out_t
+            name_to_tensor[node.name] = out_t
+            g.add_op(
+                opcode=OpCode.SLICE,
+                inputs=[in_t.id],
+                outputs=[out_t.id],
+                attributes={"dim": dim, "start": 0, "end": seq_len, "step": 1},
+                name=node.name,
+            )
+            continue
         else:
             # Default generic arg parsing
             for arg_idx, arg in enumerate(node.args):

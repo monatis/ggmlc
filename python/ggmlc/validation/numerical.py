@@ -25,6 +25,7 @@ def run_compiled_model_wsl(
     states_in: dict[str, np.ndarray] | None = None,
     states_out: list[str] | None = None,
     executable_path: str | None = None,
+    n_threads: int = 1,
 ) -> dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[str, np.ndarray]]:
     """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
     if executable_path is None:
@@ -81,9 +82,13 @@ def run_compiled_model_wsl(
         for k, v in symbols.items():
             symbol_args.extend(["--symbol", f"{k}={v}"])
 
+        thread_args = ["--threads", str(n_threads)]
+
         wsl_model = model_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
 
-        all_args = input_args + state_in_args + output_args + state_out_args + symbol_args
+        all_args = (
+            input_args + state_in_args + output_args + state_out_args + symbol_args + thread_args
+        )
         cmd = [
             "wsl",
             "bash",
