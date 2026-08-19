@@ -1,6 +1,6 @@
 # ggmlc Developer & Contributor Guide
 
-Welcome to the `ggmlc` developer guide. This document provides step-by-step instructions for extending the compiler frontend, Canonical IR, dialect lowering, C++ generic runtime, and testing infrastructure.
+Welcome to the `ggmlc` developer guide. This document provides step-by-step instructions for extending the compiler frontend, Canonical IR, dialect lowering, optimization passes, quantization algorithms, C++ generic runtime, and testing infrastructure.
 
 ---
 
@@ -21,8 +21,6 @@ Welcome to the `ggmlc` developer guide. This document provides step-by-step inst
 ---
 
 ## 2. Step-by-Step: Adding a New Operator
-
-Let's walk through an example of adding a new operator (e.g. `GELU` or `CONV2D`).
 
 ### Step 1: Define the Canonical OpCode & Schema
 In `python/ggmlc/ir/op.py`:
@@ -100,42 +98,63 @@ def test_my_new_op_numerical_parity():
     g = lower_to_ggml(exp.main_graph)
     ser = serialize_ggml_graph(g)
     res = run_compiled_model_wsl(ser, {"x": x.numpy()}, [exp.main_graph.outputs[0]])
-    actual_out = res[exp.main_graph.outputs[0]].reshape(ref_out.shape)
+    out = res[exp.main_graph.outputs[0]].reshape(ref_out.shape)
 
-    cmp = check_numerical_accuracy(ref_out, actual_out, atol=1e-5)
-    assert cmp.passed, cmp.message
+    assert np.allclose(ref_out, out, atol=1e-4)
 ```
 
 ---
 
-## 3. Adding a New Architecture to Hub Models
+## 3. Step-by-Step: Adding an Optimization Pass
 
-When adding a full neural network model from Hugging Face / TorchVision:
-1. Add the loader function in `examples/models/hub_models.py`:
-   - Download or instantiate the pretrained model in `.eval()` mode.
-   - Construct dummy inputs with appropriate shape and dtype.
-   - If the raw model's forward returns custom dataclasses (like `BaseModelOutputWithPooling`), wrap it with a lightweight `nn.Module` to expose exact tensor outputs.
-2. Add end-to-end test in `tests/e2e/test_full_models.py`:
-   - Call `_verify_full_model_e2e(model, inputs, input_names, "model_name", atol=...)`.
-3. Verify autoregressive generation parity if it is a Causal LM using `verify_generation_parity_with_pytorch`.
+1. **Subclass `Pass`** in `python/ggmlc/transforms/`:
+   ```python
+   from ggmlc.transforms.base import Pass, GraphTransformResult, PassStats
+   from ggmlc.ir.graph import Graph
+
+   class MyOptimizationPass(Pass):
+       @property
+       def name(self) -> str:
+           return "my_optimization_pass"
+
+       def run(self, graph: Graph) -> GraphTransformResult:
+           # Build new optimized graph
+           new_graph = Graph(graph.name)
+           # ... apply pattern replacements ...
+           return GraphTransformResult(graph=new_graph, stats=PassStats(...))
+   ```
+2. **Register in Pipeline** in `python/ggmlc/transforms/__init__.py`:
+   Add the pass to `create_standard_optimization_pipeline()`.
+3. **Add Tests** in `tests/transforms/test_transforms.py`.
 
 ---
 
-## 4. Development Commands & Workflow
+## 4. Step-by-Step: Adding a New Quantization Format
+
+1. **Add DType Enum**: In `python/ggmlc/ir/dtype.py`, declare the format enum and set `is_quantized = True`.
+2. **Add GGML Type Mapping**: In `python/ggmlc/dialect/ggml/ops.py` and `lowering.py`, map the enum to the matching GGML type.
+3. **Implement Block Quantizer**: In `python/ggmlc/quantization/quantize.py`, implement block encoding and decoding routines with bit packing.
+4. **Register in Model Quantizer**: Update `quantize_graph_parameters()` in `python/ggmlc/quantization/model_quantizer.py`.
+5. **Add Verification Tests**: In `tests/quantization/test_quantization.py`, add block accuracy tests (cosine similarity $> 0.98$) and end-to-end runtime execution tests.
+
+---
+
+## 5. Development & Testing Commands
 
 ```bash
-# Run the entire test suite
+# Run entire test suite
 pytest -v
 
-# Run only e2e hub model tests
-pytest tests/e2e/test_full_models.py -v
+# Run only quantization tests
+pytest tests/quantization/ -v
 
-# Format Python code
-ruff format python/ examples/ tests/
+# Run only optimization pass tests
+pytest tests/transforms/ -v
 
-# Lint Python code
-ruff check python/ examples/ tests/ --fix
+# Format and lint code
+ruff check python/ tests/
+ruff format python/ tests/
 
-# Rebuild C++ Runtime (WSL / Linux)
-cmake -B build && cmake --build build -j$(nproc)
+# Rebuild C++ runtime (via WSL/Linux)
+cmake --build build -j$(nproc)
 ```

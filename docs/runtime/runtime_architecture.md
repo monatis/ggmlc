@@ -11,6 +11,7 @@ Rather than generating custom C++ files for each neural network architecture, `g
 - **Deterministic memory planning**: Context memory is calculated dynamically during `prepare()` and allocated in a single contiguous arena.
 - **Dynamic shape binding**: Symbolic dimensions (e.g. batch size, sequence length) are supplied as command-line arguments or runtime environment dictionaries.
 - **Persistent state buffers**: Stateful memory (`StorageClass.STATE`) persists across sequential inference invocations.
+- **Hardware-accelerated quantized execution**: Direct SIMD kernel execution (AVX2, AVX-512, ARM NEON) for `Q4_0` and `Q8_0` quantized models.
 
 ---
 
@@ -21,13 +22,14 @@ Responsible for reading `.ggmlc` binary files into in-memory `SerializedModelGra
 - Reads file header, version, and global `symbol_table`.
 - Deserializes tensor definitions, storage classes, and dimension expression trees (`DimExpr`).
 - Deserializes the operation schedule with attributes.
-- Loads raw parameter/constant weight byte buffers.
+- Loads raw parameter/constant weight byte buffers with 16-byte alignment.
 
 ### `ModelExecutor` (`runtime/src/executor.cpp`)
 Main runtime orchestrator:
 - `prepare(symbol_env)`:
   1. Recursively evaluates all `DimExpr` trees against the supplied `symbol_env` map to produce concrete 4D tensor shapes `concrete_shapes_[tensor_id]`.
-  2. Computes total tensor and overhead memory requirements.
+  2. Computes total tensor and overhead memory requirements taking block quantization into account:
+     $$\text{tensor\_bytes} = \frac{\text{numel}}{\text{ggml\_blck\_size}(\text{type})} \times \text{ggml\_type\_size}(\text{type})$$
   3. Initializes `ggml_context` and creates all `ggml_tensor` objects.
   4. Copies parameter and constant data into tensor buffers.
   5. Restores persistent states from `persistent_states_` or zeros them on first invocation.
@@ -62,18 +64,18 @@ ggmlc-run <model.ggmlc> [options]
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
 
-// 1. Load compiled model graph
-auto model_graph = ggmlc::ModelLoader::load_from_file("transformer.ggmlc");
+// 1. Load compiled model graph (FP32, Q8_0, or Q4_0)
+auto model_graph = ggmlc::ModelLoader::load_from_file("minilm_q4.ggmlc");
 
 // 2. Instantiate executor and bind dynamic dimensions
 ggmlc::ModelExecutor executor(model_graph);
 executor.prepare({{"batch", 1}, {"seq", 16}});
 
 // 3. Set input data
-std::vector<float> input_tokens(1 * 16 * 768, 1.0f);
-executor.set_input_by_name("x", input_tokens.data(), input_tokens.size() * sizeof(float));
+std::vector<float> input_tokens(1 * 16 * 384, 1.0f);
+executor.set_input_by_name("input_ids", input_tokens.data(), input_tokens.size() * sizeof(float));
 
-// 4. Run forward pass
+// 4. Run forward pass across 4 CPU threads
 executor.run(/*n_threads=*/4);
 
 // 5. Read output tensor

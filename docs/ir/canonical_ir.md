@@ -10,22 +10,25 @@ The `ggmlc` **Canonical IR** is a framework-independent intermediate representat
 2. **Framework-agnostic**: The IR represents pure mathematical and layout operations, independent of whether the source model originated from PyTorch, JAX, or ONNX.
 3. **Symbolic Shapes as First-Class Values**: Dimensions can be dynamic symbolic expressions evaluated at runtime.
 4. **Explicit Storage & Lifetimes**: Every tensor carries an explicit `StorageClass` defining its memory semantics.
+5. **Optimization-Ready**: Designed for direct compile-time transformation passes (Constant Folding, DCE, Pattern Fusion).
 
 ---
 
 ## 2. Type System (`DType`)
 
-| Enum | Description | Typical Size |
-|---|---|---|
-| `DType.F32` | 32-bit single-precision float | 4 bytes |
-| `DType.F16` | 16-bit half-precision float | 2 bytes |
-| `DType.BF16` | 16-bit brain float | 2 bytes |
-| `DType.I32` | 32-bit signed integer | 4 bytes |
-| `DType.I16` | 16-bit signed integer | 2 bytes |
-| `DType.I8` | 8-bit signed integer | 1 byte |
-| `DType.I64` | 64-bit signed integer | 8 bytes |
-| `DType.BOOL` | Boolean flag | 1 byte |
-| `DType.Q8_0`, `Q4_0`, `Q4_K` | Quantized block formats | Variable |
+| Enum | Description | Bytes / Block | `is_quantized` |
+|---|---|---|---|
+| `DType.F32` | 32-bit single-precision float | 4 bytes | `False` |
+| `DType.F16` | 16-bit half-precision float | 2 bytes | `False` |
+| `DType.BF16` | 16-bit brain float | 2 bytes | `False` |
+| `DType.I32` | 32-bit signed integer | 4 bytes | `False` |
+| `DType.I16` | 16-bit signed integer | 2 bytes | `False` |
+| `DType.I8` | 8-bit signed integer | 1 byte | `False` |
+| `DType.I64` | 64-bit signed integer | 8 bytes | `False` |
+| `DType.BOOL` | Boolean flag | 1 byte | `False` |
+| `DType.Q8_0` | GGML 8-bit block quantization (32 quants + fp16 scale) | 34 bytes / 32 floats | `True` |
+| `DType.Q4_0` | GGML 4-bit block quantization (32 nibbles + fp16 scale) | 18 bytes / 32 floats | `True` |
+| `DType.Q4_K` | GGML k-quants 4-bit super-block quantization | Variable | `True` |
 
 ---
 
@@ -47,6 +50,8 @@ class Dim(ABC):
 - `FloorDivDim(left, right)`: Integer floor division ($\lfloor d_1 / d_2 \rfloor$).
 - `CeilDivDim(left, right)`: Integer ceiling division ($\lceil d_1 / d_2 \rceil$).
 
+`Shape.is_dynamic` returns `True` if any dimension contains non-static symbolic expressions.
+
 ---
 
 ## 4. Tensor Storage Classes (`StorageClass`)
@@ -64,7 +69,17 @@ Each tensor in the graph is tagged with its role in the computation lifecycle:
 
 ---
 
-## 5. Canonical Operator Set (`OpCode`)
+## 5. Canonical Transformation Passes (`ggmlc.transforms`)
+
+Canonical IR graphs are optimized prior to target lowering via `PassManager`:
+- **`ConstantFoldingPass`**: Pre-evaluates deterministic constant subgraphs at compile time.
+- **`OperatorFusionPass`**: Fuses Conv2D+ReLU, Linear+Bias, and SwiGLU composite patterns.
+- **`DeadCodeEliminationPass`**: Traverses backward from outputs and states to eliminate unused nodes.
+- **`RedundantCastPruner`**: Removes no-op transpositions and identical dtype casts.
+
+---
+
+## 6. Canonical Operator Set (`OpCode`)
 
 ### Elementwise Arithmetic & Math
 - `ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `POW`, `SQR`, `SQRT`, `RSQRT`, `EXP`, `LOG`, `ABS`, `CLAMP`
@@ -86,10 +101,14 @@ Each tensor in the graph is tagged with its role in the computation lifecycle:
 - `SQUEEZE`, `UNSQUEEZE`: Dimension removal or insertion.
 - `CONTIGUOUS`: Guarantees contiguous memory buffer layout.
 
+### Spatial Convolutions & Pooling
+- `CONV2D`: 2D Spatial Convolution with kernel, stride, and padding attributes.
+- `MAX_POOL2D`, `AVG_POOL2D`: 2D Pooling with adaptive or explicit kernel parameters.
+
 ### Normalization & High-Level Primitives
 - `LAYER_NORM`: Standard Layer Normalization with affine weight and bias.
 - `RMS_NORM`: Root Mean Square Layer Normalization.
 - `EMBEDDING`: Token table row lookup (`ggml_get_rows`).
 - `ROPE`: Rotary Position Embedding.
-- `SDPA`: Scaled Dot-Product Attention.
+- `SDPA`: Scaled Dot-Product Attention with optional causal or attention mask.
 - `MEAN`, `SUM`: Reduction operations along specified axes.

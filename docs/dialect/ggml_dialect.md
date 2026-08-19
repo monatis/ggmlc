@@ -51,7 +51,23 @@ When multiplying two activation tensors $A(M, K)$ and $B(K, N)$ where $B$ is not
 
 ---
 
-## 4. Grouped Query Attention (GQA) Lowering
+## 4. Quantized Weight Lowering & Execution
+
+GGML provides native SIMD-accelerated matrix multiplication kernels for quantized weights:
+
+| GGML Type | Value | Layout | Contiguous Constraint |
+| :--- | :--- | :--- | :--- |
+| `GGML_TYPE_F32` | `0` | 4 bytes/elem | Standard |
+| `GGML_TYPE_Q4_0` | `2` | 18 bytes / 32 elements | **Must be strictly contiguous row blocks** |
+| `GGML_TYPE_Q8_0` | `8` | 34 bytes / 32 elements | **Must be strictly contiguous row blocks** |
+
+### Critical Quantization Rules:
+1. **Pre-Quantization Transposition**: Any Hugging Face `Conv1D` or non-standard parameter tensor is physically transposed in memory **before** quantization, so that $ne = [K, N]$ stores contiguous rows of $K$ elements in quantized blocks.
+2. **No Graph-Level Non-Contiguous Ops on Quantized Tensors**: `ggml_transpose`, `ggml_permute`, and `ggml_cont` cannot be invoked on quantized weight tensors. The runtime dispatches directly to quantized GEMM without auxiliary graph ops.
+
+---
+
+## 5. Grouped Query Attention (GQA) Lowering
 In models with Grouped Query Attention (e.g. Qwen2.5, LLaMA-3), the number of KV heads $N_{kv}$ is smaller than query heads $N_q$.
 - In PyTorch: `repeat_interleave` duplicates each KV head $N_q / N_{kv}$ times contiguously.
 - In GGML: `ggml_repeat` tiles the entire tensor.
@@ -59,7 +75,7 @@ In models with Grouped Query Attention (e.g. Qwen2.5, LLaMA-3), the number of KV
 
 ---
 
-## 5. Vision & Convolutional Operators
+## 6. Vision & Convolutional Operators
 
 - **2D Convolution (`GGML_OP_CONV_2D`)**:
   - Direct kernel dispatch: `ggml_conv_2d(ctx, weight, x, s0, s1, p0, p1, d0, d1)`.
@@ -74,7 +90,7 @@ In models with Grouped Query Attention (e.g. Qwen2.5, LLaMA-3), the number of KV
 
 ---
 
-## 6. Normalization & Activations
+## 7. Normalization & Activations
 
 - **LayerNorm (`GGML_OP_NORM`)**: Computes mean and variance over dimension 0 ($ne[0]$). Broadcast scale & shift applied via `ggml_repeat` + `ggml_mul` + `ggml_add`.
 - **RMSNorm (`GGML_OP_RMS_NORM`)**: Computes root-mean-square normalization over dimension 0 ($ne[0]$).
