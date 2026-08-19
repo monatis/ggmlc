@@ -29,7 +29,7 @@ This document provides a comprehensive mapping of all Canonical IR operators, so
 | `GELU` | `aten.gelu.default` | `gelu` | `GGML_OP_GELU` | Gaussian error linear unit |
 | `SILU` | `aten.silu.default` | `silu` | `GGML_OP_SILU` | Sigmoid linear unit $x \cdot \sigma(x)$ |
 | `SIGMOID` | `aten.sigmoid.default` | `sigmoid` | `GGML_OP_SIGMOID` | Logistic sigmoid $\frac{1}{1 + e^{-x}}$ |
-| `TANH` | `aten.tanh.default` | `tanh` | `GGML_OP_TANH` | Hyperbolic tangent $\tanh(x)$ |
+| `TANH` | `aten.tanh.default` | `tanh` | `GGML_OP_UNARY` (`GGML_UNARY_OP_TANH`) | Hyperbolic tangent $\tanh(x)$ |
 | `SOFTMAX` | `aten._softmax.default`, `aten.softmax.default` | `softmax` | `GGML_OP_SOFT_MAX` | Softmax normalized probabilities |
 | `SWIGLU` | ATen SwiGLU pattern | `swiglu` | `GGML_OP_GLU` (`ggml_swiglu`) | Swish Gated Linear Unit $x \cdot \text{silu}(g)$ |
 
@@ -51,7 +51,7 @@ This document provides a comprehensive mapping of all Canonical IR operators, so
 | `TRANSPOSE` | `aten.transpose.int`, `aten.t.default` | `transpose` | `GGML_OP_PERMUTE` | Permutes 2 specified dimensions |
 | `PERMUTE` | `aten.permute.default` | `transpose` | `GGML_OP_PERMUTE` | Generalized N-D axis permutation |
 | `RESHAPE` / `VIEW` | `aten.view.default`, `aten.reshape.default` | `reshape` | `GGML_OP_RESHAPE` | Reinterprets tensor dimensions |
-| `SLICE` | `aten.slice.Tensor` | `slice` | `GGML_OP_VIEW` (`ggml_view_4d`) | Extracts contiguous sub-tensor slice |
+| `SLICE` | `aten.slice.Tensor`, `aten.select.int` | `slice` | `GGML_OP_VIEW` (`ggml_view_4d`) | Extracts contiguous sub-tensor slice |
 | `CONCAT` | `aten.cat.default` | `concatenate` | `GGML_OP_CONCAT` | Concatenates tensors along axis |
 | `EXPAND` / `REPEAT`| `aten.expand.default` | `broadcast_in_dim` | `GGML_OP_REPEAT` (`ggml_repeat_4d`)| Broadcasts singleton dimensions |
 | `SQUEEZE` | `aten.squeeze.default`, `aten.squeeze.dim` | `squeeze` | `GGML_OP_RESHAPE` | Removes dimensions of size 1 |
@@ -70,3 +70,14 @@ This document provides a comprehensive mapping of all Canonical IR operators, so
 | `ROPE` | Rotary Position Embedding | — | `GGML_OP_ROPE` | Rotary position embeddings on Q/K |
 | `SDPA` | `aten.scaled_dot_product_attention.default` | `scaled_dot_product_attention` | `GGML_OP_FLASH_ATTN_EXT` | Fused scaled dot-product attention |
 | `MEAN` | `aten.mean.dim` | `reduce_mean` | `GGML_OP_MEAN` | Mean reduction across dimension |
+
+---
+
+## 6. Vision & Convolutional Operators
+
+| Canonical Op | PyTorch ATen Targets | JAX Primitives | GGML Lowering | Description |
+|---|---|---|---|---|
+| `CONV2D` | `aten.convolution.default`, `aten.conv2d.default` | `conv_general_dilated` | `GGML_OP_CONV_2D` | 2D Spatial Convolution with stride/padding/dilation |
+| `MAX_POOL2D` | `aten.max_pool2d_with_indices.default`, `aten.max_pool2d.default` | `reduce_window_max` | `GGML_OP_POOL_2D` (`GGML_OP_POOL_MAX`) | 2D Maximum Pooling |
+| `AVG_POOL2D` | `aten.avg_pool2d.default` | `reduce_window_avg` | `GGML_OP_POOL_2D` (`GGML_OP_POOL_AVG`) | 2D Average Pooling |
+| `ADAPTIVE_AVG_POOL2D` | `aten.adaptive_avg_pool2d.default` | — | `GGML_OP_POOL_2D` (`GGML_OP_POOL_AVG`) | Global adaptive average pooling for CNN heads |

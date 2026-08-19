@@ -51,21 +51,33 @@ When multiplying two activation tensors $A(M, K)$ and $B(K, N)$ where $B$ is not
 
 ---
 
-## 4. Normalization Operators
-
-- **LayerNorm (`GGML_OP_NORM`)**:
-  Computes mean and variance over the inner dimension:
-  $$\hat{x} = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}}$$
-  Affine scale (weight) and shift (bias) are broadcast and applied via `ggml_repeat` + `ggml_mul` + `ggml_add`.
-- **RMSNorm (`GGML_OP_RMS_NORM`)**:
-  Computes root-mean-square normalization over the inner dimension:
-  $$\hat{x} = \frac{x}{\sqrt{\frac{1}{d}\sum x_i^2 + \epsilon}} \odot \gamma$$
+## 4. Grouped Query Attention (GQA) Lowering
+In models with Grouped Query Attention (e.g. Qwen2.5, LLaMA-3), the number of KV heads $N_{kv}$ is smaller than query heads $N_q$.
+- In PyTorch: `repeat_interleave` duplicates each KV head $N_q / N_{kv}$ times contiguously.
+- In GGML: `ggml_repeat` tiles the entire tensor.
+- Lowering Strategy: GQA KV tensors are lowered via a 4D view $(D, S, \text{num\_groups}, N_{kv})$, repeated along the group dimension, and flattened back to $(D, S, N_q, B)$ before attention computation.
 
 ---
 
-## 5. Attention & RoPE
+## 5. Vision & Convolutional Operators
 
-- **`GGML_OP_SOFT_MAX`**: Applied along dimension 0 ($ne[0]$).
-- **`GGML_OP_FLASH_ATTN_EXT`**: Native fused scaled dot-product attention kernel with optional causal masking.
-- **`GGML_OP_ROPE`**: Applies rotary position embeddings directly to $Q$ and $K$ heads.
-- **`GGML_OP_GLU` (`ggml_swiglu`)**: Native implementation of the SwiGLU activation $x \odot \text{silu}(g)$.
+- **2D Convolution (`GGML_OP_CONV_2D`)**:
+  - Direct kernel dispatch: `ggml_conv_2d(ctx, weight, x, s0, s1, p0, p1, d0, d1)`.
+  - In GGML column-major layout:
+    - Weight tensor: $ne = [K_w, K_h, C_{in}, C_{out}]$.
+    - Input tensor: $ne = [W, H, C_{in}, B]$.
+    - Output tensor: $ne = [W_{out}, H_{out}, C_{out}, B]$.
+- **2D Pooling (`GGML_OP_POOL_2D`)**:
+  - Dispatches `ggml_pool_2d(ctx, x, type, k0, k1, s0, s1, p0, p1)`.
+  - Supports `GGML_OP_POOL_MAX` and `GGML_OP_POOL_AVG`.
+  - Adaptive Average Pooling computes dynamic kernel $k = (W, H)$ and stride $s = (W, H)$ to reduce feature maps to $1 \times 1$ spatial grids.
+
+---
+
+## 6. Normalization & Activations
+
+- **LayerNorm (`GGML_OP_NORM`)**: Computes mean and variance over dimension 0 ($ne[0]$). Broadcast scale & shift applied via `ggml_repeat` + `ggml_mul` + `ggml_add`.
+- **RMSNorm (`GGML_OP_RMS_NORM`)**: Computes root-mean-square normalization over dimension 0 ($ne[0]$).
+- **Softmax (`GGML_OP_SOFT_MAX`)**: Computes normalized exponentials along dimension 0.
+- **RoPE (`GGML_OP_ROPE`)**: Applies rotary position embeddings directly to $Q$ and $K$ heads.
+- **SwiGLU (`GGML_OP_GLU`)**: Native implementation of the SwiGLU activation $x \odot \text{silu}(g)$.
