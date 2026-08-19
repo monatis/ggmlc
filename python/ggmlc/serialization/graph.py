@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import struct
 
+import numpy as np
+
 from ggmlc.dialect.ggml.lowering import GGMLExecutionGraph
 from ggmlc.ir.shape import (
     AddDim,
@@ -140,7 +142,12 @@ def serialize_ggml_graph(graph: GGMLExecutionGraph) -> bytes:
                 data_buffer.write(b"\x00" * pad)
             offset = data_buffer.tell()
 
-            raw_bytes = t.data.tobytes()
+            if isinstance(t.data, bytes):
+                raw_bytes = t.data
+            elif hasattr(t.data, "tobytes"):
+                raw_bytes = t.data.tobytes()
+            else:
+                raw_bytes = np.array(t.data, dtype=np.float32).tobytes()
             data_buffer.write(raw_bytes)
             f.write(struct.pack("<QQ", offset, len(raw_bytes)))
         else:

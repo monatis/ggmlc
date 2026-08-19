@@ -21,6 +21,9 @@ def dtype_to_ggml_type(dtype: DType) -> GGMLType:
         DType.I64: GGMLType.GGML_TYPE_I64,
         DType.I8: GGMLType.GGML_TYPE_I8,
         DType.BOOL: GGMLType.GGML_TYPE_I8,
+        DType.Q4_0: GGMLType.GGML_TYPE_Q4_0,
+        DType.Q4_K: GGMLType.GGML_TYPE_Q4_K,
+        DType.Q8_0: GGMLType.GGML_TYPE_Q8_0,
     }
     return mapping.get(dtype, GGMLType.GGML_TYPE_F32)
 
@@ -119,7 +122,7 @@ def lower_to_ggml(canonical_graph: Graph) -> GGMLExecutionGraph:
             x_t = canonical_graph.get_tensor(x_id)
             w_t = ggml_graph.tensors[w_id]
             c_w = canonical_graph.get_tensor(w_id)
-            if w_t.data is not None and w_t.data.ndim == 2:
+            if w_t.data is not None and hasattr(w_t.data, "ndim") and w_t.data.ndim == 2:
                 k_val = x_t.shape.dims[-1].evaluate({})
                 d0 = c_w.shape.dims[0].evaluate({})
                 d1 = c_w.shape.dims[1].evaluate({})

@@ -40,7 +40,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         concrete_shapes_[tid] = ne;
 
         size_t type_size = ggml_type_size(t.type);
-        total_tensor_bytes += numel * type_size + ggml_tensor_overhead();
+        size_t blck_size = ggml_blck_size(t.type);
+        if (blck_size == 0) blck_size = 1;
+        total_tensor_bytes += (numel / blck_size) * type_size + ggml_tensor_overhead();
     }
 
     // Allocate ggml context
@@ -323,14 +325,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_soft_max(ctx_, in0);
                 break;
             case GGML_OP_MUL_MAT: {
+                bool is_q = (in0->type != GGML_TYPE_F32 && in0->type != GGML_TYPE_F16);
                 bool transpose_in0 = op.attributes.count("transpose_in0") && op.attributes.at("transpose_in0") != 0;
-                if (in0 && !ggml_is_contiguous(in0)) {
+                if (!is_q && in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
                 if (in1 && !ggml_is_contiguous(in1)) {
                     in1 = ggml_cont(ctx_, in1);
                 }
-                if (in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
+                if (!is_q && in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
                     in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
                 }
                 result = ggml_mul_mat(ctx_, in0, in1);
@@ -466,6 +469,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             ggml_set_name(result, model_graph_.tensors[out_id].name.c_str());
             ggml_tensors_[out_id] = result;
             ggml_build_forward_expand(cgraph_, result);
+        } else {
+            fprintf(stderr, "[OP BUILD FAIL] op %d (opcode %d) out_id %u produced NULL result!\n", op.id, op.opcode, out_id);
         }
     }
 }
@@ -590,7 +595,13 @@ size_t ModelExecutor::get_tensor_size_bytes(uint32_t tensor_id) const {
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    return ggml_nbytes(it->second);
+    size_t sz = ggml_nbytes(it->second);
+    if (sz == 0) {
+        fprintf(stderr, "[DEBUG] tensor %u ne=[%ld,%ld,%ld,%ld] type=%d blck_size=%zu type_size=%zu\n",
+            tensor_id, it->second->ne[0], it->second->ne[1], it->second->ne[2], it->second->ne[3],
+            it->second->type, ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
+    }
+    return sz;
 }
 
 } // namespace ggmlc

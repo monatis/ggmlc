@@ -15,10 +15,13 @@ class DType(Enum):
     I64 = "i64"
     I8 = "i8"
     BOOL = "bool"
+    Q4_0 = "q4_0"
+    Q4_K = "q4_k"
+    Q8_0 = "q8_0"
 
     @property
-    def itemsize(self) -> int:
-        """Returns size in bytes."""
+    def itemsize(self) -> int | float:
+        """Returns size in bytes per element."""
         sizes = {
             DType.F32: 4,
             DType.F16: 2,
@@ -27,8 +30,15 @@ class DType(Enum):
             DType.I64: 8,
             DType.I8: 1,
             DType.BOOL: 1,
+            DType.Q4_0: 0.5625,  # 18 bytes per 32 elements
+            DType.Q4_K: 0.5625,
+            DType.Q8_0: 1.0625,  # 34 bytes per 32 elements
         }
         return sizes[self]
+
+    @property
+    def is_quantized(self) -> bool:
+        return self in (DType.Q4_0, DType.Q4_K, DType.Q8_0)
 
     @property
     def is_floating_point(self) -> bool:

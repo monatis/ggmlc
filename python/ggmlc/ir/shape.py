@@ -215,6 +215,10 @@ class Shape:
     def is_static(self) -> bool:
         return all(d.is_static() for d in self.dims)
 
+    @property
+    def is_dynamic(self) -> bool:
+        return not self.is_static()
+
     def free_symbols(self) -> set[str]:
         res = set()
         for d in self.dims:

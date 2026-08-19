@@ -93,6 +93,8 @@ class Graph:
         self.nodes.append(op)
         return op
 
+    add_node = add_op
+
     def get_tensor(self, tid: int) -> Tensor:
         if tid not in self.tensors:
             raise KeyError(f"Tensor with ID {tid} does not exist in graph '{self.name}'")
