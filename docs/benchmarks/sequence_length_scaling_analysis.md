@@ -1,6 +1,6 @@
 # Sequence Length Scaling & Cache Locality Investigation Report
 
-## 1. Executive Summary & Core Findings
+## 1. Core Findings
 
 This comprehensive empirical investigation evaluates how **sequence length scaling** ($L \in [1, 256]$) interacts with **planned arena memory reuse**, CPU cache hierarchies (L1, L2, L3), execution latency, throughput, and numerical precision across both **Autoregressive Causal Decoders** (GPT-2) and **Bidirectional Encoders** (MiniLM-L6-v2).
 
