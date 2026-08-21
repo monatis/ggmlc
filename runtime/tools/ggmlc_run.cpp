@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
     std::unordered_map<std::string, std::string> state_out_files;
     std::unordered_map<std::string, int64_t> symbol_env;
     int n_threads = 1;
+    bool unplanned = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -63,6 +64,8 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--threads" && i + 1 < argc) {
             n_threads = std::stoi(argv[++i]);
+        } else if (arg == "--unplanned") {
+            unplanned = true;
         }
     }
 
@@ -70,10 +73,11 @@ int main(int argc, char** argv) {
         auto model_graph = ggmlc::ModelLoader::load_from_file(model_path);
         std::cout << "[ggmlc-run] Loaded model '" << model_graph.name << "' with "
                   << model_graph.tensors.size() << " tensors and "
-                  << model_graph.ops.size() << " operations.\n";
+                  << model_graph.ops.size() << " operations"
+                  << (unplanned ? " (UNPLANNED / NO REUSE)" : " (PLANNED ARENA REUSE)") << ".\n";
 
         ggmlc::ModelExecutor executor(model_graph);
-        executor.prepare(symbol_env);
+        executor.prepare(symbol_env, !unplanned);
 
         // Load initial state data if provided
         for (const auto& pair : state_in_files) {

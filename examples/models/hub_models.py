@@ -6,6 +6,7 @@ from torch import nn
 
 def load_resnet_model(
     variant: str = "resnet18",
+    resolution: int = 224,
 ) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads real torchvision pretrained ResNet checkpoint."""
     from torchvision import models
@@ -16,17 +17,17 @@ def load_resnet_model(
     else:
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT).eval()
 
-    example_input = (torch.randn(1, 3, 224, 224, dtype=torch.float32),)
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
     input_names = ["x"]
     return model, example_input, input_names
 
 
-def load_minilm_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+def load_minilm_model(seq_len: int = 16) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads real sentence-transformers all-MiniLM-L6-v2 checkpoint."""
     from transformers import AutoModel
 
     model = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2").eval()
-    input_ids = torch.randint(0, 1000, (1, 16), dtype=torch.int32)
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
     example_input = (input_ids,)
     input_names = ["input_ids"]
 
@@ -43,12 +44,18 @@ def load_minilm_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]
     return MiniLMWrapper(model), example_input, input_names
 
 
-def load_gpt2_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads real Hugging Face GPT-2 checkpoint."""
     from transformers import GPT2LMHeadModel
 
     model = GPT2LMHeadModel.from_pretrained("openai-community/gpt2").eval()
-    input_ids = torch.tensor([[542, 67, 876, 414, 26, 335, 620, 924]], dtype=torch.int32)
+    base_ids = [542, 67, 876, 414, 26, 335, 620, 924]
+    if seq_len <= len(base_ids):
+        input_ids = torch.tensor([base_ids[:seq_len]], dtype=torch.int32)
+    else:
+        # Repeat or generate tokens
+        repeated = (base_ids * ((seq_len // len(base_ids)) + 1))[:seq_len]
+        input_ids = torch.tensor([repeated], dtype=torch.int32)
     example_input = (input_ids,)
     input_names = ["input_ids"]
 
@@ -78,12 +85,13 @@ def load_gpt2_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
 
 def load_qwen_model(
     variant: str = "Qwen/Qwen2.5-0.5B",
+    seq_len: int = 8,
 ) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads real Hugging Face Qwen checkpoint."""
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(variant, torch_dtype=torch.float32).eval()
-    input_ids = torch.randint(0, 1000, (1, 8), dtype=torch.int32)
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
     example_input = (input_ids,)
     input_names = ["input_ids"]
 
@@ -175,12 +183,14 @@ def load_qwen_model(
     return QwenWrapper(model), example_input, input_names
 
 
-def load_bge_m3_distill_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+def load_bge_m3_distill_model(
+    seq_len: int = 16,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads real altaidevorg/bge-m3-distill-8l checkpoint via sentence-transformers/transformers."""
     from transformers import AutoModel
 
     model = AutoModel.from_pretrained("altaidevorg/bge-m3-distill-8l").eval()
-    input_ids = torch.randint(10, 1000, (1, 16), dtype=torch.int32)
+    input_ids = torch.randint(10, 1000, (1, seq_len), dtype=torch.int32)
     example_input = (input_ids,)
     input_names = ["input_ids"]
 
@@ -195,11 +205,11 @@ def load_bge_m3_distill_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], li
             self.padding_idx = base.embeddings.padding_idx
 
         def forward(self, input_ids):
-            seq_len = input_ids.shape[-1]
+            cur_seq = input_ids.shape[-1]
             pos_ids = torch.arange(
-                self.padding_idx + 1, self.padding_idx + 1 + seq_len, dtype=torch.int32
+                self.padding_idx + 1, self.padding_idx + 1 + cur_seq, dtype=torch.int32
             ).unsqueeze(0)
-            token_type_ids = torch.zeros((1, seq_len), dtype=torch.int32)
+            token_type_ids = torch.zeros((1, cur_seq), dtype=torch.int32)
             words_emb = self.word_embeddings(input_ids)
             pos_emb = self.position_embeddings(pos_ids)
             type_emb = self.token_type_embeddings(token_type_ids)

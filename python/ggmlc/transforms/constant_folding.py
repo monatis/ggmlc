@@ -113,12 +113,6 @@ class ConstantFoldingPass(Pass):
                 return np.sqrt(inputs[0])
             elif opcode == OpCode.RSQRT:
                 return 1.0 / np.sqrt(inputs[0])
-            elif opcode == OpCode.SQR:
-                return np.square(inputs[0])
-            elif opcode == OpCode.CLAMP:
-                min_v = attrs.get("min_val", None)
-                max_v = attrs.get("max_val", None)
-                return np.clip(inputs[0], min_v, max_v)
             elif opcode == OpCode.RESHAPE:
                 target_shape = attrs.get("shape")
                 if target_shape:

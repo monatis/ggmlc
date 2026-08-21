@@ -13,8 +13,8 @@ public:
     explicit ModelExecutor(const SerializedModelGraph& graph);
     ~ModelExecutor();
 
-    // Prepare execution context for given dynamic symbol values
-    void prepare(const std::unordered_map<std::string, int64_t>& symbol_env = {});
+    // Prepare execution context for given dynamic symbol values and optional memory arena reuse
+    void prepare(const std::unordered_map<std::string, int64_t>& symbol_env = {}, bool enable_arena_reuse = true);
 
     // Set input tensor data
     void set_input(uint32_t tensor_id, const void* data, size_t size_bytes);

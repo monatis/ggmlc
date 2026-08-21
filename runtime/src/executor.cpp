@@ -18,7 +18,7 @@ ModelExecutor::~ModelExecutor() {
     }
 }
 
-void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env) {
+void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
     if (ctx_) {
         ggml_free(ctx_);
         ctx_ = nullptr;
@@ -27,6 +27,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     concrete_shapes_.clear();
 
     // 1. Evaluate concrete shapes and compute required memory
+    size_t param_bytes = 0;
+    size_t state_bytes = 0;
+    size_t total_act_bytes = 0;
     size_t total_tensor_bytes = 0;
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
@@ -42,11 +45,74 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         size_t type_size = ggml_type_size(t.type);
         size_t blck_size = ggml_blck_size(t.type);
         if (blck_size == 0) blck_size = 1;
-        total_tensor_bytes += (numel / blck_size) * type_size + ggml_tensor_overhead();
+        size_t sz = (numel / blck_size) * type_size;
+        total_tensor_bytes += sz + ggml_tensor_overhead();
+
+        if (t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) {
+            param_bytes += sz;
+        } else if (t.storage == StorageClass::STATE) {
+            state_bytes += sz;
+        } else {
+            total_act_bytes += sz;
+        }
     }
 
-    // Allocate ggml context
-    size_t ctx_size = total_tensor_bytes * 6 + 1024 * 1024 * 128 + model_graph_.ops.size() * 32768;
+    size_t effective_act_bytes = total_act_bytes;
+    if (enable_arena_reuse) {
+        // Liveness analysis over ops for peak activation memory planning
+        int n_ops = static_cast<int>(model_graph_.ops.size());
+        std::unordered_map<uint32_t, std::pair<int, int>> liveness;
+        for (const auto& pair : model_graph_.tensors) {
+            uint32_t tid = pair.first;
+            bool is_persistent = (pair.second.storage == StorageClass::PARAMETER || pair.second.storage == StorageClass::STATE);
+            liveness[tid] = {is_persistent ? 0 : n_ops, is_persistent ? n_ops : 0};
+        }
+        for (int op_idx = 0; op_idx < n_ops; ++op_idx) {
+            const auto& op = model_graph_.ops[op_idx];
+            for (uint32_t out_id : op.outputs) {
+                if (liveness.count(out_id)) {
+                    liveness[out_id].first = std::min(liveness[out_id].first, op_idx);
+                    liveness[out_id].second = std::max(liveness[out_id].second, op_idx);
+                }
+            }
+            for (uint32_t in_id : op.inputs) {
+                if (liveness.count(in_id)) {
+                    liveness[in_id].second = std::max(liveness[in_id].second, op_idx);
+                }
+            }
+        }
+        for (uint32_t out_id : model_graph_.outputs) {
+            if (liveness.count(out_id)) liveness[out_id].second = n_ops;
+        }
+        for (uint32_t inp_id : model_graph_.inputs) {
+            if (liveness.count(inp_id)) liveness[inp_id].first = 0;
+        }
+
+        size_t peak_act_bytes = 0;
+        for (int op_idx = 0; op_idx < n_ops; ++op_idx) {
+            size_t step_bytes = 0;
+            for (const auto& pair : model_graph_.tensors) {
+                uint32_t tid = pair.first;
+                if (pair.second.storage == StorageClass::ACTIVATION || pair.second.storage == StorageClass::INPUT || pair.second.storage == StorageClass::OUTPUT) {
+                    if (liveness[tid].first <= op_idx && liveness[tid].second >= op_idx) {
+                        const auto& ne = concrete_shapes_[tid];
+                        size_t numel = ne[0] * ne[1] * ne[2] * ne[3];
+                        size_t t_size = ggml_type_size(pair.second.type);
+                        size_t b_size = ggml_blck_size(pair.second.type);
+                        if (b_size == 0) b_size = 1;
+                        step_bytes += (numel / b_size) * t_size;
+                    }
+                }
+            }
+            peak_act_bytes = std::max(peak_act_bytes, step_bytes);
+        }
+        if (peak_act_bytes > 0) {
+            effective_act_bytes = peak_act_bytes;
+        }
+    }
+
+    // Allocate robust ggml context with safe workspace headroom for Conv2D / Attention intermediate objects
+    size_t ctx_size = (param_bytes + state_bytes + effective_act_bytes) * 6 + 1024 * 1024 * 128 + model_graph_.ops.size() * 65536;
     struct ggml_init_params params = {
         /* .mem_size   = */ ctx_size,
         /* .mem_buffer = */ nullptr,
