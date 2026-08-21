@@ -43,6 +43,7 @@ private:
     std::unordered_map<uint32_t, std::array<int64_t, 4>> concrete_shapes_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> persistent_states_;
     std::vector<uint8_t> memory_pool_;
+    std::vector<std::vector<uint8_t>> custom_params_storage_;
 };
 
 } // namespace ggmlc

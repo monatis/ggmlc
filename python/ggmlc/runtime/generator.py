@@ -22,11 +22,15 @@ class GGMLCGenerator:
         tokenizer: Any,
         model_name: str = "llm",
         max_seq_len: int = 256,
+        enable_fusion: bool = True,
+        fusion_options: Any = None,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_seq_len = max_seq_len
+        self.enable_fusion = enable_fusion
+        self.fusion_options = fusion_options
         self.compiled_bytes: bytes | None = None
         self.out_tensor_id: int | None = None
 
@@ -51,7 +55,11 @@ class GGMLCGenerator:
                 f"[GGMLCGenerator] Warning: dynamic export failed ({e}), falling back to static export."
             )
             exported = export_torch_model(self.model, dummy_input, model_name=self.model_name)
-        ggml_graph = lower_to_ggml(exported.main_graph)
+        ggml_graph = lower_to_ggml(
+            exported.main_graph,
+            enable_fusion=self.enable_fusion,
+            fusion_options=self.fusion_options,
+        )
         self.symbol_table = list(ggml_graph.symbol_table)
         print(f"[GGMLCGenerator] GGML symbol table: {self.symbol_table}")
         self.compiled_bytes = serialize_ggml_graph(ggml_graph)

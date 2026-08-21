@@ -10,6 +10,7 @@ from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode, Operation
 from ggmlc.ir.shape import Dim, Shape, StaticDim
 from ggmlc.ir.tensor import StorageClass
+from ggmlc.transforms.fusion import FusionOptions, fuse_operations
 
 
 def dtype_to_ggml_type(dtype: DType) -> GGMLType:
@@ -80,8 +81,17 @@ class GGMLExecutionGraph:
         return self.tensors[tid]
 
 
-def lower_to_ggml(canonical_graph: Graph) -> GGMLExecutionGraph:
+def lower_to_ggml(
+    canonical_graph: Graph,
+    enable_fusion: bool = True,
+    fusion_options: FusionOptions | None = None,
+) -> GGMLExecutionGraph:
     """Lowers a Canonical IR Graph into a GGML Execution Graph."""
+    if enable_fusion:
+        if fusion_options is None:
+            fusion_options = FusionOptions()
+        canonical_graph = fuse_operations(canonical_graph, fusion_options)
+
     ggml_graph = GGMLExecutionGraph(
         name=canonical_graph.name,
         inputs=list(canonical_graph.inputs),
@@ -155,15 +165,22 @@ def lower_to_ggml(canonical_graph: Graph) -> GGMLExecutionGraph:
     # 2. Lower operations
     op_by_id = {op.id: op for op in canonical_graph.nodes}
     for op in canonical_graph.nodes:
-        ggml_op = _lower_op(op, canonical_graph, ggml_graph, op_by_id)
+        ggml_op = _lower_op(op, canonical_graph, ggml_graph, op_by_id, fusion_options)
         ggml_graph.nodes.append(ggml_op)
 
     return ggml_graph
 
 
 def _lower_op(
-    op: Operation, c_graph: Graph, g_graph: GGMLExecutionGraph, op_by_id: dict[int, Operation]
+    op: Operation,
+    c_graph: Graph,
+    g_graph: GGMLExecutionGraph,
+    op_by_id: dict[int, Operation],
+    fusion_options: FusionOptions | None = None,
 ) -> GGMLOpDef:
+    if fusion_options is None:
+        fusion_options = FusionOptions()
+
     opcode = op.opcode
     in_ids = list(op.inputs)
     out_ids = list(op.outputs)
@@ -247,8 +264,41 @@ def _lower_op(
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SIN, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.COS:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_COS, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.BIAS_GELU:
+        if fusion_options.enable_bias_gelu:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CUSTOM_BIAS_GELU, in_ids, out_ids, attrs, op.name
+            )
+        else:
+            return GGMLOpDef(
+                op.id,
+                GGMLOpCode.GGML_OP_UNARY,
+                in_ids,
+                out_ids,
+                {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_GELU)},
+                op.name,
+            )
+    elif opcode == OpCode.LAYER_NORM:
+        if fusion_options.enable_layer_norm:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CUSTOM_LAYER_NORM, in_ids, out_ids, attrs, op.name
+            )
+        else:
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NORM, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.RMS_NORM:
-        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RMS_NORM, in_ids, out_ids, attrs, op.name)
+        if fusion_options.enable_rms_norm:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CUSTOM_RMS_NORM, in_ids, out_ids, attrs, op.name
+            )
+        else:
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RMS_NORM, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SWIGLU:
+        if fusion_options.enable_swiglu:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CUSTOM_SWIGLU, in_ids, out_ids, attrs, op.name
+            )
+        else:
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GLU, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.SOFTMAX:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SOFT_MAX, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LINEAR:
@@ -349,8 +399,6 @@ def _lower_op(
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.EXPAND, OpCode.REPEAT):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_REPEAT, in_ids, out_ids, attrs, op.name)
-    elif opcode == OpCode.LAYER_NORM:
-        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NORM, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.EMBEDDING:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GET_ROWS, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.CAST:
@@ -359,7 +407,5 @@ def _lower_op(
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ROPE:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ROPE, in_ids, out_ids, attrs, op.name)
-    elif opcode == OpCode.SWIGLU:
-        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_GLU, in_ids, out_ids, attrs, op.name)
     else:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NONE, in_ids, out_ids, attrs, op.name)

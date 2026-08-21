@@ -1,114 +1,211 @@
-# Canonical IR Specification
+# Canonical Intermediate Representation (Canonical IR) Specification
 
-The `ggmlc` **Canonical IR** is a framework-independent intermediate representation designed to model neural networks as semantic tensor programs.
+The `ggmlc` **Canonical IR** is a strongly-typed, framework-independent, functional intermediate representation designed to model neural networks as semantic tensor programs.
 
----
+```mermaid
+graph TD
+    subgraph "Frontends"
+        PT["PyTorch (torch.export)"] --> CIR["Canonical IR Graph"]
+        JAX["JAX (jaxpr)"] --> CIR
+        ONNX["ONNX Graph"] --> CIR
+    end
 
-## 1. Core Principles
+    subgraph "Transforms & Passes"
+        CIR --> CF["Constant Folding"]
+        CF --> FUS["Operator Fusion (ggmlc-fused)"]
+        FUS --> DCE["Dead Code Elimination"]
+        DCE --> RC["Redundant Cast Pruning"]
+    end
 
-1. **A neural network is a functional semantic tensor program.**
-2. **Framework-agnostic**: The IR represents pure mathematical and layout operations, independent of whether the source model originated from PyTorch, JAX, or ONNX.
-3. **Symbolic Shapes as First-Class Values**: Dimensions can be dynamic symbolic expressions evaluated at runtime.
-4. **Explicit Storage & Lifetimes**: Every tensor carries an explicit `StorageClass` defining its memory semantics.
-5. **Optimization-Ready**: Designed for direct compile-time transformation passes (Constant Folding, DCE, Pattern Fusion).
-
----
-
-## 2. Type System (`DType`)
-
-| Enum | Description | Bytes / Block | `is_quantized` |
-|---|---|---|---|
-| `DType.F32` | 32-bit single-precision float | 4 bytes | `False` |
-| `DType.F16` | 16-bit half-precision float | 2 bytes | `False` |
-| `DType.BF16` | 16-bit brain float | 2 bytes | `False` |
-| `DType.I32` | 32-bit signed integer | 4 bytes | `False` |
-| `DType.I16` | 16-bit signed integer | 2 bytes | `False` |
-| `DType.I8` | 8-bit signed integer | 1 byte | `False` |
-| `DType.I64` | 64-bit signed integer | 8 bytes | `False` |
-| `DType.BOOL` | Boolean flag | 1 byte | `False` |
-| `DType.Q8_0` | GGML 8-bit block quantization (32 quants + fp16 scale) | 34 bytes / 32 floats | `True` |
-| `DType.Q4_0` | GGML 4-bit block quantization (32 nibbles + fp16 scale) | 18 bytes / 32 floats | `True` |
-| `DType.Q4_K` | GGML k-quants 4-bit super-block quantization | Variable | `True` |
-
----
-
-## 3. Shape & Symbolic Dimensions (`Dim`, `Shape`)
-
-The shape system models arbitrary ranks with both static integers and symbolic dimension expressions:
-
-```python
-class Dim(ABC):
-    def evaluate(self, env: dict[str, int]) -> int: ...
+    subgraph "Target Lowering"
+        RC --> Dialect["GGML Dialect Graph"]
+        Dialect --> Serializer["Binary Serialization (.ggmlc)"]
+        Serializer --> Runtime["C++ Generic Runtime (libggmlc_runtime)"]
+    end
 ```
 
-### Dimension Expression Hierarchy
-- `StaticDim(value: int)`: Constant integer dimension extent (e.g. `StaticDim(768)`).
-- `SymbolDim(name: str)`: Named symbolic parameter bound at runtime (e.g. `SymbolDim("batch")`, `SymbolDim("seq")`).
-- `AddDim(left, right)`: Sum of two dimension expressions ($d_1 + d_2$).
-- `SubDim(left, right)`: Difference of two dimension expressions ($d_1 - d_2$).
-- `MulDim(left, right)`: Product of two dimension expressions ($d_1 \times d_2$).
-- `FloorDivDim(left, right)`: Integer floor division ($\lfloor d_1 / d_2 \rfloor$).
-- `CeilDivDim(left, right)`: Integer ceiling division ($\lceil d_1 / d_2 \rceil$).
+---
 
-`Shape.is_dynamic` returns `True` if any dimension contains non-static symbolic expressions.
+## 1. Core Architectural Tenets
+
+1. **A Neural Network is a Functional Tensor Program**: Every operation in the IR represents a deterministic mathematical transformation mapping input tensor identifiers to output tensor identifiers.
+2. **Framework Agnosticism**: The IR contains zero PyTorch, JAX, or vendor-specific abstractions. An exported ResNet, Transformer, or ConvNet produces an identical Canonical IR graph regardless of origin.
+3. **First-Class Dynamic Symbolic Shapes**: Dimensions are represented as symbolic mathematical expressions ($B, S, \lceil S / 32 \rceil, 2 \times D$) evaluated at runtime based on input symbol environments.
+4. **Explicit Storage Classes & Lifetimes**: Every tensor is tagged with an explicit storage category (`INPUT`, `PARAMETER`, `CONSTANT`, `ACTIVATION`, `STATE`, `OUTPUT`), allowing deterministic static memory arena planning.
+5. **Composability for Transformation Passes**: Clean DAG structure enabling single-pass and fixed-point graph transformations.
 
 ---
 
-## 4. Tensor Storage Classes (`StorageClass`)
+## 2. Graph Data Structure & Grammar
 
-Each tensor in the graph is tagged with its role in the computation lifecycle:
+A Canonical IR Graph is defined as:
 
-| StorageClass | Description | Lifetime |
-|---|---|---|
-| `INPUT` | User-provided model input tensor | Ephemeral (bound per inference run) |
-| `PARAMETER` | Trainable model weight or bias | Static (embedded in compiled artifact) |
-| `CONSTANT` | Constant scalar or static tensor | Static (embedded in compiled artifact) |
-| `ACTIVATION` | Intermediate computed activation buffer | Ephemeral (managed by runtime memory pool) |
-| `STATE` | Persistent mutable buffer (e.g. KV Cache) | Persistent across consecutive inference runs |
-| `OUTPUT` | Final graph output tensor | Read out after execution |
+$$\mathcal{G} = \langle \mathcal{T}, \mathcal{O}, \mathcal{S}, \mathcal{I}, \mathcal{P}, \mathcal{X}, \mathcal{M} \rangle$$
+
+Where:
+- $\mathcal{T} = \{t_1, t_2, \dots, t_N\}$: Set of all tensors in the program.
+- $\mathcal{O} = \{o_1, o_2, \dots, o_M\}$: Topologically sorted list of computational operations.
+- $\mathcal{S} = \{s_1, \dots\}$: Declarations for persistent mutable state (e.g. KV-Cache buffers).
+- $\mathcal{I} \subset \mathbb{N}$: Ordered list of input tensor IDs.
+- $\mathcal{P} \subset \mathbb{N}$: Ordered list of parameter tensor IDs (weights/biases).
+- $\mathcal{X} \subset \mathbb{N}$: Ordered list of output tensor IDs.
+- $\mathcal{M}$: Metadata dictionary (model name, source framework, version).
+
+### Concrete Python Structure
+
+```python
+@dataclass
+class Graph:
+    name: str = "main"
+    inputs: list[int] = field(default_factory=list)
+    outputs: list[int] = field(default_factory=list)
+    parameters: list[int] = field(default_factory=list)
+    states: list[StateDeclaration] = field(default_factory=list)
+    nodes: list[Operation] = field(default_factory=list)
+    tensors: dict[int, Tensor] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
+```
 
 ---
 
-## 5. Canonical Transformation Passes (`ggmlc.transforms`)
+## 3. Type System (`DType`)
 
-Canonical IR graphs are optimized prior to target lowering via `PassManager`:
-- **`ConstantFoldingPass`**: Pre-evaluates deterministic constant subgraphs at compile time.
-- **`OperatorFusionPass`**: Fuses Conv2D+ReLU, Linear+Bias, and SwiGLU composite patterns.
-- **`DeadCodeEliminationPass`**: Traverses backward from outputs and states to eliminate unused nodes.
-- **`RedundantCastPruner`**: Removes no-op transpositions and identical dtype casts.
+Every tensor in Canonical IR carries an explicit data type enumeration:
+
+| Enum Name | Primitive Type | Size | Quantized | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `DType.F32` | IEEE 754 float32 | 4 bytes | No | Standard single-precision floating point |
+| `DType.F16` | IEEE 754 float16 | 2 bytes | No | Standard half-precision floating point |
+| `DType.BF16` | bfloat16 | 2 bytes | No | Brain floating point (8-bit exponent) |
+| `DType.I32` | int32 | 4 bytes | No | Signed 32-bit integer |
+| `DType.I64` | int64 | 8 bytes | No | Signed 64-bit integer (indices, token IDs) |
+| `DType.I16` | int16 | 2 bytes | No | Signed 16-bit integer |
+| `DType.I8` | int8 | 1 byte | No | Signed 8-bit integer |
+| `DType.BOOL` | uint8 | 1 byte | No | Boolean predicate mask |
+| `DType.Q8_0` | Block quantized | 34 bytes / 32 elements | Yes | 8-bit symmetric quantization with FP16 scale |
+| `DType.Q4_0` | Block quantized | 18 bytes / 32 elements | Yes | 4-bit symmetric quantization with FP16 scale |
+| `DType.Q4_K` | Super-block | Variable | Yes | 4-bit k-quantization with 8-bit scales |
 
 ---
 
-## 6. Canonical Operator Set (`OpCode`)
+## 4. Symbolic Shape Engine (`Dim`, `Shape`)
 
-### Elementwise Arithmetic & Math
-- `ADD`, `SUB`, `MUL`, `DIV`, `NEG`, `POW`, `SQR`, `SQRT`, `RSQRT`, `EXP`, `LOG`, `ABS`, `CLAMP`
+Shapes in Canonical IR are represented as lists of `Dim` expressions:
 
-### Activations
-- `RELU`, `GELU`, `SILU`, `SIGMOID`, `TANH`, `SOFTMAX`, `SWIGLU`
+$$\text{Shape} = [d_0, d_1, \dots, d_{R-1}]$$
 
-### Linear Algebra & Matrix Multiplication
-- `MATMUL`: General matrix product ($A \times B$).
-- `LINEAR`: Linear layer projection ($x \times W^T + b$).
+```mermaid
+classDiagram
+    class Dim {
+        +evaluate(env) int
+        +free_symbols() Set[str]
+    }
+    class StaticDim {
+        +int value
+    }
+    class SymbolDim {
+        +str name
+    }
+    class AddDim {
+        +Dim left
+        +Dim right
+    }
+    class MulDim {
+        +Dim left
+        +Dim right
+    }
+    class FloorDivDim {
+        +Dim left
+        +Dim right
+    }
+    Dim <|-- StaticDim
+    Dim <|-- SymbolDim
+    Dim <|-- AddDim
+    Dim <|-- MulDim
+    Dim <|-- FloorDivDim
+```
 
-### Tensor Manipulation & Structural Ops
-- `TRANSPOSE`: 2D/N-D axis swap with dimension normalization.
-- `PERMUTE`: Arbitrary N-dimensional axis rearrangement.
-- `RESHAPE`, `VIEW`: Logical shape reinterpretation.
-- `SLICE`: Sub-tensor slicing along specified dimension with start, end, step.
-- `CONCAT`: Concatenation of multiple tensors along a specified axis.
-- `EXPAND`, `REPEAT`: Dimension broadcasting.
-- `SQUEEZE`, `UNSQUEEZE`: Dimension removal or insertion.
-- `CONTIGUOUS`: Guarantees contiguous memory buffer layout.
+### Expression Evaluation
+Given an environment `env = {"batch": 1, "seq": 128}`:
+- `StaticDim(768).evaluate(env) -> 768`
+- `SymbolDim("seq").evaluate(env) -> 128`
+- `MulDim(SymbolDim("batch"), SymbolDim("seq")).evaluate(env) -> 128`
+- `FloorDivDim(SymbolDim("seq"), StaticDim(32)).evaluate(env) -> 4`
 
-### Spatial Convolutions & Pooling
-- `CONV2D`: 2D Spatial Convolution with kernel, stride, and padding attributes.
-- `MAX_POOL2D`, `AVG_POOL2D`: 2D Pooling with adaptive or explicit kernel parameters.
+---
 
-### Normalization & High-Level Primitives
-- `LAYER_NORM`: Standard Layer Normalization with affine weight and bias.
-- `RMS_NORM`: Root Mean Square Layer Normalization.
-- `EMBEDDING`: Token table row lookup (`ggml_get_rows`).
-- `ROPE`: Rotary Position Embedding.
-- `SDPA`: Scaled Dot-Product Attention with optional causal or attention mask.
-- `MEAN`, `SUM`: Reduction operations along specified axes.
+## 5. Tensor Definition & Storage Classes
+
+Each tensor has an explicit `StorageClass`:
+
+```python
+@dataclass
+class Tensor:
+    id: int
+    name: str
+    shape: Shape
+    dtype: DType
+    storage: StorageClass
+    producer_id: int | None = None
+    data: np.ndarray | None = None
+    role: str | None = None
+```
+
+### Storage Lifecycle Semantics
+
+| Storage Class | Allocated By | Lifetime | Arena Reusable |
+| :--- | :--- | :--- | :--- |
+| `INPUT` | Caller | Active during single inference call | No |
+| `PARAMETER` | Binary Loader | Static for model instance lifetime | No (Read-Only) |
+| `CONSTANT` | Binary Loader | Static for model instance lifetime | No (Read-Only) |
+| `ACTIVATION` | Memory Arena | Ephemeral between producer and last consumer | **Yes ($18\times-51\times$ reuse)** |
+| `STATE` | State Manager | Persistent across consecutive inference steps | No (Read-Write State) |
+| `OUTPUT` | Memory Arena / Caller | Active until caller reads execution results | No |
+
+---
+
+## 6. Complete Canonical Operator Vocabulary (`OpCode`)
+
+### A. Elementwise Arithmetic & Unary Math
+- **`ADD(a, b) -> y`**: Elementwise addition $y = a + b$.
+- **`SUB(a, b) -> y`**: Elementwise subtraction $y = a - b$.
+- **`MUL(a, b) -> y`**: Elementwise multiplication $y = a \odot b$.
+- **`DIV(a, b) -> y`**: Elementwise division $y = a / b$.
+- **`NEG(a) -> y`**: Elementwise negation $y = -a$.
+- **`POW(a, exp) -> y`**: Exponentiation $y = a^{\text{exp}}$.
+- **`SQRT(a) -> y`**, **`RSQRT(a) -> y`**: Square root $\sqrt{a}$ and inverse square root $1/\sqrt{a}$.
+- **`EXP(a) -> y`**, **`LOG(a) -> y`**: Natural exponential and natural logarithm.
+- **`SIN(a) -> y`**, **`COS(a) -> y`**: Trigonometric functions.
+- **`CLAMP(a) -> y`**: Value clamping with attributes `min`, `max`.
+
+### B. Neural Network Activations & Normalizations
+- **`RELU(a) -> y`**: Rectified linear unit $y = \max(0, a)$.
+- **`GELU(a) -> y`**: Gaussian error linear unit $y = 0.5 a (1 + \tanh(\sqrt{2/\pi}(a + 0.044715 a^3)))$.
+- **`BIAS_GELU(a, bias) -> y`**: Fused linear bias addition and GELU activation $y = \text{GELU}(a + \text{bias})$.
+- **`SILU(a) -> y`**: Sigmoid linear unit $y = a / (1 + e^{-a})$.
+- **`SIGMOID(a) -> y`**, **`TANH(a) -> y`**: Standard activations.
+- **`SOFTMAX(a) -> y`**: Softmax reduction with attribute `dim`.
+- **`LAYER_NORM(x, weight, bias) -> y`**: Fused Layer Normalization with attribute `eps`.
+- **`RMS_NORM(x, weight) -> y`**: Root Mean Square Normalization with attribute `eps`.
+- **`SWIGLU(gate, up) -> y`**: Fused SwiGLU gating $y = \text{SiLU}(\text{gate}) \odot \text{up}$.
+
+### C. Linear Algebra & Dense Matrix Operations
+- **`MATMUL(a, b) -> y`**: General matrix multiplication $y = a \times b$.
+- **`LINEAR(x, w, bias) -> y`**: Dense linear layer with optional bias.
+- **`CONV2D(x, w, bias) -> y`**: 2D Spatial convolution with attributes `stride_h, stride_w, pad_h, pad_w`.
+- **`MAX_POOL2D(x) -> y`**, **`AVG_POOL2D(x) -> y`**: 2D Spatial pooling.
+- **`ADAPTIVE_AVG_POOL2D(x) -> y`**: Global or target-size adaptive pooling.
+
+### D. Tensor Layout & Manipulation Operations
+- **`RESHAPE(a) -> y`**, **`VIEW(a) -> y`**: Logical shape reinterpretation.
+- **`TRANSPOSE(a) -> y`**: 2D or N-D axis swap with attribute `dim0, dim1`.
+- **`PERMUTE(a) -> y`**: Arbitrary rank rearrangement with attribute `dims: list[int]`.
+- **`SLICE(a) -> y`**: Tensor slicing with attributes `dim, start, end, step`.
+- **`CONCAT(a, b, ...) -> y`**: Tensor concatenation along attribute `dim`.
+- **`SPLIT(a) -> (y1, y2, ...)`**: Tensor splitting along attribute `dim`.
+- **`REPEAT(a) -> y`**, **`EXPAND(a) -> y`**: Dimension broadcast repetition.
+- **`SQUEEZE(a) -> y`**, **`UNSQUEEZE(a) -> y`**: Unit dimension elimination or insertion.
+- **`CONTIGUOUS(a) -> y`**: Enforces physical row-major memory continuity.
+- **`EMBEDDING(indices, weight) -> y`**: Embedding table lookup.
+- **`ROPE(x) -> y`**: Rotary positional embedding with attributes `n_dims, mode`.
+- **`SDPA(q, k, v, mask) -> y`**: Scaled Dot-Product Attention with attribute `scale`.

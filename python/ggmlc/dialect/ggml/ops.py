@@ -64,6 +64,12 @@ class GGMLOpCode(IntEnum):
     GGML_OP_UNARY = 91
     GGML_OP_GLU = 100
 
+    # Custom Fused Opcodes (ggmlc-fused / ggmlc-stdlib)
+    GGML_OP_CUSTOM_BIAS_GELU = 200
+    GGML_OP_CUSTOM_LAYER_NORM = 201
+    GGML_OP_CUSTOM_RMS_NORM = 202
+    GGML_OP_CUSTOM_SWIGLU = 203
+
 
 @unique
 class GGMLUnaryOpCode(IntEnum):

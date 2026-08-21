@@ -30,6 +30,7 @@ class OpCode(Enum):
     # Neural network activations & norms
     RELU = "relu"
     GELU = "gelu"
+    BIAS_GELU = "bias_gelu"
     SILU = "silu"
     SIGMOID = "sigmoid"
     SOFTMAX = "softmax"

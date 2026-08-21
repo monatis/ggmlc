@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "ggmlc/stdlib_kernels.h"
 
 namespace ggmlc {
 
@@ -525,6 +526,43 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             case GGML_OP_CPY:
                 result = ggml_cast(ctx_, in0, model_graph_.tensors.at(out_id).type);
                 break;
+            case 200: { // GGML_OP_CUSTOM_BIAS_GELU: in0=x, in1=bias
+                if (!in0 || !in1) {
+                    throw std::runtime_error("GGML_OP_CUSTOM_BIAS_GELU requires 2 inputs");
+                }
+                result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_bias_gelu, GGML_N_TASKS_MAX, nullptr);
+                break;
+            }
+            case 201: { // GGML_OP_CUSTOM_LAYER_NORM: in0=x, in1=weight, in2=bias (optional)
+                struct ggml_tensor* w = in1;
+                struct ggml_tensor* b = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
+                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+
+                custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                params->eps = eps;
+
+                result = ggml_map_custom3(ctx_, in0, w, b, ggmlc_compute_forward_layer_norm, GGML_N_TASKS_MAX, params);
+                break;
+            }
+            case 202: { // GGML_OP_CUSTOM_RMS_NORM: in0=x, in1=weight
+                struct ggml_tensor* w = in1;
+                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+
+                custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                params->eps = eps;
+
+                result = ggml_map_custom2(ctx_, in0, w, ggmlc_compute_forward_rms_norm, GGML_N_TASKS_MAX, params);
+                break;
+            }
+            case 203: { // GGML_OP_CUSTOM_SWIGLU: in0=gate, in1=up
+                if (!in0 || !in1) {
+                    throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires 2 inputs (gate, up)");
+                }
+                result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_swiglu, GGML_N_TASKS_MAX, nullptr);
+                break;
+            }
             default:
                 // Fallback copy or identity
                 result = ggml_dup(ctx_, in0);

@@ -23,6 +23,7 @@ def create_standard_optimization_pipeline() -> PassManager:
 __all__ = [
     "ConstantFoldingPass",
     "DeadCodeEliminationPass",
+    "FusionOptions",
     "GraphTransformResult",
     "OperatorFusionPass",
     "Pass",

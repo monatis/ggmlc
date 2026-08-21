@@ -1,151 +1,242 @@
-"""Operator Fusion Pass for Canonical IR and dialect graphs."""
+"""Graph transformation passes for targeted operator fusion (ggmlc-fused)."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode, Operation
+from ggmlc.ir.tensor import StorageClass
 from ggmlc.transforms.base import GraphTransformResult, Pass, PassStats
 
 
-class OperatorFusionPass(Pass):
-    """Fuses composite operation patterns (e.g. Conv2D+Bias+ReLU, Linear+Bias, SwiGLU) into native fused operations."""
+@dataclass
+class FusionOptions:
+    """Configuration options for enabling or disabling individual fusion passes."""
 
-    def __init__(self):
-        super().__init__(name="OperatorFusion")
+    enable_bias_gelu: bool = True
+    enable_layer_norm: bool = True
+    enable_rms_norm: bool = True
+    enable_swiglu: bool = True
+    enable_conv2d_relu: bool = True
+
+
+class OperatorFusionPass(Pass):
+    """Compiler transformation pass that fuses eligible operator patterns."""
+
+    def __init__(self, options: FusionOptions | None = None, name: str = "OperatorFusionPass"):
+        super().__init__(name)
+        self.options = options or FusionOptions()
 
     def run(self, graph: Graph) -> GraphTransformResult:
         nodes_before = len(graph.nodes)
         tensors_before = len(graph.tensors)
 
-        # Producer map: tensor_id -> node_idx
-        # Consumer map: tensor_id -> list of node_idx
-        producer_map: dict[int, int] = {}
-        consumer_map: dict[int, list[int]] = {}
-        for idx, node in enumerate(graph.nodes):
-            for out_id in node.outputs:
-                producer_map[out_id] = idx
-            for in_id in node.inputs:
-                consumer_map.setdefault(in_id, []).append(idx)
+        fuse_operations(graph, self.options)
 
-        fused_count = 0
-        eliminated_node_indices: set[int] = set()
-        new_nodes: list[Operation] = []
+        nodes_after = len(graph.nodes)
+        tensors_after = len(graph.tensors)
+        fusions_applied = max(0, nodes_before - nodes_after)
 
-        state_tids = {s.id for s in graph.states}
-
-        # Sequential scan for fusion candidates
-        for idx, node in enumerate(graph.nodes):
-            if idx in eliminated_node_indices:
-                continue
-
-            # Pattern 1: Conv2D followed by ReLU where intermediate has single consumer
-            if node.opcode == OpCode.CONV2D and len(node.outputs) == 1:
-                conv_out = node.outputs[0]
-                consumers = consumer_map.get(conv_out, [])
-                if (
-                    len(consumers) == 1
-                    and conv_out not in graph.outputs
-                    and conv_out not in state_tids
-                ):
-                    next_idx = consumers[0]
-                    next_node = graph.nodes[next_idx]
-                    if next_node.opcode == OpCode.RELU and next_idx not in eliminated_node_indices:
-                        # Fuse Conv2D + ReLU
-                        fused_attrs = dict(node.attributes)
-                        fused_attrs["fused_relu"] = True
-                        fused_node = Operation(
-                            id=node.id,
-                            opcode=OpCode.CONV2D,
-                            inputs=list(node.inputs),
-                            outputs=list(next_node.outputs),
-                            attributes=fused_attrs,
-                        )
-                        new_nodes.append(fused_node)
-                        eliminated_node_indices.add(idx)
-                        eliminated_node_indices.add(next_idx)
-                        fused_count += 1
-                        continue
-
-            # Pattern 2: MatMul followed by Add (Bias) -> Linear with bias
-            if node.opcode == OpCode.MATMUL and len(node.outputs) == 1 and len(node.inputs) == 2:
-                matmul_out = node.outputs[0]
-                consumers = consumer_map.get(matmul_out, [])
-                if (
-                    len(consumers) == 1
-                    and matmul_out not in graph.outputs
-                    and matmul_out not in state_tids
-                ):
-                    next_idx = consumers[0]
-                    next_node = graph.nodes[next_idx]
-                    if next_node.opcode == OpCode.ADD and next_idx not in eliminated_node_indices:
-                        # Determine which input to Add is the bias
-                        bias_id = (
-                            next_node.inputs[1]
-                            if next_node.inputs[0] == matmul_out
-                            else next_node.inputs[0]
-                        )
-                        fused_node = Operation(
-                            id=node.id,
-                            opcode=OpCode.LINEAR,
-                            inputs=[node.inputs[0], node.inputs[1], bias_id],
-                            outputs=list(next_node.outputs),
-                            attributes=dict(node.attributes),
-                        )
-                        new_nodes.append(fused_node)
-                        eliminated_node_indices.add(idx)
-                        eliminated_node_indices.add(next_idx)
-                        fused_count += 1
-                        continue
-
-            # Pattern 3: SwiGLU pattern: x * silu(g)
-            if node.opcode == OpCode.SILU and len(node.outputs) == 1:
-                silu_out = node.outputs[0]
-                consumers = consumer_map.get(silu_out, [])
-                if (
-                    len(consumers) == 1
-                    and silu_out not in graph.outputs
-                    and silu_out not in state_tids
-                ):
-                    next_idx = consumers[0]
-                    next_node = graph.nodes[next_idx]
-                    if next_node.opcode == OpCode.MUL and next_idx not in eliminated_node_indices:
-                        other_in = (
-                            next_node.inputs[1]
-                            if next_node.inputs[0] == silu_out
-                            else next_node.inputs[0]
-                        )
-                        fused_node = Operation(
-                            id=node.id,
-                            opcode=OpCode.SWIGLU,
-                            inputs=[other_in, node.inputs[0]],
-                            outputs=list(next_node.outputs),
-                            attributes=dict(next_node.attributes),
-                        )
-                        new_nodes.append(fused_node)
-                        eliminated_node_indices.add(idx)
-                        eliminated_node_indices.add(next_idx)
-                        fused_count += 1
-                        continue
-
-            # If not fused, retain node
-            new_nodes.append(node)
-
-        # Build output graph
-        new_graph = Graph(name=graph.name)
-        new_graph.tensors = dict(graph.tensors)
-        new_graph.inputs = list(graph.inputs)
-        new_graph.outputs = list(graph.outputs)
-        new_graph.parameters = list(graph.parameters)
-        new_graph.states = list(graph.states)
-        new_graph.nodes = new_nodes
-
-        modified = fused_count > 0
         stats = PassStats(
             nodes_before=nodes_before,
-            nodes_after=len(new_graph.nodes),
+            nodes_after=nodes_after,
             tensors_before=tensors_before,
-            tensors_after=len(new_graph.tensors),
-            fusions_applied=fused_count,
+            tensors_after=tensors_after,
+            fusions_applied=fusions_applied,
+        )
+        return GraphTransformResult(
+            graph=graph,
+            modified=(nodes_before != nodes_after),
+            stats=stats,
         )
 
-        return GraphTransformResult(graph=new_graph, modified=modified, stats=stats)
+
+def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph:
+    """Applies pattern-matching fusion rewrites to a Canonical IR Graph.
+
+    Returns a new or modified Graph with fused operations where applicable.
+    """
+    if options is None:
+        options = FusionOptions()
+
+    if options.enable_conv2d_relu:
+        _fuse_conv2d_relu_patterns(graph)
+
+    if options.enable_swiglu:
+        _fuse_swiglu_patterns(graph)
+
+    if options.enable_bias_gelu:
+        _fuse_bias_gelu_patterns(graph)
+
+    return graph
+
+
+def _fuse_conv2d_relu_patterns(graph: Graph) -> None:
+    """Fuses CONV2D followed by RELU into a single CONV2D with fused_activation attribute."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+
+    for op in graph.nodes:
+        if op.opcode == OpCode.RELU and len(op.inputs) == 1:
+            inp_id = op.inputs[0]
+            prod = producer_map.get(inp_id)
+            if (
+                prod
+                and prod.opcode == OpCode.CONV2D
+                and consumer_counts.get(prod.outputs[0], 0) <= 1
+            ):
+                prod.attributes["fused_relu"] = True
+                prod.attributes["fused_activation"] = "relu"
+                prod.outputs = list(op.outputs)
+                if op.outputs[0] in graph.tensors:
+                    graph.tensors[op.outputs[0]].producer_id = prod.id
+                ops_to_remove.add(op.id)
+
+    graph.nodes = [n for n in graph.nodes if n.id not in ops_to_remove]
+
+
+def _fuse_swiglu_patterns(graph: Graph) -> None:
+    """Matches Silu(gate) * up and replaces with SWIGLU(gate, up)."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.MUL and len(op.inputs) == 2:
+            in0_id, in1_id = op.inputs[0], op.inputs[1]
+            prod0 = producer_map.get(in0_id)
+            prod1 = producer_map.get(in1_id)
+
+            gate_id = None
+            up_id = None
+            silu_op = None
+
+            if prod0 and prod0.opcode == OpCode.SILU:
+                silu_op = prod0
+                gate_id = prod0.inputs[0]
+                up_id = in1_id
+            elif prod1 and prod1.opcode == OpCode.SILU:
+                silu_op = prod1
+                gate_id = prod1.inputs[0]
+                up_id = in0_id
+
+            if silu_op is not None and gate_id is not None and up_id is not None:
+                # If the intermediate silu output is only consumed by this mul, we can prune it
+                if consumer_counts.get(silu_op.outputs[0], 0) <= 1:
+                    ops_to_remove.add(silu_op.id)
+
+                fused_op = Operation(
+                    id=op.id,
+                    opcode=OpCode.SWIGLU,
+                    inputs=[gate_id, up_id],
+                    outputs=list(op.outputs),
+                    attributes=dict(op.attributes),
+                    name=f"{op.name or 'swiglu'}_fused",
+                )
+                new_nodes.append(fused_op)
+                continue
+
+        new_nodes.append(op)
+
+    # Filter out nodes marked for removal
+    final_nodes = [n for n in new_nodes if n.id not in ops_to_remove]
+    graph.nodes = final_nodes
+
+
+def _fuse_bias_gelu_patterns(graph: Graph) -> None:
+    """Matches Linear(x, w, bias) -> GELU or Add(x, bias) -> GELU and fuses into BIAS_GELU."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.GELU and len(op.inputs) == 1:
+            inp_id = op.inputs[0]
+            prod = producer_map.get(inp_id)
+
+            if prod and prod.opcode == OpCode.LINEAR and len(prod.inputs) >= 3:
+                # Linear(x, w, bias) -> GELU(out)
+                # Split into Linear(x, w) and BiasGELU(linear_out, bias)
+                x_id = prod.inputs[0]
+                w_id = prod.inputs[1]
+                b_id = prod.inputs[2]
+                prod.inputs = [x_id, w_id]
+
+                fused_op = Operation(
+                    id=op.id,
+                    opcode=OpCode.BIAS_GELU,
+                    inputs=[prod.outputs[0], b_id],
+                    outputs=list(op.outputs),
+                    attributes=dict(op.attributes),
+                    name=f"{op.name or 'bias_gelu'}_fused",
+                )
+                new_nodes.append(fused_op)
+                continue
+
+            elif prod and prod.opcode == OpCode.ADD and len(prod.inputs) == 2:
+                # Check if one input is an activation and the other is a bias/parameter
+                in0 = graph.get_tensor(prod.inputs[0])
+                in1 = graph.get_tensor(prod.inputs[1])
+
+                act_id = None
+                bias_id = None
+                if (
+                    in1.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
+                    or len(in1.shape.dims) == 1
+                ):
+                    act_id = in0.id
+                    bias_id = in1.id
+                elif (
+                    in0.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
+                    or len(in0.shape.dims) == 1
+                ):
+                    act_id = in1.id
+                    bias_id = in0.id
+
+                if act_id is not None and bias_id is not None:
+                    if consumer_counts.get(prod.outputs[0], 0) <= 1:
+                        ops_to_remove.add(prod.id)
+
+                    fused_op = Operation(
+                        id=op.id,
+                        opcode=OpCode.BIAS_GELU,
+                        inputs=[act_id, bias_id],
+                        outputs=list(op.outputs),
+                        attributes=dict(op.attributes),
+                        name=f"{op.name or 'bias_gelu'}_fused",
+                    )
+                    new_nodes.append(fused_op)
+                    continue
+
+        new_nodes.append(op)
+
+    final_nodes = [n for n in new_nodes if n.id not in ops_to_remove]
+    graph.nodes = final_nodes
