@@ -115,10 +115,10 @@ One of `ggmlc`'s most innovative capabilities is the **Agentic Kernel Developer*
             [PASSED]                   [FAILED]
                  |                         |
                  v                         v
-       +---------+----------+    +---------+----------+
-       | Register Plugin in |    | Auto-Feedback Loop |
-       | Compiled .ggmlc    |    | to Synthesis Agent |
-       +--------------------+    +--------------------+
+        +---------+----------+    +---------+----------+
+        | Register Plugin in |    | Auto-Feedback Loop |
+        | Compiled .gguf     |    | to Synthesis Agent |
+        +--------------------+    +--------------------+
 ```
 
 ### Synthesis Workflow:
@@ -155,6 +155,6 @@ Node #42: 'aten.custom_dequantize'
   Resolution:
     [1] Agentic Kernel Developer synthesized JIT plugin: 'cache/kernels/dequant_3bit.so'
     [2] Differential Numerical Parity: PASSED (Max Diff: 1.2e-7, Cosine Sim: 1.000000)
-    [3] Emitted standalone .ggmlc with embedded custom plugin dependency.
+    [3] Emitted standalone .gguf with embedded custom plugin dependency.
 ================================================================================
 ```

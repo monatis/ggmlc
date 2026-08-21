@@ -40,7 +40,7 @@ def run_compiled_model_wsl(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        model_file = tmp_path / "model.ggmlc"
+        model_file = tmp_path / "model.gguf"
         model_file.write_bytes(serialized_bytes)
 
         # Write inputs

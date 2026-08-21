@@ -60,7 +60,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Optional path to save compiled .ggmlc artifact",
+        help="Optional path to save compiled .gguf artifact",
     )
     args = parser.parse_args()
 
@@ -81,10 +81,10 @@ def main():
     ggml_graph = lower_to_ggml(exported.main_graph)
     print(f"      GGML execution graph: {len(ggml_graph.ops)} ops scheduled.")
 
-    # 3. Serialize to binary container
-    print("[3/4] Serializing to binary .ggmlc artifact...")
+    # 3. Serialize to GGUF v3 binary container
+    print("[3/4] Serializing to GGUF v3 binary container...")
     ser_bytes = serialize_ggml_graph(ggml_graph)
-    print(f"      Serialized binary size: {len(ser_bytes):,} bytes.")
+    print(f"      Serialized GGUF size: {len(ser_bytes):,} bytes.")
 
     if args.output:
         out_p = Path(args.output)

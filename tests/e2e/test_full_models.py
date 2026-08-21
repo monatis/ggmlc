@@ -44,7 +44,7 @@ def _verify_full_model_e2e(
     ggml_graph = lower_to_ggml(exported.main_graph)
     assert len(ggml_graph.nodes) > 0
 
-    # 4. Serialize to .ggmlc binary format
+    # 4. Serialize to GGUF v3 binary format
     ser_bytes = serialize_ggml_graph(ggml_graph)
     assert len(ser_bytes) > 0
 

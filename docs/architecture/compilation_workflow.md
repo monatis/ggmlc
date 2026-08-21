@@ -1,6 +1,6 @@
 # ggmlc Compilation Workflow & Architecture
 
-`ggmlc` is an optimizing tensor program compiler that translates high-level neural network graphs from PyTorch (`torch.export`) and JAX (`jaxpr`) into GGML dialect execution graphs executed by a lightweight C++ generic runtime.
+`ggmlc` is an optimizing tensor program compiler that translates high-level neural network graphs from PyTorch (`torch.export`) and JAX (`jaxpr`) into GGML dialect execution graphs executed by a lightweight C++ generic runtime or emitted as standalone C++ projects.
 
 ---
 
@@ -31,7 +31,7 @@
   |      Transformation & Optimization Passes        |
   |  - Constant Folding (ConstantFoldingPass)        |
   |  - Dead Code Elimination (DeadCodeElimination)   |
-  |  - Operator Fusion (Conv2D+ReLU, SwiGLU, MatMul) |
+  |  - Operator Fusion (Conv2D+ReLU, SwiGLU, Norms)  |
   |  - Redundant Cast & Permutation Pruning          |
   +---------------------+----------------------------+
                         |
@@ -53,19 +53,18 @@
                         |
                         v
   +---------------------+----------------------------+
-  |           Binary Serialization (.ggmlc)          |
-  |  - Compact header, symbol table, tensor table    |
-  |  - 16-byte aligned parameter buffer embedding    |
+  |           GGUF v3 Binary Serialization           |
+  |  - Standard GGUF container with 32-byte padding  |
+  |  - Lossless DAG JSON spec in ggmlc.graph_spec    |
   +---------------------+----------------------------+
-                        |
-                        v
-  +---------------------+----------------------------+
-  |          C++ Generic Runtime (ggmlc-run)         |
-  |  - Dynamic symbol evaluation                     |
-  |  - Static single-buffer memory planning          |
-  |  - Persistent state buffers (KV cache)           |
-  |  - Native quantized SIMD kernel execution        |
-  +--------------------------------------------------+
+            |                                    |
+            v                                    v
+  +---------+---------------+          +---------+----------------+
+  | C++ Generic Interpreter |          | Standalone C++ Codegen   |
+  |  - ggmlc-run binary     |          |  - <Model>.h             |
+  |  - Dynamic symbol eval  |          |  - ggmlc_main.cpp        |
+  |  - Zero-compile deploy  |          |  - CMakeLists.txt        |
+  +-------------------------+          +--------------------------+
 ```
 
 ---
@@ -85,7 +84,7 @@ The Canonical IR represents the neural network as a purely functional, framework
 ### Stage 3: Optimization Pass Pipeline
 Graph optimizations are performed on the Canonical IR by `PassManager`:
 - **`ConstantFoldingPass`**: Pre-evaluates deterministic constant subgraphs at compile time.
-- **`OperatorFusionPass`**: Fuses composite patterns (Conv2D+ReLU, Linear+Bias, SwiGLU) into monolithic operations.
+- **`OperatorFusionPass`**: Fuses composite patterns (Conv2D+ReLU, Linear+Bias, SwiGLU, LayerNorm, RMSNorm) into monolithic operations.
 - **`DeadCodeEliminationPass`**: Prunes unreachable nodes and orphan activations via backward reachability from outputs and states.
 - **`RedundantCastPruner`**: Removes identity transpositions and identical dtype casts.
 
@@ -103,19 +102,19 @@ Compresses 2D parameter matrices into hardware-aligned block formats:
 - **`Q4_0`**: 4-bit nibble-packed block quantization ($7.11\times$ compression, cosine similarity $> 0.9850$).
 - 1D biases and activation paths remain in full `F32` for numerical stability.
 
-### Stage 6: Binary Serialization (`.ggmlc`)
-The execution graph is compiled into a standalone, portable binary container:
-- Magic header (`GGMLC\x01\x00\x00`) and format version.
-- Global dynamic symbol registry (`symbol_table`).
-- Input, output, parameter, and state tensor metadata.
-- Recursive symbolic dimension trees for dynamic rank/extent evaluation.
-- Opcode schedule with operator-specific attributes.
-- 16-byte aligned binary weight data buffer for parameters and constants.
+### Stage 6: Standard GGUF v3 Serialization
+The execution graph is serialized into a standard, universal **GGUF v3** binary container:
+- Magic header (`GGUF\x03\x00\x00\x00`) and standard metadata tables.
+- Complete execution DAG (nodes, shapes, symbols, storage classes, and operator attributes) encoded losslessly as JSON string metadata under `ggmlc.graph_spec`.
+- Parameters and constants stored with strict 32-byte alignment.
 
-### Stage 7: Generic C++ Execution
-Rather than generating brittle, model-specific C++ source code that requires recompilation for each architecture, `ggmlc` utilizes a **universal graph interpreter**:
-- Reads `.ggmlc` artifacts directly via `ModelLoader`.
-- Evaluates dynamic dimensions for the current inference batch/sequence size.
-- Pre-allocates single continuous tensor memory pools without runtime memory allocations in the hot inference loop.
-- Manages persistent state tensors for multi-step autoregressive generation (KV-cache).
-- Dispatches quantized matrix multiplications directly to AVX-512 / ARM NEON kernels.
+### Stage 7: Dual Execution Modes
+`ggmlc` supports two deployment options:
+1. **Generic C++ Runtime Interpreter (`ggmlc-run`)**:
+   - Reads `.gguf` artifacts directly via `ModelLoader`.
+   - Evaluates dynamic dimensions for the current inference batch/sequence size.
+   - Pre-allocates single continuous tensor memory pools without runtime allocations in the inference loop.
+   - Manages persistent state tensors for multi-step autoregressive generation (KV-cache).
+2. **Ahead-Of-Time (AOT) C++ Code Generation (`ggmlc.codegen`)**:
+   - Emits a standalone, human-readable C++ directory containing `<ModelName>.h`, `ggmlc_main.cpp`, and `CMakeLists.txt`.
+   - Ideal for embedding into native mobile or embedded environments without external dependencies.

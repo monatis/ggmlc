@@ -82,12 +82,12 @@ When compiling a multi-layer architecture (e.g. 24-layer Qwen or 8-layer BGE-M3)
 
 ---
 
-### Strategy 2: Inspecting Serialized Binary Graphs
-Use the Python inspection helper to inspect the `.ggmlc` binary contents:
+### Strategy 2: Inspecting Serialized GGUF Graphs
+Use the Python inspection helper to inspect the `.gguf` binary contents:
 ```python
-from ggmlc.serialization.graph import deserialize_ggml_graph
+from ggmlc.serialization.gguf import deserialize_ggml_graph
 
-with open("model.ggmlc", "rb") as f:
+with open("model.gguf", "rb") as f:
     g = deserialize_ggml_graph(f.read())
 
 print(f"Nodes: {len(g.nodes)}")
@@ -101,7 +101,7 @@ for node in g.nodes:
 When executing via WSL or local binary:
 1. Run `ggmlc-run` with verbose logging:
    ```bash
-   ./build/runtime/ggmlc-run --model model.ggmlc --input x=input.bin --output out=output.bin --verbose
+   ./build/runtime/ggmlc-run model.gguf --input x:input.bin --output 13:output.bin
    ```
 2. Check the tensor dimensions reported by `ggmlc-run`:
    ```

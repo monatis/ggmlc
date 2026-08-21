@@ -17,8 +17,8 @@ graph TD
     subgraph "Target Execution Graph"
         GGML_T --> EG["GGMLExecutionGraph"]
         GGML_OP --> EG
-        EG --> BIN["Binary Serialization (.ggmlc)"]
-        BIN --> RUN["C++ ModelExecutor (ctx_, cgraph_)"]
+        EG --> BIN["GGUF v3 Serialization (.gguf)"]
+        BIN --> RUN["C++ Runtime (ggmlc-run / AOT Codegen)"]
     end
 ```
 

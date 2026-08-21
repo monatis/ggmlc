@@ -6,11 +6,11 @@ This guide explains how to quantize neural network models to **Q8_0** and **Q4_0
 
 ## 1. Quickstart: Quantization CLI
 
-`ggmlc` provides a unified command-line tool `python -m ggmlc.cli.quantize` for one-shot export, optimization, quantization, and `.ggmlc` binary generation.
+`ggmlc` provides a unified command-line tool `python -m ggmlc.cli.quantize` for one-shot export, optimization, quantization, and `.gguf` binary generation.
 
 ### Example: Quantizing MiniLM to Q4_0
 ```bash
-python -m ggmlc.cli.quantize --model minilm --dtype q4_0 --optimize --output scratch/minilm_q4.ggmlc
+python -m ggmlc.cli.quantize --model minilm --dtype q4_0 --optimize --output scratch/minilm_q4.gguf
 ```
 
 **Output**:
@@ -23,7 +23,7 @@ Running Canonical IR Optimization Pipeline...
 Lowering to GGML dialect...
 Quantizing parameters to Q4_0...
   Quantized 103 weight tensors: 86.65 MB -> 12.19 MB (7.11x compression ratio)
-Saved quantized model to 'scratch/minilm_q4.ggmlc' (12.22 MB).
+Saved quantized model to 'scratch/minilm_q4.gguf' (12.22 MB).
 ```
 
 ### CLI Arguments
@@ -32,7 +32,7 @@ Saved quantized model to 'scratch/minilm_q4.ggmlc' (12.22 MB).
 | `--model` | Model name (`resnet18`, `resnet50`, `minilm`, `gpt2`, `qwen`, `bge_m3`) | *Required* |
 | `--dtype` | Target quantization format: `q4_0`, `q8_0`, `f32` | `q4_0` |
 | `--optimize` | Enable Canonical IR optimization passes before lowering | `True` |
-| `--output` | Destination `.ggmlc` container path | `<model>_<dtype>.ggmlc` |
+| `--output` | Destination `.gguf` container path | `<model>_<dtype>.gguf` |
 
 ---
 
@@ -47,7 +47,7 @@ from ggmlc.transforms import create_standard_optimization_pipeline
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.quantization import quantize_graph_parameters
 from ggmlc.ir.dtype import DType
-from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.serialization.gguf import serialize_ggml_graph
 
 # 1. Export PyTorch model
 model = MyTransformerModel().eval()
@@ -66,9 +66,9 @@ ggml_graph = lower_to_ggml(canonical_graph)
 quant_graph, stats = quantize_graph_parameters(ggml_graph, target_dtype=DType.Q4_0)
 print(f"Quantized {stats['tensors_quantized']} tensors: {stats['compression_ratio']:.2f}x compression")
 
-# 5. Serialize to binary container
+# 5. Serialize to GGUF v3 binary container
 binary_bytes = serialize_ggml_graph(quant_graph)
-with open("my_model_q4_0.ggmlc", "wb") as f:
+with open("my_model_q4_0.gguf", "wb") as f:
     f.write(binary_bytes)
 ```
 

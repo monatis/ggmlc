@@ -1,28 +1,33 @@
 # C++ Generic Runtime Architecture
 
-The `ggmlc` C++ runtime (`ggmlc_runtime`) is a high-performance, lightweight execution engine that evaluates serialized `.ggmlc` execution graphs using the underlying GGML library.
+The `ggmlc` C++ runtime (`ggmlc_runtime`) is a high-performance, lightweight execution engine that evaluates compiled **GGUF v3** neural network graphs using the underlying GGML library.
 
 ---
 
 ## 1. Design Overview
 
-Rather than generating custom C++ files for each neural network architecture, `ggmlc` employs a **generic graph interpreter**:
-- **Zero dynamic code compilation**: The runtime binary `ggmlc-run` is compiled once and can execute any `.ggmlc` model artifact.
-- **Deterministic memory planning**: Context memory is calculated dynamically during `prepare()` and allocated in a single contiguous arena.
-- **Dynamic shape binding**: Symbolic dimensions (e.g. batch size, sequence length) are supplied as command-line arguments or runtime environment dictionaries.
-- **Persistent state buffers**: Stateful memory (`StorageClass.STATE`) persists across sequential inference invocations.
-- **Hardware-accelerated quantized execution**: Direct SIMD kernel execution (AVX2, AVX-512, ARM NEON) for `Q4_0` and `Q8_0` quantized models.
+`ggmlc` provides two complementary execution strategies:
+1. **Generic Graph Interpreter (`ggmlc-run`)**:
+   - **Zero dynamic code compilation**: The runtime binary `ggmlc-run` is compiled once and can execute any `.gguf` model artifact.
+   - **Standard GGUF v3 container**: Graph topologies and dynamic shape expressions are stored losslessly as JSON metadata in `ggmlc.graph_spec`, while parameter buffers are stored with 32-byte alignment.
+   - **Deterministic memory planning**: Context memory is calculated dynamically during `prepare()` and allocated in a single contiguous arena.
+   - **Dynamic shape binding**: Symbolic dimensions (e.g. batch size, sequence length) are evaluated dynamically from runtime environment dictionaries or CLI flags.
+   - **Persistent state buffers**: Stateful memory (`StorageClass.STATE`) persists across sequential inference invocations for autoregressive decoding.
+   - **Hardware-accelerated quantized execution**: Direct SIMD kernel execution (AVX2, AVX-512, ARM NEON) for `Q4_0` and `Q8_0` quantized models.
+
+2. **Standalone Ahead-Of-Time (AOT) C++ Code Generation (`ggmlc.codegen`)**:
+   - Compiles any model graph into pure C++ source files (`<Model>.h`, `ggmlc_main.cpp`, `CMakeLists.txt`) for embedding directly into native applications without Python or generic interpreter dependencies. (See [C++ Code Generation Guide](docs/codegen/cpp_codegen.md)).
 
 ---
 
 ## 2. Core Runtime Classes
 
 ### `ModelLoader` (`runtime/src/loader.cpp`)
-Responsible for reading `.ggmlc` binary files into in-memory `SerializedModelGraph` structures:
-- Reads file header, version, and global `symbol_table`.
-- Deserializes tensor definitions, storage classes, and dimension expression trees (`DimExpr`).
-- Deserializes the operation schedule with attributes.
-- Loads raw parameter/constant weight byte buffers with 16-byte alignment.
+Responsible for reading GGUF v3 binary files into in-memory `SerializedModelGraph` structures:
+- Initializes the GGUF reader context via `gguf_init_from_file`.
+- Extracts `ggmlc.graph_spec` string metadata containing the JSON DAG specification (nodes, inputs, outputs, tensor metadata, dynamic shapes, and storage classes).
+- Parses tensor tables, storage classes, and dimension expression trees (`DimExpr`).
+- Maps raw parameter and constant weight memory pointers directly from the GGUF container with 32-byte alignment.
 
 ### `ModelExecutor` (`runtime/src/executor.cpp`)
 Main runtime orchestrator:
@@ -31,7 +36,7 @@ Main runtime orchestrator:
   2. Computes total tensor and overhead memory requirements taking block quantization into account:
      $$\text{tensor\_bytes} = \frac{\text{numel}}{\text{ggml\_blck\_size}(\text{type})} \times \text{ggml\_type\_size}(\text{type})$$
   3. Initializes `ggml_context` and creates all `ggml_tensor` objects.
-  4. Copies parameter and constant data into tensor buffers.
+  4. Binds parameter and constant data pointers into tensor buffers.
   5. Restores persistent states from `persistent_states_` or zeros them on first invocation.
   6. Builds the execution graph (`ggml_cgraph`).
 - `set_input(tensor_id, data, size)` / `set_input_by_name(name, data, size)`: Copies user input buffers into graph inputs with shape/size verification.
@@ -45,7 +50,7 @@ Main runtime orchestrator:
 ## 3. CLI Runner (`ggmlc-run`)
 
 ```bash
-ggmlc-run <model.ggmlc> [options]
+ggmlc-run <model.gguf> [options]
 ```
 
 ### Supported CLI Options
@@ -64,8 +69,8 @@ ggmlc-run <model.ggmlc> [options]
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
 
-// 1. Load compiled model graph (FP32, Q8_0, or Q4_0)
-auto model_graph = ggmlc::ModelLoader::load_from_file("minilm_q4.ggmlc");
+// 1. Load compiled model graph from GGUF container (FP32, Q8_0, or Q4_0)
+auto model_graph = ggmlc::ModelLoader::load_from_file("minilm_q4.gguf");
 
 // 2. Instantiate executor and bind dynamic dimensions
 ggmlc::ModelExecutor executor(model_graph);

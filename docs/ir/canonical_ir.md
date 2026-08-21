@@ -19,8 +19,8 @@ graph TD
 
     subgraph "Target Lowering"
         RC --> Dialect["GGML Dialect Graph"]
-        Dialect --> Serializer["Binary Serialization (.ggmlc)"]
-        Serializer --> Runtime["C++ Generic Runtime (libggmlc_runtime)"]
+        Dialect --> Serializer["GGUF v3 Serialization (.gguf)"]
+        Serializer --> Runtime["C++ Runtime (ggmlc-run / AOT Codegen)"]
     end
 ```
 

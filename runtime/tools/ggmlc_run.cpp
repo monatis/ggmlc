@@ -9,7 +9,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ggmlc-run <model.ggmlc> [options]\n"
+        std::cerr << "Usage: ggmlc-run <model.gguf> [options]\n"
                   << "Options:\n"
                   << "  --input <name:file.bin>     Set input tensor from binary file\n"
                   << "  --output <id:file.bin>      Save output tensor ID to binary file\n"

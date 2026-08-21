@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.serialization.gguf import serialize_ggml_graph
 from ggmlc.validation.numerical import run_compiled_model_wsl
 from torch import nn
 
@@ -38,7 +38,7 @@ class GGMLCGenerator:
         self._compile()
 
     def _compile(self):
-        """Compiles the PyTorch model graph into a serialized .ggmlc artifact."""
+        """Compiles the PyTorch model graph into a serialized GGUF artifact."""
         self.model.eval()
         dim_s = torch.export.Dim("s", min=1, max=self.max_seq_len)
         dummy_input = (torch.randint(0, 1000, (1, 8), dtype=torch.int32),)

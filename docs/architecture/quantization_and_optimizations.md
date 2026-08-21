@@ -97,8 +97,8 @@ To ensure numerical stability and correct runtime execution:
    - 1D biases (`[out_features]`) and normalization parameters (LayerNorm $\gamma/\beta$, RMSNorm scales) remain `F32` to avoid drift in small vectors.
 3. **Activation Paths Stay FP32**:
    - Inputs, intermediate activations, and KV cache states remain full `F32`.
-4. **16-Byte Container Alignment**:
-   - In serialized `.ggmlc` binary containers, all quantized and raw parameter payloads are padded to 16-byte boundaries for AVX-512 / NEON alignment.
+4. **32-Byte Container Alignment**:
+   - In serialized GGUF v3 (`.gguf`) binary containers, all quantized and raw parameter payloads are padded to 32-byte boundaries for AVX-512 / AVX2 / NEON alignment.
 
 ---
 

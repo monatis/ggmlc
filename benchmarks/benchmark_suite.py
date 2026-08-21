@@ -143,7 +143,7 @@ def run_comparative_model_benchmark(
     # 8. Serialize
     binary = serialize_ggml_graph(ggml_graph)
     serialized_size_mb = len(binary) / (1024 * 1024)
-    print(f"  Serialized .ggmlc size: {serialized_size_mb:.2f} MB")
+    print(f"  Serialized GGUF size: {serialized_size_mb:.2f} MB")
 
     # 9. Prepare Input Buffers
     input_names = [exported.main_graph.tensors[tid].name for tid in exported.main_graph.inputs]

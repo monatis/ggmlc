@@ -9,7 +9,7 @@ from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.ir.dtype import DType
 from ggmlc.quantization.model_quantizer import quantize_graph_parameters
-from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.serialization.gguf import serialize_to_gguf
 from ggmlc.transforms import create_standard_optimization_pipeline
 
 
@@ -33,7 +33,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Output .ggmlc binary path",
+        help="Output .gguf binary path",
     )
     parser.add_argument(
         "--optimize",
@@ -95,9 +95,9 @@ def main():
         f"{stats['orig_bytes'] / (1024 * 1024):.2f} MB -> {stats['quant_bytes'] / (1024 * 1024):.2f} MB "
         f"({stats['compression_ratio']:.2f}x compression ratio)"
     )
-    binary = serialize_ggml_graph(quant_ggml_graph)
+    binary = serialize_to_gguf(quant_ggml_graph)
 
-    out_path = Path(args.output or f"{args.model}_{args.dtype}.ggmlc")
+    out_path = Path(args.output or f"{args.model}_{args.dtype}.gguf")
     out_path.write_bytes(binary)
     print(f"Saved quantized model to '{out_path}' ({len(binary) / (1024 * 1024):.2f} MB).")
 
