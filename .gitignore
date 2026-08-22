@@ -9,3 +9,7 @@ __pycache__
 scratch/
 *.pyd
 *.whl
+*.egg-info
+*.dist-info
+dist
+.ruff_cache
