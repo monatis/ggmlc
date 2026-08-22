@@ -19,6 +19,7 @@ class FusionOptions:
     enable_rms_norm: bool = True
     enable_swiglu: bool = True
     enable_conv2d_relu: bool = True
+    enable_softmax: bool = True
 
 
 class OperatorFusionPass(Pass):
@@ -59,6 +60,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
     """
     if options is None:
         options = FusionOptions()
+
+    if options.enable_softmax:
+        _fuse_softmax_patterns(graph)
 
     if options.enable_conv2d_relu:
         _fuse_conv2d_relu_patterns(graph)
@@ -240,3 +244,70 @@ def _fuse_bias_gelu_patterns(graph: Graph) -> None:
 
     final_nodes = [n for n in new_nodes if n.id not in ops_to_remove]
     graph.nodes = final_nodes
+
+
+def _fuse_softmax_patterns(graph: Graph) -> None:
+    """Matches decomposed softmax: div(exp(x - max(x)), sum(exp(x - max(x)))) -> SOFTMAX(x)."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+
+    for op in graph.nodes:
+        if op.opcode == OpCode.DIV and len(op.inputs) == 2:
+            num_id, denom_id = op.inputs[0], op.inputs[1]
+            exp_op = producer_map.get(num_id)
+            if not exp_op or exp_op.opcode != OpCode.EXP:
+                continue
+
+            sub_op = producer_map.get(exp_op.inputs[0])
+            if sub_op and sub_op.opcode == OpCode.SUB:
+                x_id = sub_op.inputs[0]
+            else:
+                x_id = exp_op.inputs[0]
+
+            denom_op = producer_map.get(denom_id)
+            if denom_op and denom_op.opcode in (
+                OpCode.RESHAPE,
+                OpCode.VIEW,
+                OpCode.SQUEEZE,
+                OpCode.UNSQUEEZE,
+            ):
+                sum_op = producer_map.get(denom_op.inputs[0])
+            else:
+                sum_op = denom_op
+
+            if sum_op and sum_op.opcode == OpCode.SUM:
+                if sum_op.inputs[0] == exp_op.outputs[0]:
+                    op.opcode = OpCode.SOFTMAX
+                    op.inputs = [x_id]
+                    op.attributes["dim"] = -1
+                    ops_to_remove.add(exp_op.id)
+                    if sub_op:
+                        ops_to_remove.add(sub_op.id)
+                        max_in = sub_op.inputs[1]
+                        max_op = producer_map.get(max_in)
+                        if max_op:
+                            if max_op.opcode in (
+                                OpCode.RESHAPE,
+                                OpCode.VIEW,
+                                OpCode.SQUEEZE,
+                                OpCode.UNSQUEEZE,
+                            ):
+                                inner_max = producer_map.get(max_op.inputs[0])
+                                if inner_max:
+                                    ops_to_remove.add(inner_max.id)
+                                ops_to_remove.add(max_op.id)
+                            else:
+                                ops_to_remove.add(max_op.id)
+                    if denom_op and denom_op != sum_op:
+                        ops_to_remove.add(denom_op.id)
+                    ops_to_remove.add(sum_op.id)
+
+    if ops_to_remove:
+        graph.nodes = [n for n in graph.nodes if n.id not in ops_to_remove]

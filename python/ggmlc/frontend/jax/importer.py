@@ -8,7 +8,7 @@ import numpy as np
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
-from ggmlc.ir.shape import Shape
+from ggmlc.ir.shape import Shape, StaticDim
 from ggmlc.ir.tensor import StorageClass, Tensor
 
 # JAX Primitive -> Canonical OpCode mapping
@@ -42,6 +42,12 @@ JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
     "reduce_sum": OpCode.SUM,
     "reduce_max": OpCode.AMAX,
     "reduce_min": OpCode.AMIN,
+    "convert_element_type": OpCode.CAST,
+    "squeeze": OpCode.RESHAPE,
+    "square": OpCode.POW,
+    "integer_pow": OpCode.POW,
+    "pow": OpCode.POW,
+    "erf": OpCode.GELU,
 }
 
 
@@ -87,6 +93,14 @@ def _import_equations(
                         var_to_tensor[outer_out] = inner_var_map[inner_out]
                 continue
 
+        # Handle identity primitives like stop_gradient, copy
+        if prim_name in ("stop_gradient", "copy"):
+            in_var = eqn.invars[0]
+            out_var = eqn.outvars[0]
+            if in_var in var_to_tensor:
+                var_to_tensor[out_var] = var_to_tensor[in_var]
+            continue
+
         opcode = JAX_PRIMITIVE_MAP.get(prim_name)
         if opcode is None:
             raise NotImplementedError(
@@ -123,6 +137,226 @@ def _import_equations(
             storage=StorageClass.ACTIVATION,
         )
         var_to_tensor[out_var] = out_t
+
+        # Special handling for dot_general multi-head / multidimensional projections
+        if prim_name == "dot_general":
+            dim_numbers = eqn.params.get("dimension_numbers")
+            lhs_t = g.get_tensor(in_tids[0])
+            rhs_t = g.get_tensor(in_tids[1])
+            (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dim_numbers
+
+            # Check if this is a general dense / multi-head projection with 3D/4D weight and no batch dim
+            if (len(rhs_t.shape.dims) > 2 or len(lhs_contracting) > 1) and len(lhs_batch) == 0:
+
+                def _dim_val(d):
+                    return d.value if isinstance(d, StaticDim) else int(d)
+
+                lhs_in_id = in_tids[0]
+                lhs_batch_dims = [
+                    _dim_val(d) for i, d in enumerate(lhs_t.shape.dims) if i not in lhs_contracting
+                ]
+                lhs_k = int(
+                    np.prod(
+                        [
+                            _dim_val(d)
+                            for i, d in enumerate(lhs_t.shape.dims)
+                            if i in lhs_contracting
+                        ]
+                    )
+                )
+                lhs_flat_shape = tuple(lhs_batch_dims + [lhs_k])
+                if tuple(_dim_val(d) for d in lhs_t.shape.dims) != lhs_flat_shape:
+                    lhs_flat_t = g.add_tensor(
+                        name=f"flat_lhs_{out_var}",
+                        shape=Shape.from_tuple(lhs_flat_shape),
+                        dtype=lhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[lhs_in_id],
+                        outputs=[lhs_flat_t.id],
+                        name=f"flat_lhs_{out_var}",
+                    )
+                    lhs_in_id = lhs_flat_t.id
+
+                rhs_in_id = in_tids[1]
+                rhs_k = int(
+                    np.prod(
+                        [
+                            _dim_val(d)
+                            for i, d in enumerate(rhs_t.shape.dims)
+                            if i in rhs_contracting
+                        ]
+                    )
+                )
+                rhs_out = int(
+                    np.prod(
+                        [
+                            _dim_val(d)
+                            for i, d in enumerate(rhs_t.shape.dims)
+                            if i not in rhs_contracting
+                        ]
+                    )
+                )
+                rhs_flat_shape = (rhs_k, rhs_out)
+                if tuple(_dim_val(d) for d in rhs_t.shape.dims) != rhs_flat_shape:
+                    if rhs_t.data is not None:
+                        rhs_t.data = np.ascontiguousarray(
+                            np.asarray(rhs_t.data).reshape(rhs_flat_shape)
+                        )
+                        rhs_t.shape = Shape.from_tuple(rhs_flat_shape)
+                    else:
+                        rhs_flat_t = g.add_tensor(
+                            name=f"flat_rhs_{out_var}",
+                            shape=Shape.from_tuple(rhs_flat_shape),
+                            dtype=rhs_t.dtype,
+                            storage=rhs_t.storage,
+                        )
+                        g.add_op(
+                            opcode=OpCode.RESHAPE,
+                            inputs=[rhs_in_id],
+                            outputs=[rhs_flat_t.id],
+                            name=f"flat_rhs_{out_var}",
+                        )
+                        rhs_in_id = rhs_flat_t.id
+
+                matmul_out_shape = tuple(lhs_batch_dims + [rhs_out])
+                if matmul_out_shape == tuple(out_aval.shape):
+                    g.add_op(
+                        opcode=OpCode.MATMUL,
+                        inputs=[lhs_in_id, rhs_in_id],
+                        outputs=[out_t.id],
+                        attributes=dict(eqn.params),
+                        name=f"matmul_{out_var}",
+                    )
+                else:
+                    matmul_t = g.add_tensor(
+                        name=f"matmul_{out_var}",
+                        shape=Shape.from_tuple(matmul_out_shape),
+                        dtype=out_dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.MATMUL,
+                        inputs=[lhs_in_id, rhs_in_id],
+                        outputs=[matmul_t.id],
+                        attributes=dict(eqn.params),
+                        name=f"matmul_{out_var}",
+                    )
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[matmul_t.id],
+                        outputs=[out_t.id],
+                        name=f"reshape_{out_var}",
+                    )
+                continue
+
+            elif len(lhs_batch) > 0:
+
+                def _dim_val(d):
+                    return d.value if isinstance(d, StaticDim) else int(d)
+
+                # 1. Permute LHS to (batch_dims..., seq_dim, contracting_dim)
+                lhs_in_id = in_tids[0]
+                lhs_ndim = len(lhs_t.shape.dims)
+                lhs_seq_dims = [
+                    i for i in range(lhs_ndim) if i not in lhs_batch and i not in lhs_contracting
+                ]
+                target_lhs_perm = tuple(list(lhs_batch) + lhs_seq_dims + list(lhs_contracting))
+                if target_lhs_perm != tuple(range(lhs_ndim)):
+                    perm_lhs_shape = tuple([_dim_val(lhs_t.shape.dims[i]) for i in target_lhs_perm])
+                    perm_lhs_t = g.add_tensor(
+                        name=f"perm_lhs_{out_var}",
+                        shape=Shape.from_tuple(perm_lhs_shape),
+                        dtype=lhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.PERMUTE,
+                        inputs=[lhs_in_id],
+                        outputs=[perm_lhs_t.id],
+                        attributes={"dims": list(target_lhs_perm)},
+                        name=f"perm_lhs_{out_var}",
+                    )
+                    lhs_in_id = perm_lhs_t.id
+
+                # 2. Permute RHS to (batch_dims..., seq_dim, contracting_dim)
+                rhs_in_id = in_tids[1]
+                rhs_ndim = len(rhs_t.shape.dims)
+                rhs_seq_dims = [
+                    i for i in range(rhs_ndim) if i not in rhs_batch and i not in rhs_contracting
+                ]
+                target_rhs_perm = tuple(list(rhs_batch) + rhs_seq_dims + list(rhs_contracting))
+                if target_rhs_perm != tuple(range(rhs_ndim)):
+                    perm_rhs_shape = tuple([_dim_val(rhs_t.shape.dims[i]) for i in target_rhs_perm])
+                    perm_rhs_t = g.add_tensor(
+                        name=f"perm_rhs_{out_var}",
+                        shape=Shape.from_tuple(perm_rhs_shape),
+                        dtype=rhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.PERMUTE,
+                        inputs=[rhs_in_id],
+                        outputs=[perm_rhs_t.id],
+                        attributes={"dims": list(target_rhs_perm)},
+                        name=f"perm_rhs_{out_var}",
+                    )
+                    rhs_in_id = perm_rhs_t.id
+
+                g.add_op(
+                    opcode=OpCode.MATMUL,
+                    inputs=[lhs_in_id, rhs_in_id],
+                    outputs=[out_t.id],
+                    attributes=dict(eqn.params),
+                    name=f"bmm_{out_var}",
+                )
+                continue
+
+        # Special handling for broadcast_in_dim
+        if prim_name == "broadcast_in_dim":
+            in_t = g.get_tensor(in_tids[0])
+            bcast_dims = tuple(eqn.params.get("broadcast_dimensions", ()))
+            out_shape_tuple = tuple(out_aval.shape)
+            in_shape_tuple = tuple(eqn.invars[0].aval.shape)
+
+            intermediate_shape = [1] * len(out_shape_tuple)
+            for in_idx, out_idx in enumerate(bcast_dims):
+                intermediate_shape[out_idx] = in_shape_tuple[in_idx]
+            inter_tuple = tuple(intermediate_shape)
+
+            if inter_tuple != in_shape_tuple and inter_tuple != out_shape_tuple:
+                # Insert intermediate reshape
+                inter_t = g.add_tensor(
+                    name=f"reshaped_{out_var}",
+                    shape=Shape.from_tuple(inter_tuple),
+                    dtype=out_dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.RESHAPE,
+                    inputs=[in_tids[0]],
+                    outputs=[inter_t.id],
+                    name=f"reshape_{out_var}",
+                )
+                g.add_op(
+                    opcode=OpCode.EXPAND,
+                    inputs=[inter_t.id],
+                    outputs=[out_t.id],
+                    attributes=dict(eqn.params),
+                    name=f"expand_{out_var}",
+                )
+                continue
+            elif inter_tuple != in_shape_tuple and inter_tuple == out_shape_tuple:
+                # Pure reshape
+                g.add_op(
+                    opcode=OpCode.RESHAPE,
+                    inputs=[in_tids[0]],
+                    outputs=[out_t.id],
+                    name=f"reshape_{out_var}",
+                )
+                continue
 
         g.add_op(
             opcode=opcode,

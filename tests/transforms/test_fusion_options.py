@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.dialect.ggml.ops import GGMLOpCode
 from ggmlc.ir.dtype import DType
@@ -10,7 +9,7 @@ from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
 from ggmlc.ir.shape import Shape
 from ggmlc.ir.tensor import StorageClass
-from ggmlc.transforms.fusion import FusionOptions, OperatorFusionPass, fuse_operations
+from ggmlc.transforms.fusion import FusionOptions
 
 
 def test_fusion_options_toggle():
@@ -19,7 +18,9 @@ def test_fusion_options_toggle():
     g = Graph(name="toggle_test")
     t_x = g.add_tensor("x", Shape.from_tuple((2, 4, 32)), DType.F32, StorageClass.INPUT)
     t_bias = g.add_tensor("b", Shape.from_tuple((32,)), DType.F32, StorageClass.PARAMETER)
-    t_add = g.add_tensor("add_out", Shape.from_tuple((2, 4, 32)), DType.F32, StorageClass.ACTIVATION)
+    t_add = g.add_tensor(
+        "add_out", Shape.from_tuple((2, 4, 32)), DType.F32, StorageClass.ACTIVATION
+    )
     t_gelu = g.add_tensor("gelu_out", Shape.from_tuple((2, 4, 32)), DType.F32, StorageClass.OUTPUT)
 
     g.inputs = [t_x.id]

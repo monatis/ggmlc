@@ -1,5 +1,6 @@
 .venv
 build
+build-win
 .pytest_cache
 __pycache__
 *.bin

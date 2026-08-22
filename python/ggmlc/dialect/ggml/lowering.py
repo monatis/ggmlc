@@ -201,6 +201,8 @@ def _lower_op(
             op.id, GGMLOpCode.GGML_OP_SQRT, in_ids, out_ids, {"is_rsqrt": 1, **attrs}, op.name
         )
     elif opcode == OpCode.POW:
+        exp = attrs.get("exponent", attrs.get("y", 2))
+        attrs["exponent"] = int(exp)
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SQR, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.MEAN:
         in_t = c_graph.get_tensor(in_ids[0])
@@ -211,6 +213,19 @@ def _lower_op(
         ggml_dim = R - 1 - dim
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MEAN, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SUM:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        axes = attrs.get("axes", None) or attrs.get("dim", -1)
+        if isinstance(axes, (tuple, list)):
+            dim = axes[0] if len(axes) > 0 else -1
+        else:
+            dim = int(axes)
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim
+        attrs["ggml_dim"] = ggml_dim
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SUM_ROWS, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.CONTIGUOUS:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LOG:
@@ -316,9 +331,26 @@ def _lower_op(
                 op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
             )
     elif opcode == OpCode.MATMUL:
-        t_in1 = c_graph.get_tensor(in_ids[1])
-        is_param = t_in1.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
-        attrs["transpose_in0"] = 0 if is_param else 1
+        x_t = c_graph.get_tensor(in_ids[0])
+        w_t = c_graph.get_tensor(in_ids[1])
+        # In GGML mul_mat(w, x): w is mapped_inputs[0], x is mapped_inputs[1]
+        # Check contracting dimension orientation
+        if len(w_t.shape.dims) >= 2 and len(x_t.shape.dims) >= 2:
+            contracting_dim = x_t.shape.dims[-1]
+            if w_t.shape.dims[-2] == contracting_dim:
+                attrs["transpose_in0"] = 1
+            elif "dimension_numbers" in op.attributes:
+                dim_nums = op.attributes.get("dimension_numbers")
+                if dim_nums and isinstance(dim_nums, (tuple, list)) and len(dim_nums) > 0:
+                    rhs_contracting = dim_nums[0][1] if len(dim_nums[0]) > 1 else [0]
+                    attrs["transpose_in0"] = 1 if 0 in rhs_contracting else 0
+                else:
+                    attrs["transpose_in0"] = 0
+            else:
+                attrs["transpose_in0"] = 0
+        else:
+            attrs["transpose_in0"] = 0
+
         mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
     elif opcode == OpCode.CONV2D:
@@ -340,13 +372,13 @@ def _lower_op(
     elif opcode == OpCode.PERMUTE:
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
-        p = attrs.get("dims", list(range(R)))
+        p = attrs.get("dims") or attrs.get("permutation") or list(range(R))
+        if isinstance(p, tuple):
+            p = list(p)
         axes = [0, 1, 2, 3]
         for i in range(4):
             if i < R:
-                in_k = R - 1 - i
-                out_j = p.index(in_k)
-                axes[i] = R - 1 - out_j
+                axes[i] = R - 1 - p.index(R - 1 - i)
             else:
                 axes[i] = i
         attrs["axis0"] = axes[0]
@@ -369,9 +401,7 @@ def _lower_op(
         axes = [0, 1, 2, 3]
         for i in range(4):
             if i < R:
-                in_k = R - 1 - i
-                out_j = p.index(in_k)
-                axes[i] = R - 1 - out_j
+                axes[i] = R - 1 - p.index(R - 1 - i)
             else:
                 axes[i] = i
         attrs["axis0"] = axes[0]

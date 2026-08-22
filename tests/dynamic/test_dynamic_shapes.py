@@ -1,8 +1,6 @@
+import ggmlc
 import torch
-from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.serialization.graph import serialize_ggml_graph
-from ggmlc.validation.numerical import check_numerical_accuracy, run_compiled_model_wsl
+from ggmlc.validation.numerical import check_numerical_accuracy
 from torch import nn
 
 
@@ -16,54 +14,28 @@ def _run_dynamic_model_e2e(
 ):
     model.eval()
 
-    # 1. Export ONCE with dynamic shapes
-    exported = export_torch_model(
-        model,
-        example_args,
+    # 1. Compile ONCE with dynamic shapes into standard GGUF binary
+    gguf_bytes = ggmlc.compile(
+        model=model,
+        sample_inputs=example_args,
         dynamic_shapes=dynamic_shapes,
         model_name=model_name,
     )
-    ggml_graph = lower_to_ggml(exported.main_graph)
-    ser_bytes = serialize_ggml_graph(ggml_graph)
+    assert len(gguf_bytes) > 0
 
-    # 2. Execute multiple times with different dynamic shapes on the SAME binary artifact
+    # 2. Execute multiple times with different dynamic shapes on the SAME runner
+    runner = ggmlc.load(gguf_bytes)
+
     for actual_args, symbol_bindings in test_cases:
         with torch.no_grad():
             ref = model(*actual_args).detach().numpy()
 
-        inputs = {}
-        for i, inp_id in enumerate(exported.main_graph.inputs):
-            name = exported.main_graph.get_tensor(inp_id).name
-            inputs[name] = actual_args[i].detach().numpy()
+        input_arrays = [arg.detach().numpy() for arg in actual_args]
+        ggml_out = runner(*input_arrays, symbols=symbol_bindings).reshape(ref.shape)
 
-        out_id = exported.main_graph.outputs[0]
-
-        # Bind all symbols from the graph's symbol table
-        # If symbol_table has generated names (e.g. s0, s1), map them using the input tensor shapes
-        resolved_symbols = {}
-        for sym_name in ggml_graph.symbol_table:
-            if sym_name in symbol_bindings:
-                resolved_symbols[sym_name] = symbol_bindings[sym_name]
-            else:
-                # Try to resolve symbol from input shapes
-                for i, inp_id in enumerate(exported.main_graph.inputs):
-                    t = exported.main_graph.get_tensor(inp_id)
-                    actual_shape = actual_args[i].shape
-                    for d_idx, d in enumerate(t.shape.dims):
-                        if sym_name in d.free_symbols():
-                            resolved_symbols[sym_name] = actual_shape[d_idx]
-
-        results = run_compiled_model_wsl(
-            serialized_bytes=ser_bytes,
-            inputs=inputs,
-            output_tensor_ids=[out_id],
-            symbols=resolved_symbols,
-        )
-
-        ggml_out = results[out_id]
         res = check_numerical_accuracy(ref, ggml_out, atol=atol)
         assert res.passed, (
-            f"Dynamic test for {model_name} failed with symbols {resolved_symbols}: {res.message}"
+            f"Dynamic test for {model_name} failed with bindings {symbol_bindings}: {res.message}"
         )
 
 

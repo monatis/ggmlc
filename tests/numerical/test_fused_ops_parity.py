@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
-from torch import nn
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
 from ggmlc.ir.shape import Shape
 from ggmlc.ir.tensor import StorageClass
 from ggmlc.serialization.graph import serialize_ggml_graph
-from ggmlc.transforms.fusion import FusionOptions
 from ggmlc.validation.numerical import run_compiled_model_wsl
 
 
@@ -33,7 +28,9 @@ def test_bias_gelu_parity():
     # 2. Canonical Graph with BIAS_GELU op
     g = Graph(name="bias_gelu_test")
     t_x = g.add_tensor("x", Shape.from_tuple((B, S, D)), DType.F32, StorageClass.INPUT)
-    t_b = g.add_tensor("bias", Shape.from_tuple((D,)), DType.F32, StorageClass.PARAMETER, data=b_val)
+    t_b = g.add_tensor(
+        "bias", Shape.from_tuple((D,)), DType.F32, StorageClass.PARAMETER, data=b_val
+    )
     t_out = g.add_tensor("out", Shape.from_tuple((B, S, D)), DType.F32, StorageClass.OUTPUT)
     g.inputs = [t_x.id]
     g.parameters = [t_b.id]

@@ -75,7 +75,6 @@ class DType(Enum):
             DType.I8: torch.int8,
             DType.BOOL: torch.bool,
         }
-        return mapping[self]
 
     @classmethod
     def from_numpy(cls, np_dtype: Any) -> DType:
@@ -93,3 +92,11 @@ class DType(Enum):
         if np_dt not in mapping:
             raise TypeError(f"Unsupported NumPy dtype: {np_dtype}")
         return mapping[np_dt]
+
+    @classmethod
+    def from_str(cls, s: str) -> DType:
+        s_lower = s.lower().strip()
+        for member in cls:
+            if member.value == s_lower or member.name.lower() == s_lower:
+                return member
+        raise ValueError(f"Unknown DType string: '{s}'")

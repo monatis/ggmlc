@@ -1,12 +1,10 @@
 import numpy as np
-import pytest
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
 from ggmlc.ir.shape import Shape
 from ggmlc.ir.tensor import DType, StorageClass
-from ggmlc.serialization.gguf import save_to_gguf, serialize_to_gguf
+from ggmlc.serialization.gguf import serialize_to_gguf
 from ggmlc.validation.numerical import run_compiled_model_wsl
 
 
@@ -18,10 +16,10 @@ def test_gguf_serialization_roundtrip_wsl():
     b = g.add_tensor("b", Shape([4]), DType.F32, StorageClass.PARAMETER)
     out = g.add_tensor("out", Shape([1, 4]), DType.F32, StorageClass.ACTIVATION)
 
-    w.data = np.array([[1.0, 0.0, 0.0, 0.0],
-                       [0.0, 1.0, 0.0, 0.0],
-                       [0.0, 0.0, 1.0, 0.0],
-                       [0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    w.data = np.array(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
     b.data = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
 
     g.add_node(OpCode.LINEAR, inputs=[x.id, w.id, b.id], outputs=[out.id])

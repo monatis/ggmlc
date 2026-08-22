@@ -1,2 +1,0 @@
-[console_scripts]
-ggmlc = ggmlc.cli:main

@@ -343,8 +343,8 @@ def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
     for tid, t in sorted(graph.tensors.items()):
         if t.data is not None:
             # Prepare raw byte buffer and match GGUF shape to concrete data
-            if isinstance(t.data, np.ndarray):
-                arr = np.ascontiguousarray(t.data)
+            if isinstance(t.data, (np.ndarray, np.generic, int, float)):
+                arr = np.ascontiguousarray(np.asarray(t.data))
                 ggml_type_val = int(t.ggml_type)
                 if ggml_type_val == int(GGMLType.GGML_TYPE_F32) and arr.dtype != np.float32:
                     arr = arr.astype(np.float32)
@@ -363,13 +363,14 @@ def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
                 raw_bytes = arr.tobytes()
 
                 # GGUF tensor shape must match the concrete serialized data shape
-                static_shape = list(arr.shape[::-1])
+                static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
             elif isinstance(t.data, bytes):
                 raw_bytes = t.data
                 static_shape = [d.value if isinstance(d, StaticDim) else 1 for d in t.ne]
             else:
-                raw_bytes = bytes(t.data)
-                static_shape = [d.value if isinstance(d, StaticDim) else 1 for d in t.ne]
+                arr = np.ascontiguousarray(np.asarray(t.data))
+                raw_bytes = arr.tobytes()
+                static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
 
             # Ensure 4D
             while len(static_shape) < 4:
@@ -392,6 +393,57 @@ def save_to_gguf(graph: GGMLExecutionGraph, filepath: str | Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "wb") as f:
         f.write(data)
+
+
+def deserialize_ggml_graph(data: bytes | Path | str) -> GGMLExecutionGraph:
+    """Deserializes GGUF binary or file back into a GGMLExecutionGraph."""
+    if isinstance(data, (str, Path)):
+        data = Path(data).read_bytes()
+
+    if not data.startswith(GGUF_MAGIC):
+        raise ValueError("Invalid GGUF binary: magic header mismatch")
+
+    bio = io.BytesIO(data)
+    magic = bio.read(4)
+    version, n_tensors, n_kv = struct.unpack("<IQQ", bio.read(20))
+
+    graph_spec_str = None
+    for _ in range(n_kv):
+        key_len = struct.unpack("<Q", bio.read(8))[0]
+        key = bio.read(key_len).decode("utf-8")
+        val_type = struct.unpack("<I", bio.read(4))[0]
+
+        if val_type == GGUF_TYPE_STRING:
+            str_len = struct.unpack("<Q", bio.read(8))[0]
+            val_str = bio.read(str_len).decode("utf-8")
+            if key == "ggmlc.graph_spec":
+                graph_spec_str = val_str
+        elif val_type in (GGUF_TYPE_UINT8, GGUF_TYPE_INT8, GGUF_TYPE_BOOL):
+            bio.seek(1, io.SEEK_CUR)
+        elif val_type in (GGUF_TYPE_UINT16, GGUF_TYPE_INT16):
+            bio.seek(2, io.SEEK_CUR)
+        elif val_type in (GGUF_TYPE_UINT32, GGUF_TYPE_INT32, GGUF_TYPE_FLOAT32):
+            bio.seek(4, io.SEEK_CUR)
+        elif val_type in (GGUF_TYPE_UINT64, GGUF_TYPE_INT64, GGUF_TYPE_FLOAT64):
+            bio.seek(8, io.SEEK_CUR)
+        elif val_type == GGUF_TYPE_ARRAY:
+            elem_type, arr_len = struct.unpack("<IQ", bio.read(12))
+            if elem_type == GGUF_TYPE_STRING:
+                for _ in range(arr_len):
+                    s_len = struct.unpack("<Q", bio.read(8))[0]
+                    bio.seek(s_len, io.SEEK_CUR)
+            elif elem_type in (GGUF_TYPE_UINT8, GGUF_TYPE_INT8, GGUF_TYPE_BOOL):
+                bio.seek(arr_len * 1, io.SEEK_CUR)
+            elif elem_type in (GGUF_TYPE_UINT16, GGUF_TYPE_INT16):
+                bio.seek(arr_len * 2, io.SEEK_CUR)
+            elif elem_type in (GGUF_TYPE_UINT32, GGUF_TYPE_INT32, GGUF_TYPE_FLOAT32):
+                bio.seek(arr_len * 4, io.SEEK_CUR)
+            elif elem_type in (GGUF_TYPE_UINT64, GGUF_TYPE_INT64, GGUF_TYPE_FLOAT64):
+                bio.seek(arr_len * 8, io.SEEK_CUR)
+
+    if graph_spec_str:
+        return _json_spec_to_graph(graph_spec_str)
+    raise ValueError("GGUF metadata missing 'ggmlc.graph_spec'")
 
 
 def serialize_ggml_graph(graph: GGMLExecutionGraph) -> bytes:

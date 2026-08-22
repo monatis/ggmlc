@@ -1,9 +1,6 @@
 import tempfile
-from pathlib import Path
 
 import numpy as np
-import pytest
-
 from ggmlc.codegen import generate_cpp_project
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.ir.graph import Graph

@@ -33,9 +33,11 @@ class RedundantCastPruner(Pass):
 
             # Pattern 2: Permute with [0, 1, 2, ...]
             elif node.opcode == OpCode.PERMUTE:
-                dims = node.attributes.get("dims", [])
+                dims = node.attributes.get("dims") or node.attributes.get("permutation")
                 if (
-                    dims == list(range(len(dims)))
+                    dims is not None
+                    and len(dims) > 0
+                    and list(dims) == list(range(len(dims)))
                     and len(node.inputs) == 1
                     and len(node.outputs) == 1
                 ):
