@@ -263,14 +263,16 @@ class GGUFWriter:
             }
         )
 
-    def write_to_bytes(self) -> bytes:
-        out = io.BytesIO()
+    def write_to_stream(self, out: Any) -> int:
+        """Writes the GGUF binary format to an arbitrary binary stream."""
+        bytes_written = 0
 
         # 1. Header
         out.write(GGUF_MAGIC)
         out.write(struct.pack("<I", GGUF_VERSION))
         out.write(struct.pack("<Q", len(self.tensors)))
         out.write(struct.pack("<Q", len(self.kv_pairs)))
+        bytes_written += 24
 
         # 2. Key-Value Metadata Pairs
         for key, val_type, payload in self.kv_pairs:
@@ -279,6 +281,7 @@ class GGUFWriter:
             out.write(b_key)
             out.write(struct.pack("<I", val_type))
             out.write(payload)
+            bytes_written += 8 + len(b_key) + 4 + len(payload)
 
         # 3. Tensor Info Table (offsets are relative to tensor data payload start)
         # Pre-compute data offsets with 32-byte alignment
@@ -295,38 +298,61 @@ class GGUFWriter:
             b_name = t["name"].encode("utf-8")
             out.write(struct.pack("<Q", len(b_name)))
             out.write(b_name)
+            bytes_written += 8 + len(b_name)
 
             shape = t["shape"]
             out.write(struct.pack("<I", len(shape)))
+            bytes_written += 4
             for d in shape:
                 out.write(struct.pack("<Q", d))
+                bytes_written += 8
 
             out.write(struct.pack("<I", t["type"]))
             out.write(struct.pack("<Q", tensor_offsets[i]))
+            bytes_written += 4 + 8
 
         # 4. Align start of tensor data section
-        pos = out.tell()
-        if pos % self.alignment != 0:
-            padding = self.alignment - (pos % self.alignment)
+        if bytes_written % self.alignment != 0:
+            padding = self.alignment - (bytes_written % self.alignment)
             out.write(b"\x00" * padding)
+            bytes_written += padding
 
-        # 5. Tensor Data Blobs
-        data_start_pos = out.tell()
+        # 5. Tensor Data Blobs (streamed directly without large memory copies)
+        data_start_pos = bytes_written
         for i, t in enumerate(self.tensors):
             target_pos = data_start_pos + tensor_offsets[i]
-            current_pos = out.tell()
-            if current_pos < target_pos:
-                out.write(b"\x00" * (target_pos - current_pos))
-            out.write(t["data"])
-            pos_after = out.tell()
-            if pos_after % self.alignment != 0:
-                out.write(b"\x00" * (self.alignment - (pos_after % self.alignment)))
+            if bytes_written < target_pos:
+                gap = target_pos - bytes_written
+                out.write(b"\x00" * gap)
+                bytes_written += gap
 
+            out.write(t["data"])
+            bytes_written += len(t["data"])
+
+            if bytes_written % self.alignment != 0:
+                padding = self.alignment - (bytes_written % self.alignment)
+                out.write(b"\x00" * padding)
+                bytes_written += padding
+
+        return bytes_written
+
+    def write_to_bytes(self) -> bytes:
+        """Writes GGUF data to in-memory bytes."""
+        out = io.BytesIO()
+        self.write_to_stream(out)
         return out.getvalue()
 
+    def write_to_file(self, filepath: str | Path) -> Path:
+        """Streams GGUF data directly into a file on disk."""
+        p = Path(filepath).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "wb") as f:
+            self.write_to_stream(f)
+        return p
 
-def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
-    """Serializes a GGMLExecutionGraph into official GGUF v3 binary format."""
+
+def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
+    """Constructs and populates a GGUFWriter with metadata and tensor descriptors."""
     writer = GGUFWriter(alignment=GGUF_DEFAULT_ALIGNMENT)
 
     # 1. Standard Metadata
@@ -340,7 +366,7 @@ def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
     writer.add_string("ggmlc.graph_spec", spec_json)
 
     # 3. Add Tensors with data (Parameters / Constants)
-    for tid, t in sorted(graph.tensors.items()):
+    for _tid, t in sorted(graph.tensors.items()):
         if t.data is not None:
             # Prepare raw byte buffer and match GGUF shape to concrete data
             if isinstance(t.data, (np.ndarray, np.generic, int, float)):
@@ -383,16 +409,19 @@ def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
                 data=raw_bytes,
             )
 
+    return writer
+
+
+def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
+    """Serializes a GGMLExecutionGraph into official GGUF v3 binary format bytes."""
+    writer = _build_gguf_writer(graph)
     return writer.write_to_bytes()
 
 
-def save_to_gguf(graph: GGMLExecutionGraph, filepath: str | Path) -> None:
-    """Serializes and saves a GGMLExecutionGraph to a .gguf file."""
-    data = serialize_to_gguf(graph)
-    p = Path(filepath)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "wb") as f:
-        f.write(data)
+def save_to_gguf(graph: GGMLExecutionGraph, filepath: str | Path) -> Path:
+    """Serializes and streams a GGMLExecutionGraph directly to a .gguf file on disk."""
+    writer = _build_gguf_writer(graph)
+    return writer.write_to_file(filepath)
 
 
 def deserialize_ggml_graph(data: bytes | Path | str) -> GGMLExecutionGraph:
@@ -404,8 +433,8 @@ def deserialize_ggml_graph(data: bytes | Path | str) -> GGMLExecutionGraph:
         raise ValueError("Invalid GGUF binary: magic header mismatch")
 
     bio = io.BytesIO(data)
-    magic = bio.read(4)
-    version, n_tensors, n_kv = struct.unpack("<IQQ", bio.read(20))
+    _magic = bio.read(4)
+    _version, _n_tensors, n_kv = struct.unpack("<IQQ", bio.read(20))
 
     graph_spec_str = None
     for _ in range(n_kv):

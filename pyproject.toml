@@ -10,22 +10,54 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24.0",
-    "torch>=2.2.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-    "ruff>=0.3.0",
+torch = [
+    "torch>=2.2.0",
+]
+jax = [
     "jax>=0.4.20",
     "jaxlib>=0.4.20",
     "flax>=0.8.0",
-    "nanobind>=2.0.0",
+]
+docs = [
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "myst-parser>=2.0.0",
+    "sphinx-autodoc-typehints>=2.0.0",
+    "sphinx-copybutton>=0.5.0",
+]
+all = [
+    "torch>=2.2.0",
+    "jax>=0.4.20",
+    "jaxlib>=0.4.20",
+    "flax>=0.8.0",
     "transformers>=4.38.0",
     "torchvision>=0.17.0",
     "sentence-transformers>=2.5.0",
     "tqdm>=4.66.0",
     "scipy>=1.11.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "nanobind>=2.0.0",
+    "torch>=2.2.0",
+    "jax>=0.4.20",
+    "jaxlib>=0.4.20",
+    "flax>=0.8.0",
+    "transformers>=4.38.0",
+    "torchvision>=0.17.0",
+    "sentence-transformers>=2.5.0",
+    "tqdm>=4.66.0",
+    "scipy>=1.11.0",
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "myst-parser>=2.0.0",
+    "sphinx-autodoc-typehints>=2.0.0",
+    "sphinx-copybutton>=0.5.0",
 ]
 
 [project.scripts]

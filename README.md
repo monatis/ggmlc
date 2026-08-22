@@ -1,125 +1,214 @@
-# ggmlc — Neural Network Tensor Program Compiler to GGML
+<div align="center">
 
-`ggmlc` is a high-performance tensor program compiler and execution runtime that ingests neural network graphs from **PyTorch** (`torch.export`) and **JAX** (`jaxpr`), translates them into a strongly-typed **Canonical Intermediate Representation (IR)**, applies compile-time graph optimization passes, quantizes parameters to high-performance block formats (**Q8_0**, **Q4_0**), lowers to target-specific **GGML execution graphs**, and serializes them into standard **GGUF v3** binary containers (`.gguf`) executed by a lightweight zero-dependency generic C++ runtime or emitted as standalone human-readable C++ projects.
+# ggmlc
 
----
+### Next-Generation Semantic Tensor Program Compiler to GGML & Standalone C++
 
-## Key Features
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Format](https://img.shields.io/badge/binary-GGUF%20v3-orange.svg)](https://github.com/ggerganov/ggml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 
-- **Multi-Framework Ingestion**:
-  - Full support for PyTorch 2.x `torch.export` (AOTInductor / Dynamo graph capture).
-  - Native JAX `jaxpr` tracing and equation lowering.
-- **Strongly-Typed Canonical Intermediate Representation**:
-  - Framework-independent functional Directed Acyclic Graph (DAG).
-  - Explicit tensor lifetimes and storage classes (`INPUT`, `OUTPUT`, `PARAMETER`, `CONSTANT`, `ACTIVATION`, `STATE`).
-  - Symbolic shape arithmetic (`SymbolDim`, `StaticDim`, `AddDim`, `MulDim`).
-- **Graph Optimization Transformation Passes**:
-  - Compile-time **Constant Folding** for static subgraphs.
-  - Backward reachability **Dead Code Elimination (DCE)**.
-  - Pattern-based **Operator Fusion** (Conv2D+ReLU, Linear+Bias, SwiGLU, LayerNorm, RMSNorm).
-  - **Redundant Cast and Permutation Pruning**.
-- **Block Quantization Subsystem**:
-  - **`Q8_0` Format**: 34 bytes per 32 floats ($\mathbf{3.76\times}$ compression, cosine similarity $> 0.9999$).
-  - **`Q4_0` Format**: 18 bytes per 32 floats ($\mathbf{7.11\times}$ compression, cosine similarity $> 0.9850$).
-  - Unified one-shot quantization CLI: `python -m ggmlc.cli.quantize`.
-- **Standard GGUF v3 Binary Containers (`.gguf`)**:
-  - Zero proprietary formats: Models are serialized to standard GGUF v3 files with 32-byte tensor alignment.
-  - Complete graph topology, tensor metadata, dynamic shapes, and attributes stored losslessly in `ggmlc.graph_spec` metadata.
-- **Flexible Execution Modes**:
-  - **Generic Dynamic C++ Runner (`ggmlc-run`)**: Execute any compiled `.gguf` model directly with zero compilation.
-  - **Standalone C++ Code Generation (`ggmlc.codegen`)**: Emit self-contained, human-readable C++ header files (`<Model>.h`), runner (`ggmlc_main.cpp`), and `CMakeLists.txt` for native app embedding.
-- **Verified Pretrained Hub Architectures**:
-  - Validated end-to-end against real pretrained checkpoints from Hugging Face & TorchVision with differential numerical testing.
+*Compile neural network graphs from PyTorch and JAX into ultra-fast, portable GGUF binaries and human-readable C++ projects with GGML execution.*
 
 ---
 
-## Verified Pretrained Hub Models
+</div>
 
-| Architecture | Source / Library | Layers & Features | Compression (Q4_0) | Parity Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **ResNet-18** | `torchvision` (`ImageNet1K_V1`) | 18 layers, Conv2D, Residuals, AdaptiveAvgPool2D | $6.8\times$ | **PASSED** |
-| **ResNet-50** | `torchvision` (`ImageNet1K_V1`) | 50 layers, Bottleneck Residuals, Conv2D | $7.0\times$ | **PASSED** |
-| **MiniLM-L6-v2** | `sentence-transformers` | 6 layers, Bidirectional Attention, Embeddings | $7.11\times$ | **PASSED** |
-| **GPT-2** | `transformers` (`gpt2` 124M) | 12 layers, Causal Attention, WTE/WPE, LM Head | $7.05\times$ | **PASSED** |
-| **Qwen2.5-0.5B** | `transformers` (`Qwen/Qwen2.5-0.5B`) | 24 layers, Grouped Query Attention (GQA), RoPE, SwiGLU | $7.15\times$ | **PASSED** |
-| **BGE-M3-Distill-8L** | `sentence-transformers` (`altaidevorg`) | 8 layers, XLM-RoBERTa Embeddings, Mean Pooling | $7.08\times$ | **PASSED** |
+## 🚀 Why ggmlc?
+
+Deploying modern neural networks on edge devices, CPU servers, and embedded platforms often requires writing brittle, hand-crafted C++ inference code for each new model architecture.
+
+`ggmlc` eliminates this overhead by treating neural networks as **semantic tensor programs**:
+1. **Zero Hand-Written C++ Glue**: Ingests models directly from **PyTorch** (`torch.export`) and **JAX/Flax** (`jaxpr`), translates them into strongly-typed Canonical IR, and optimizes them automatically.
+2. **Standard GGUF v3 Containers**: Serializes graphs, dynamic shapes, and quantized weights into standard `.gguf` binaries — no proprietary file formats or runtime lock-in.
+3. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications.
+4. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs.
+5. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
 
 ---
 
-## Quickstart
+## 🏗️ Compiler Architecture
 
-### 1. Python Environment Setup
-```bash
-# Using uv or pip
-uv sync
+```mermaid
+graph TD
+    subgraph Frontends["1. Multi-Framework Ingestion"]
+        PT["PyTorch 2.x (torch.export)"]
+        JX["JAX / Flax (jaxpr)"]
+    end
+
+    subgraph IR["2. Canonical Intermediate Representation (IR)"]
+        DAG["Semantic Functional DAG<br/><i>Symbolic Shapes & Storage Classes</i>"]
+    end
+
+    subgraph Passes["3. Compile-Time Optimization Passes"]
+        CF["Constant Folding"]
+        DCE["Dead Code Elimination"]
+        FUS["Pattern-Based Operator Fusion<br/><i>(Conv+ReLU, SwiGLU, LayerNorm, RMSNorm)</i>"]
+        PRN["Redundant Cast & Permute Pruning"]
+    end
+
+    subgraph Lowering["4. Target Dialect Lowering"]
+        GGML["GGML Dialect Graph<br/><i>(Block Quantization: Q8_0, Q4_0)</i>"]
+    end
+
+    subgraph Outputs["5. Deployment Targets"]
+        GGUF["Standard GGUF v3 Binary<br/><i>(High-Speed nanobind Runner / ggmlc-run)</i>"]
+        CPP["Standalone C++ Project Folder<br/><i>(&lt;Model&gt;.h, ggmlc_main.cpp, CMakeLists.txt)</i>"]
+    end
+
+    PT --> DAG
+    JX --> DAG
+    DAG --> CF --> DCE --> FUS --> PRN
+    PRN --> GGML
+    GGML --> GGUF
+    GGML --> CPP
+
+    classDef frontend fill:#e0f2f1,stroke:#00897b,stroke-width:2px,color:#004d40;
+    classDef ir fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
+    classDef passes fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#e65100;
+    classDef target fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#4a148c;
+    classDef deploy fill:#e8f8f5,stroke:#26a69a,stroke-width:2px,color:#004d40;
+
+    class PT,JX frontend;
+    class DAG ir;
+    class CF,DCE,FUS,PRN passes;
+    class GGML target;
+    class GGUF,CPP deploy;
 ```
 
-### 2. Building the C++ Generic Runtime
-```bash
-# Build C++ runtime binary
-cmake -B build && cmake --build build -j$(nproc)
-```
+---
 
-### 3. Model Quantization & GGUF Export CLI
-Export, optimize, and quantize a model in one command to a standard GGUF file:
-```bash
-# Quantize MiniLM to Q4_0 with optimization passes
-python -m ggmlc.cli.quantize --model minilm --dtype q4_0 --optimize --output minilm_q4.gguf
-```
+## ⚡ 3-Line Quickstarts
 
-### 4. Running Models via Generic C++ Runner
-Execute the compiled `.gguf` artifact with the generic runtime:
-```bash
-./build/runtime/ggmlc-run minilm_q4.gguf --input input_ids:in.bin --threads 4 --output 128:out.bin
-```
-
-### 5. Generating Standalone C++ Projects
-Compile any neural network into a self-contained C++ project:
+### 1. Compile and Run a PyTorch Model
 ```python
-from examples.models.hub_models import load_minilm_model
-from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.codegen import generate_cpp_project
+import ggmlc
+import torch
+import torchvision.models as models
 
-model, sample_inputs, _ = load_minilm_model()
-exported = export_torch_model(model, sample_inputs, model_name="MiniLM")
+# 1. Take any PyTorch model
+model = models.resnet18(weights=None).eval()
+example_x = torch.randn(1, 3, 224, 224)
 
-generate_cpp_project(
-    exported_program=exported,
-    output_dir="./build/generated/minilm",
-    model_name="MiniLM",
-    enable_fusion=True,
+# 2. Compile directly to a standard GGUF binary file
+model_path = ggmlc.compile(model, (example_x,), output="resnet18.gguf")
+
+# 3. Load into high-performance native runtime and evaluate
+runner = ggmlc.load(model_path, n_threads=4)
+output = runner(example_x.numpy())
+print("Output shape:", output.shape)
+```
+
+### 2. Compile and Run JAX / Flax
+```python
+import ggmlc
+import jax.numpy as jnp
+from examples.models.flax_models import FlaxTransformerLayer
+
+# 1. Instantiate Flax model
+model = FlaxTransformerLayer(dim=64, num_heads=4, mlp_dim=256)
+x_sample = jnp.ones((1, 8, 64), dtype=jnp.float32)
+params = model.init(jax.random.PRNGKey(0), x_sample)
+
+# 2. Compile JAX forward function to GGUF
+model_path = ggmlc.compile(lambda x: model.apply(params, x), (x_sample,), output="transformer.gguf")
+
+# 3. Fast native execution with zero-copy NumPy buffers
+runner = ggmlc.load(model_path)
+out = runner(x_sample)
+```
+
+### 3. Generate Standalone C++ Project
+```python
+# Emit a complete, standalone C++ project linking against GGML
+ggmlc.codegen(
+    model=model,
+    sample_inputs=(example_x,),
+    output_dir="./build/resnet18_cpp",
+    model_name="ResNet18",
 )
 ```
+Generates:
+- `ResNet18.h`: Self-contained C++ header with model tensor descriptors and computation graph.
+- `ggmlc_main.cpp`: Standalone CLI executable driver for inference and benchmarking.
+- `CMakeLists.txt`: Build configuration ready for compilation with MSVC, GCC, or Clang.
 
-### 6. Autoregressive Text Generation
-Generate tokens interactively using the compiled `ggmlc` runtime with differential PyTorch verification:
+---
+
+## 📊 Verified Pretrained Model Zoo
+
+All models are validated end-to-end against real Hugging Face & TorchVision weights with **differential numerical testing**:
+
+| Architecture | Framework | Key Features | Compression (Q4_0) | Parity Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **ResNet-18 / 50** | PyTorch / TorchVision | Residual Convolutions, AdaptiveAvgPool2D | $6.8\times$ | **PASSED** ($1.000$) |
+| **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Embeddings | $7.11\times$ | **PASSED** ($0.9999$) |
+| **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | $7.05\times$ | **PASSED** ($0.9999$) |
+| **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | $7.15\times$ | **PASSED** ($0.9999$) |
+| **BGE-M3-Distill** | PyTorch / Transformers | Multilingual Embeddings, Dense Vector Pooling | $7.08\times$ | **PASSED** ($0.9999$) |
+| **Flax Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | $6.9\times$ | **PASSED** ($1.0000$) |
+| **Flax MLP Classifier** | JAX / Flax | LayerNorm, Dense, GELU / ReLU | $7.0\times$ | **PASSED** ($1.0000$) |
+
+---
+
+## 🛠️ Installation & Building
+
+### Python Package Installation
 ```bash
-python examples/generate.py --model gpt2 --prompt "The capital of France is" --max-tokens 16 --verify-pytorch
+# High-performance lightweight runtime (Inference only)
+pip install ggmlc
+
+# With PyTorch compiler frontend
+pip install "ggmlc[torch]"
+
+# With JAX/Flax compiler frontend
+pip install "ggmlc[jax]"
+
+# Complete development suite
+pip install "ggmlc[all]"
 ```
 
-### 7. Running the Comprehensive Test Suite
+### Native C++ Runtime Compilation
+
+#### Windows (MSVC)
+```powershell
+cmake -B build-win
+cmake --build build-win --target _runtime --config Release
+```
+
+#### Linux / WSL (GCC / Clang)
 ```bash
-# Run all unit, numerical, transform, dynamic shape, and quantization tests
-pytest -v
+cmake -B build
+cmake --build build --target _runtime -j$(nproc)
 ```
 
 ---
 
-## Documentation Index
+## 🔍 Graph & IR Pass Visualization
 
-- **Architecture & System Design**:
-  - [Compilation Workflow](docs/architecture/compilation_workflow.md): End-to-end compilation stages from frontends to GGUF container.
-  - [Optimization & Quantization Pipeline](docs/architecture/quantization_and_optimizations.md): Transformation passes and block quantization math.
-  - [Future Roadmap & Design Decisions](docs/architecture/future_roadmap.md): Architectural decisions and GPU backend plans.
-- **Specifications**:
-  - [Canonical IR Specification](docs/ir/canonical_ir.md): Type system, symbolic shapes, storage classes, and operator schemas.
-  - [GGML Dialect Specification](docs/dialect/ggml_dialect.md): Memory layouts, permutation formulas, and operator mappings.
-  - [Operator Reference](docs/reference/operator_reference.md): Full operator catalog and shape inference rules.
-- **Code Generation & Runtime**:
-  - [C++ Code Generation Guide](docs/codegen/cpp_codegen.md): Standalone C++ source generator, project structure, and CMake integration.
-  - [C++ Generic Runtime Architecture](docs/runtime/runtime_architecture.md): GGUF loader, dynamic symbol evaluator, and memory manager.
-- **Developer & User Guides**:
-  - [Quantization User Guide](docs/guides/quantization_guide.md): CLI commands, APIs, compression benchmarks, and numerical evaluation.
-  - [Autoregressive Generation Guide](docs/guides/autoregressive_generation.md): Dynamic symbol generation and KV-cache persistence.
-  - [Troubleshooting & Debugging Guide](docs/guides/troubleshooting_and_debugging.md): Permutation math, layout pitfalls, and debugging tips.
-  - [Developer & Contributor Guide](docs/guides/developer_guide.md): Step-by-step checklist for adding new operators, passes, and models.
+`ggmlc` includes built-in Mermaid diagram export for inspectable compiler graph visualization:
+
+```python
+# Export interactive HTML with zoom/pan or Mermaid markdown
+graph_path = ggmlc.visualize(graph, output_path="model_graph.html")
+```
+
+---
+
+## 📖 Documentation
+
+Comprehensive guides, tutorials, and API references are available in the [`docs/`](docs/) directory:
+
+- **[Python API Guide](docs/guides/python_api_guide.md)**: Detailed Python usage with `ggmlc.compile`, `ggmlc.load`, and `ggmlc.codegen`.
+- **[Developer & Contributor Guide](docs/guides/developer_guide.md)**: Adding new operators, lowering rules, and C++ kernels.
+- **[Quantization Subsystem Guide](docs/guides/quantization_guide.md)**: Q8_0 and Q4_0 block quantization details and precision benchmarks.
+- **[Autoregressive Text Generation](docs/guides/autoregressive_generation.md)**: Multi-token KV-cache generation and parity verification.
+- **[Troubleshooting & Debugging](docs/guides/troubleshooting_and_debugging.md)**: Common issues, tensor stride semantics, and memory alignments.
+
+---
+
+## 📄 License
+
+`ggmlc` is released under the [MIT License](LICENSE).

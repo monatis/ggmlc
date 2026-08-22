@@ -15,15 +15,16 @@ import torchvision.models as models
 model = models.resnet18(weights=None).eval()
 example_input = torch.randn(1, 3, 224, 224)
 
-# 2. Compile directly into self-contained standard GGUF binary bytes
-gguf_bytes = ggmlc.compile(
+# 2. Compile directly into a standard GGUF binary file (streamed directly to disk)
+model_path = ggmlc.compile(
     model=model,
     sample_inputs=(example_input,),
+    output="resnet18.gguf",
     model_name="resnet18",
 )
 
 # 3. Load into high-performance native C++ nanobind runtime
-runner = ggmlc.load(gguf_bytes, n_threads=4)
+runner = ggmlc.load(model_path, n_threads=4)
 
 # 4. Evaluate with zero-copy numpy buffers
 output = runner(example_input.numpy())
@@ -40,22 +41,34 @@ Compiles a PyTorch model, JAX callable, or Flax module into standardized GGUF v3
 ```python
 def compile(
     model: Any,
-    sample_inputs: tuple[Any, ...],
-    dynamic_shapes: dict[str, Any] | None = None,
-    optimization_level: int = 1,
-    quantization_type: str | None = None,
-    output_path: str | Path | None = None,
+    sample_inputs: tuple[Any, ...] | list[Any] | None = None,
+    output: str | Path | None = None,
+    dynamic_shapes: tuple[dict[int, Any], ...] | dict[str, Any] | None = None,
     model_name: str = "model",
-) -> bytes:
+    enable_optimizations: bool = True,
+    enable_fusion: bool = True,
+    fusion_options: dict[str, bool] | None = None,
+    quantize: str | DType | None = None,
+    return_runner: bool = False,
+    **kwargs: Any,
+) -> Path | bytes | ModelRunner:
 ```
 
 - **`model`**: A `torch.nn.Module`, `torch.export.ExportedProgram`, JAX pure function (`Callable`), or Flax `nn.Module`.
 - **`sample_inputs`**: Tuple of sample tensor/array inputs used for tracing and shape inference.
+- **`output`**: Optional file path to stream the `.gguf` binary directly to disk (prevents intermediate RAM allocation).
 - **`dynamic_shapes`**: Optional specification for dynamic dimensions (e.g. `torch.export.Dim`).
-- **`optimization_level`**: Standard optimization pipeline level (dead code elimination, redundant cast pruning, constant folding).
-- **`quantization_type`**: Optional quantization format: `"q8_0"`, `"q4_0"`, `"int8"`, `"int4"`.
-- **`output_path`**: Optional file path to save the `.gguf` binary on disk.
-- **`model_name`**: Name of the model embedded in metadata.
+- **`model_name`**: Name of the model embedded in graph and GGUF metadata.
+- **`enable_optimizations`**: If `True`, runs standard optimization passes (constant folding, dead-code elimination, redundant cast pruning).
+- **`enable_fusion`**: If `True`, lowers composite subgraphs into high-performance fused ops.
+- **`quantize`**: Optional parameter quantization format: `"q8_0"`, `"q4_0"`, `DType.Q8_0`, `DType.Q4_0`.
+- **`return_runner`**: If `True`, automatically loads and returns an instantiated `ModelRunner`.
+
+### `ggmlc.compile_to_bytes`
+Helper function for compiling and returning raw in-memory GGUF bytes when needed:
+```python
+gguf_bytes = ggmlc.compile_to_bytes(model, sample_inputs=(x,), model_name="my_model")
+```
 
 ---
 
@@ -95,9 +108,18 @@ artifacts = ggmlc.codegen(
 ```
 
 This generates:
-- `model.h`: Self-contained C++ header defining model tensor allocations and computation graph.
+- `my_model.h`: Self-contained C++ header defining model tensor allocations and computation graph.
 - `ggmlc_main.cpp`: Standalone CLI driver for running inference and benchmarks.
 - `CMakeLists.txt`: Build script configured to compile natively against GGML.
+
+---
+
+### `ggmlc.visualize`
+Visualizes Canonical IR or GGML dialect graphs and exports them to interactive HTML or Mermaid markdown:
+
+```python
+html_path = ggmlc.visualize(graph, output_path="model.html", format="html")
+```
 
 ---
 
@@ -128,15 +150,16 @@ params = model.init(jax.random.PRNGKey(0), jnp.ones((1, 32)))
 def forward(x):
     return model.apply(params, x)
 
-# Compile Flax forward function
-gguf_bytes = ggmlc.compile(
+# 1. Compile Flax forward function directly to a GGUF file
+model_path = ggmlc.compile(
     model=forward,
     sample_inputs=(jnp.ones((1, 32)),),
+    output="flax_classifier.gguf",
     model_name="flax_classifier",
 )
 
-# Run inference
-runner = ggmlc.load(gguf_bytes)
+# 2. Run high-speed native inference
+runner = ggmlc.load(model_path)
 out = runner(jnp.ones((1, 32)))
 ```
 

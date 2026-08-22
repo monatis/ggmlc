@@ -316,7 +316,6 @@ def _import_equations(
 
         # Special handling for broadcast_in_dim
         if prim_name == "broadcast_in_dim":
-            in_t = g.get_tensor(in_tids[0])
             bcast_dims = tuple(eqn.params.get("broadcast_dimensions", ()))
             out_shape_tuple = tuple(out_aval.shape)
             in_shape_tuple = tuple(eqn.invars[0].aval.shape)

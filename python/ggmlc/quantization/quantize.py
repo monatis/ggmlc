@@ -8,12 +8,16 @@ BLOCK_SIZE = 32
 
 
 def quantize_q8_0(data: np.ndarray) -> bytes:
-    """Quantizes a 1D/2D float32 array into standard GGML Q8_0 format.
+    """Quantizes a float32 array into standard GGML Q8_0 format.
 
-    Each 32-element block contains:
-      - scale 'd': 16-bit half precision float (2 bytes)
-      - qs: 32 signed 8-bit integers (32 bytes)
-    Total: 34 bytes per 32 float values.
+    Each 32-element block contains a 16-bit half-precision float scale
+    and 32 signed 8-bit integers (34 bytes per 32 float values).
+
+    Args:
+        data: NumPy array of float32 values.
+
+    Returns:
+        Bytes containing Q8_0 packed binary payload.
     """
     flat = np.ascontiguousarray(data, dtype=np.float32).flatten()
     n_elements = flat.size
@@ -63,12 +67,16 @@ def dequantize_q8_0(raw_bytes: bytes, shape: tuple[int, ...]) -> np.ndarray:
 
 
 def quantize_q4_0(data: np.ndarray) -> bytes:
-    """Quantizes a 1D/2D float32 array into standard GGML Q4_0 format.
+    """Quantizes a float32 array into standard GGML Q4_0 format.
 
-    Each 32-element block contains:
-      - scale 'd': 16-bit half precision float (2 bytes)
-      - qs: 16 bytes packing 32 4-bit signed nibbles in range [-8, 7]
-    Total: 18 bytes per 32 float values.
+    Each 32-element block contains a 16-bit half-precision float scale
+    and 16 bytes packing 32 4-bit signed nibbles (18 bytes per 32 float values).
+
+    Args:
+        data: NumPy array of float32 values.
+
+    Returns:
+        Bytes containing Q4_0 packed binary payload.
     """
     flat = np.ascontiguousarray(data, dtype=np.float32).flatten()
     n_elements = flat.size

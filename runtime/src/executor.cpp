@@ -446,6 +446,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!is_q && in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
                     in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
                 }
+                if (in0 && in1 && in0->ne[0] != in1->ne[0]) {
+                    std::fprintf(stderr, "[MUL_MAT FAIL op %u %s] in0=[%lld,%lld,%lld,%lld] in1=[%lld,%lld,%lld,%lld]\n",
+                        op.id, op.name.c_str(),
+                        (long long)(in0->ne[0]), (long long)(in0->ne[1]), (long long)(in0->ne[2]), (long long)(in0->ne[3]),
+                        (long long)(in1->ne[0]), (long long)(in1->ne[1]), (long long)(in1->ne[2]), (long long)(in1->ne[3]));
+                }
                 result = ggml_mul_mat(ctx_, in0, in1);
                 if (op.inputs.size() > 2) {
                     struct ggml_tensor* bias = ggml_tensors_[op.inputs[2]];

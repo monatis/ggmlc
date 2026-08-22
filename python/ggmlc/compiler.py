@@ -10,37 +10,53 @@ from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.quantization import quantize_graph_parameters
-from ggmlc.serialization.gguf import serialize_ggml_graph
 from ggmlc.transforms import create_standard_optimization_pipeline
 
 
 def compile(
     model: Any,
     sample_inputs: tuple[Any, ...] | list[Any] | None = None,
-    dynamic_shapes: tuple[dict[int, Any], ...] | None = None,
+    output: str | Path | None = None,
+    dynamic_shapes: tuple[dict[int, Any], ...] | dict[str, Any] | None = None,
     model_name: str = "model",
     enable_optimizations: bool = True,
     enable_fusion: bool = True,
     fusion_options: dict[str, bool] | None = None,
     quantize: str | DType | None = None,
-    output: str | Path | None = None,
+    return_runner: bool = False,
     **kwargs: Any,
-) -> bytes:
+) -> Path | bytes | Any:
     """Compiles a PyTorch or JAX neural network model into a standard GGUF v3 binary container.
 
+    This function ingests the source model into Canonical IR, runs standard optimization
+    passes (constant folding, dead-code elimination, redundant cast pruning), performs
+    target dialect lowering to GGML, applies optional parameter quantization (Q4_0, Q8_0),
+    and serializes the result into a standardized GGUF v3 file.
+
     Args:
-        model: PyTorch model (nn.Module or ExportedProgram) or JAX function/jaxpr.
-        sample_inputs: Tuple of sample input tensors matching model input signature.
-        dynamic_shapes: Optional dynamic shape constraints (e.g. torch.export.Dim).
-        model_name: Name identifier for the compiled model graph.
-        enable_optimizations: If True, applies standard IR graph optimizations (CF, DCE).
+        model: PyTorch model (nn.Module or ExportedProgram), JAX callable, or IR Graph.
+        sample_inputs: Sample input tensors matching the model's forward signature.
+        output: Optional file path to stream the .gguf binary container directly to disk.
+        dynamic_shapes: Dynamic shape specifications (e.g. torch.export.Dim).
+        model_name: Identifier name embedded in graph and GGUF metadata.
+        enable_optimizations: If True, applies standard IR graph optimization passes.
         enable_fusion: If True, lowers composite subgraphs into high-performance fused ops.
-        fusion_options: Optional granular control over specific fusion patterns.
+        fusion_options: Optional granular flags for specific fusion patterns.
         quantize: Optional quantization format ('q4_0', 'q8_0', DType.Q4_0, DType.Q8_0).
-        output: Optional file path to save the compiled .gguf binary container.
+        return_runner: If True, automatically loads and returns an instantiated ModelRunner.
+        **kwargs: Additional framework-specific keyword arguments.
 
     Returns:
-        Serialized GGUF v3 binary bytes.
+        Path to the saved .gguf file (if output is provided), ModelRunner (if return_runner=True),
+        or raw GGUF v3 bytes (if output is None and return_runner=False).
+
+    Example:
+        >>> import ggmlc, torch, torchvision.models as models
+        >>> model = models.resnet18().eval()
+        >>> x = torch.randn(1, 3, 224, 224)
+        >>> # Stream directly to disk
+        >>> model_path = ggmlc.compile(model, (x,), output="resnet18.gguf")
+        >>> runner = ggmlc.load(model_path)
     """
     # 1. Ingest model into Canonical IR Graph
     canonical_graph: Graph
@@ -98,16 +114,53 @@ def compile(
         target_dtype = DType.from_str(str(quantize)) if isinstance(quantize, str) else quantize
         ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
 
-    # 5. Serialize to standard GGUF v3 container
-    gguf_bytes = serialize_ggml_graph(ggml_graph)
+    # 5. Stream directly to file or serialize to memory
+    from ggmlc.serialization.gguf import save_to_gguf, serialize_to_gguf
 
-    # 6. Save to disk if output path is requested
     if output is not None:
-        out_path = Path(output).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(gguf_bytes)
+        out_path = save_to_gguf(ggml_graph, output)
+        if return_runner:
+            from ggmlc.runtime.runner import load
 
-    return gguf_bytes
+            return load(out_path)
+        return out_path
+
+    if return_runner:
+        gguf_bytes = serialize_to_gguf(ggml_graph)
+        from ggmlc.runtime.runner import load
+
+        return load(gguf_bytes)
+
+    return serialize_to_gguf(ggml_graph)
+
+
+def compile_to_bytes(
+    model: Any,
+    sample_inputs: tuple[Any, ...] | list[Any] | None = None,
+    dynamic_shapes: tuple[dict[int, Any], ...] | dict[str, Any] | None = None,
+    model_name: str = "model",
+    enable_optimizations: bool = True,
+    enable_fusion: bool = True,
+    fusion_options: dict[str, bool] | None = None,
+    quantize: str | DType | None = None,
+    **kwargs: Any,
+) -> bytes:
+    """Compiles a model and returns in-memory GGUF v3 bytes."""
+    res = compile(
+        model=model,
+        sample_inputs=sample_inputs,
+        output=None,
+        dynamic_shapes=dynamic_shapes,
+        model_name=model_name,
+        enable_optimizations=enable_optimizations,
+        enable_fusion=enable_fusion,
+        fusion_options=fusion_options,
+        quantize=quantize,
+        return_runner=False,
+        **kwargs,
+    )
+    assert isinstance(res, bytes)
+    return res
 
 
 def codegen(

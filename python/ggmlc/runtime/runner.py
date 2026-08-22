@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ class ModelRunner:
 
         try:
             self.py_graph = deserialize_ggml_graph(raw_bytes)
-        except Exception:
+        except (ValueError, KeyError, struct.error, OSError):
             self.py_graph = None
 
         self.executor = _runtime.ModelExecutor(self.graph)
@@ -166,10 +167,16 @@ class ModelRunner:
             # ne is in GGML column-major order [ne0, ne1, ne2, ne3]
             # Convert to PyTorch / C-contiguous row-major shape [ne3, ne2, ne1, ne0]
             full_c_shape = [ne_shape[3], ne_shape[2], ne_shape[1], ne_shape[0]]
-            input_ndim = (
-                args[0].ndim if len(args) > 0 else (list(kwargs.values())[0].ndim if kwargs else 2)
-            )
-            c_shape = full_c_shape[-max(2, input_ndim) :]
+            py_t = self.py_graph.tensors.get(out_tid) if self.py_graph else None
+            rank = getattr(py_t, "original_rank", None)
+            if rank is None or rank <= 0:
+                input_ndim = (
+                    args[0].ndim
+                    if len(args) > 0
+                    else (next(iter(kwargs.values())).ndim if kwargs else 2)
+                )
+                rank = max(2, input_ndim)
+            c_shape = full_c_shape[-rank:]
 
             # Reconstruct numpy array
             arr = np.frombuffer(raw_bytes, dtype=np_dtype)

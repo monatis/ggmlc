@@ -1,13 +1,9 @@
-"""Unified CLI demonstration script for compiling and executing full models with ggmlc."""
-
 import argparse
 from pathlib import Path
 
+import ggmlc
 import torch
-from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.serialization.graph import serialize_ggml_graph
-from ggmlc.validation.numerical import check_numerical_accuracy, run_compiled_model_wsl
+from ggmlc.validation.numerical import check_numerical_accuracy
 
 from examples.models.hub_models import (
     load_bge_m3_distill_model,
@@ -69,48 +65,33 @@ def main():
     model, example_inputs, input_names = get_model(args.model)
     model.eval()
 
-    # 1. Frontend export
-    print("[1/4] Ingesting PyTorch graph via torch.export...")
-    exported = export_torch_model(model, example_inputs, model_name=args.model)
-    print(
-        f"      Canonical IR graph constructed: {len(exported.main_graph.nodes)} ops, {len(exported.main_graph.tensors)} tensors."
+    # 1. Compile model directly with ggmlc
+    print("[1/2] Compiling model with ggmlc...")
+    out_file = args.output or f"{args.model}.gguf"
+    model_path = ggmlc.compile(
+        model=model,
+        sample_inputs=example_inputs,
+        output=out_file,
+        model_name=args.model,
     )
+    print(f"      Saved GGUF binary container to: {Path(model_path).resolve()}")
 
-    # 2. Lower to GGML dialect
-    print("[2/4] Lowering Canonical IR to GGML dialect...")
-    ggml_graph = lower_to_ggml(exported.main_graph)
-    print(f"      GGML execution graph: {len(ggml_graph.ops)} ops scheduled.")
+    # 2. Native high-speed evaluation and differential verification
+    print("[2/2] Loading native ModelRunner and executing...")
+    runner = ggmlc.load(model_path)
 
-    # 3. Serialize to GGUF v3 binary container
-    print("[3/4] Serializing to GGUF v3 binary container...")
-    ser_bytes = serialize_ggml_graph(ggml_graph)
-    print(f"      Serialized GGUF size: {len(ser_bytes):,} bytes.")
-
-    if args.output:
-        out_p = Path(args.output)
-        out_p.write_bytes(ser_bytes)
-        print(f"      Saved artifact to: {out_p.resolve()}")
-
-    # 4. Execute and differential verify
-    print("[4/4] Executing via generic C++ runtime in WSL...")
     with torch.no_grad():
         ref_out = model(*example_inputs)
         if isinstance(ref_out, tuple):
             ref_out = ref_out[0]
         ref_np = ref_out.numpy()
 
-    inputs_dict = {}
-    for name, tensor_val in zip(input_names, example_inputs, strict=False):
-        inputs_dict[name] = tensor_val.numpy()
+    inputs_dict = {
+        name: tensor_val.numpy()
+        for name, tensor_val in zip(input_names, example_inputs, strict=False)
+    }
+    actual_np = runner(**inputs_dict)
 
-    out_id = exported.main_graph.outputs[0]
-    exec_results = run_compiled_model_wsl(
-        serialized_bytes=ser_bytes,
-        inputs=inputs_dict,
-        output_tensor_ids=[out_id],
-    )
-
-    actual_np = exec_results[out_id]
     cmp_res = check_numerical_accuracy(ref_np, actual_np, atol=1e-4)
 
     print("\n=== Execution Verification Results ===")

@@ -66,15 +66,14 @@ class DType(Enum):
         """Map DType to PyTorch dtype."""
         import torch
 
-        mapping = {
+        return {
             DType.F32: torch.float32,
             DType.F16: torch.float16,
-            DType.BF16: torch.bfloat16,
             DType.I32: torch.int32,
-            DType.I64: torch.int64,
+            DType.I16: torch.int16,
             DType.I8: torch.int8,
             DType.BOOL: torch.bool,
-        }
+        }[self]
 
     @classmethod
     def from_numpy(cls, np_dtype: Any) -> DType:

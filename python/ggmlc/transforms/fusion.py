@@ -271,43 +271,53 @@ def _fuse_softmax_patterns(graph: Graph) -> None:
             else:
                 x_id = exp_op.inputs[0]
 
-            denom_op = producer_map.get(denom_id)
-            if denom_op and denom_op.opcode in (
+            denom_chain: list[int] = []
+            curr_denom = producer_map.get(denom_id)
+            sum_op = None
+            while curr_denom and curr_denom.opcode in (
                 OpCode.RESHAPE,
                 OpCode.VIEW,
                 OpCode.SQUEEZE,
                 OpCode.UNSQUEEZE,
+                OpCode.EXPAND,
+                OpCode.REPEAT,
             ):
-                sum_op = producer_map.get(denom_op.inputs[0])
-            else:
-                sum_op = denom_op
+                denom_chain.append(curr_denom.id)
+                next_op = producer_map.get(curr_denom.inputs[0])
+                if next_op and next_op.opcode == OpCode.SUM:
+                    sum_op = next_op
+                    break
+                curr_denom = next_op
+            if not sum_op and curr_denom and curr_denom.opcode == OpCode.SUM:
+                sum_op = curr_denom
 
-            if sum_op and sum_op.opcode == OpCode.SUM:
-                if sum_op.inputs[0] == exp_op.outputs[0]:
-                    op.opcode = OpCode.SOFTMAX
-                    op.inputs = [x_id]
-                    op.attributes["dim"] = -1
-                    ops_to_remove.add(exp_op.id)
-                    if sub_op:
-                        ops_to_remove.add(sub_op.id)
-                        max_in = sub_op.inputs[1]
-                        max_op = producer_map.get(max_in)
-                        if max_op:
-                            if max_op.opcode in (
-                                OpCode.RESHAPE,
-                                OpCode.VIEW,
-                                OpCode.SQUEEZE,
-                                OpCode.UNSQUEEZE,
-                            ):
-                                inner_max = producer_map.get(max_op.inputs[0])
-                                if inner_max:
-                                    ops_to_remove.add(inner_max.id)
-                                ops_to_remove.add(max_op.id)
-                            else:
-                                ops_to_remove.add(max_op.id)
-                    if denom_op and denom_op != sum_op:
-                        ops_to_remove.add(denom_op.id)
-                    ops_to_remove.add(sum_op.id)
+            if sum_op and sum_op.inputs[0] == exp_op.outputs[0]:
+                op.opcode = OpCode.SOFTMAX
+                op.inputs = [x_id]
+                op.attributes["dim"] = -1
+                ops_to_remove.add(exp_op.id)
+                if sub_op:
+                    ops_to_remove.add(sub_op.id)
+                    max_in = sub_op.inputs[1]
+                    curr_max = producer_map.get(max_in)
+                    while curr_max:
+                        ops_to_remove.add(curr_max.id)
+                        if curr_max.opcode in (
+                            OpCode.RESHAPE,
+                            OpCode.VIEW,
+                            OpCode.SQUEEZE,
+                            OpCode.UNSQUEEZE,
+                            OpCode.EXPAND,
+                            OpCode.REPEAT,
+                        ):
+                            curr_max = producer_map.get(curr_max.inputs[0])
+                        elif curr_max.opcode in (OpCode.AMAX, OpCode.MAXIMUM):
+                            break
+                        else:
+                            break
+                for d_id in denom_chain:
+                    ops_to_remove.add(d_id)
+                ops_to_remove.add(sum_op.id)
 
     if ops_to_remove:
         graph.nodes = [n for n in graph.nodes if n.id not in ops_to_remove]

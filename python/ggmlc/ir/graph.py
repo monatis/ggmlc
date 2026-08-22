@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.op import OpCode, Operation
@@ -146,3 +147,15 @@ class Graph:
             out_names = [self.get_tensor(i).name for i in op.outputs]
             lines.append(f"    %{','.join(out_names)} = {op.opcode.name}(%{','.join(in_names)})")
         return "\n".join(lines)
+
+    def to_mermaid(self, title: str | None = None, direction: str = "TD") -> str:
+        """Exports the graph to Mermaid flowchart diagram code."""
+        from ggmlc.visualization.mermaid import graph_to_mermaid
+
+        return graph_to_mermaid(self, title=title or self.name, direction=direction)
+
+    def visualize(self, output_path: str = "graph.html", format: str = "auto") -> Path:
+        """Visualizes the graph to HTML, Mermaid markdown, or image."""
+        from ggmlc.visualization.mermaid import visualize
+
+        return visualize(self, output_path=output_path, format=format, title=self.name)

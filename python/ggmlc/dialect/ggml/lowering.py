@@ -52,6 +52,7 @@ class GGMLTensorDef:
     producer_id: int | None = None
     data: np.ndarray | None = None
     role: str | None = None
+    original_rank: int = 4
 
 
 @dataclass
@@ -80,29 +81,39 @@ class GGMLExecutionGraph:
     def get_tensor(self, tid: int) -> GGMLTensorDef:
         return self.tensors[tid]
 
+    symbols: set[str] = field(default_factory=set)
+
+    def to_mermaid(self) -> str:
+        """Converts this lowered GGML execution graph to Mermaid flowchart format."""
+        from ggmlc.visualization.mermaid import graph_to_mermaid
+
+        return graph_to_mermaid(self)
+
+    def visualize(self, output_path: str | Path, format: str = "html") -> Path:
+        """Renders and exports this execution graph to HTML, SVG, PNG, or Mermaid MMD."""
+        from ggmlc.visualization.mermaid import visualize
+
+        return visualize(self, output_path, format=format)
+
 
 def lower_to_ggml(
     canonical_graph: Graph,
     enable_fusion: bool = True,
     fusion_options: FusionOptions | None = None,
 ) -> GGMLExecutionGraph:
-    """Lowers a Canonical IR Graph into a GGML Execution Graph."""
+    """Lowers Canonical IR Graph to target-specific GGML execution semantics."""
     if enable_fusion:
-        if fusion_options is None:
-            fusion_options = FusionOptions()
-        canonical_graph = fuse_operations(canonical_graph, fusion_options)
+        fuse_operations(canonical_graph, fusion_options)
 
     ggml_graph = GGMLExecutionGraph(
         name=canonical_graph.name,
         inputs=list(canonical_graph.inputs),
         outputs=list(canonical_graph.outputs),
         parameters=list(canonical_graph.parameters),
-        metadata=dict(canonical_graph.metadata),
     )
-
     symbols: set[str] = set()
 
-    # 1. Lower all tensors
+    # 1. Lower Tensors
     for tid, t in canonical_graph.tensors.items():
         ne = canonical_shape_to_ggml_ne(t.shape)
         for d in ne:
@@ -117,6 +128,7 @@ def lower_to_ggml(
             producer_id=t.producer_id,
             data=t.data,
             role=t.role,
+            original_rank=len(t.shape.dims),
         )
         ggml_graph.tensors[tid] = ggml_tensor
 
