@@ -75,15 +75,20 @@ def _lower_my_new_op(node: Operation, in_graph: Graph, out_graph: Graph, tensor_
 In `runtime/src/executor.cpp`:
 ```cpp
 case GGML_OP_MY_NEW_OP: {
-    struct ggml_tensor* in0 = tensors[node.inputs[0]];
-    struct ggml_tensor* out = ggml_my_new_op(ctx, in0);
-    tensors[node.outputs[0]] = out;
+    struct ggml_tensor* in0 = ggml_tensors_[op.inputs[0]];
+    if (is_cuda_) {
+        // Native GPU kernel / operation emission
+        result = ggml_my_new_op(ctx_, in0);
+    } else {
+        // CPU execution (multi-threaded fallback or custom kernel)
+        result = ggml_my_new_op(ctx_, in0);
+    }
     break;
 }
 ```
 
 ### Step 6: Write Python Unit & Numerical Tests
-In `tests/ops/test_my_new_op.py`:
+In `tests/ops/test_my_new_op.py` and `tests/numerical/`:
 ```python
 def test_my_new_op_numerical_parity():
     class M(torch.nn.Module):
@@ -94,13 +99,15 @@ def test_my_new_op_numerical_parity():
     x = torch.randn(2, 16, dtype=torch.float32)
     ref_out = model(x).detach().numpy()
 
-    exp = export_torch_model(model, (x,), model_name="my_new_op_test")
-    g = lower_to_ggml(exp.main_graph)
-    ser = serialize_ggml_graph(g)
-    res = run_compiled_model_wsl(ser, {"x": x.numpy()}, [exp.main_graph.outputs[0]])
-    out = res[exp.main_graph.outputs[0]].reshape(ref_out.shape)
+    # Compile and evaluate across CPU and CUDA
+    runner_cpu = ggmlc.compile(model, (x,), return_runner=True, device="cpu")
+    cpu_out = runner_cpu(x.numpy())
+    assert np.allclose(ref_out, cpu_out, atol=1e-4)
 
-    assert np.allclose(ref_out, out, atol=1e-4)
+    if any(d.startswith("cuda") for d in ggmlc.get_available_devices()):
+        runner_gpu = ggmlc.compile(model, (x,), return_runner=True, device="cuda")
+        gpu_out = runner_gpu(x.numpy())
+        assert np.allclose(ref_out, gpu_out, atol=1e-4)
 ```
 
 ---
@@ -151,10 +158,18 @@ pytest tests/quantization/ -v
 # Run only optimization pass tests
 pytest tests/transforms/ -v
 
+# Run CUDA differential parity tests
+pytest tests/numerical/test_cuda_parity.py -v
+
 # Format and lint code
 ruff check python/ tests/
 ruff format python/ tests/
 
-# Rebuild C++ runtime (via WSL/Linux)
-cmake --build build -j$(nproc)
+# Build C++ CPU runtime (Windows MSVC)
+cmake -B build-win
+cmake --build build-win --target _runtime --config Release
+
+# Build C++ CUDA GPU runtime (Linux / WSL 2)
+cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build-wsl --target _runtime -j$(nproc)
 ```

@@ -8,9 +8,10 @@
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Format](https://img.shields.io/badge/binary-GGUF%20v3-orange.svg)](https://github.com/ggerganov/ggml)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
+[![Backends](https://img.shields.io/badge/backends-CPU%20%7C%20NVIDIA%20CUDA-purple.svg)](https://github.com/ggerganov/ggml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20WSL-lightgrey.svg)]()
 
-*Compile neural network graphs from PyTorch and JAX into ultra-fast, portable GGUF binaries and human-readable C++ projects with GGML execution.*
+*Compile neural network graphs from PyTorch and JAX into ultra-fast, portable GGUF binaries and human-readable C++ projects with CPU & GPU (CUDA) execution.*
 
 ---
 
@@ -18,14 +19,15 @@
 
 ## 🚀 Why ggmlc?
 
-Deploying modern neural networks on edge devices, CPU servers, and embedded platforms often requires writing brittle, hand-crafted C++ inference code for each new model architecture.
+Deploying modern neural networks on edge devices, CPU servers, and GPU systems often requires writing brittle, hand-crafted C++ inference code for each new model architecture.
 
 `ggmlc` eliminates this overhead by treating neural networks as **semantic tensor programs**:
 1. **Zero Hand-Written C++ Glue**: Ingests models directly from **PyTorch** (`torch.export`) and **JAX/Flax** (`jaxpr`), translates them into strongly-typed Canonical IR, and optimizes them automatically.
 2. **Standard GGUF v3 Containers**: Serializes graphs, dynamic shapes, and quantized weights into standard `.gguf` binaries — no proprietary file formats or runtime lock-in.
-3. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications.
-4. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs.
-5. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
+3. **Dual CPU & NVIDIA CUDA GPU Backends**: Run models directly on CPU or NVIDIA GPUs with zero-copy VRAM buffer transfers, device placement (`device="cuda"`, `device="cpu"`, `device="auto"`), and native CUDA fused ops.
+4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
+5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
+6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
 
 ---
 
@@ -53,8 +55,8 @@ graph TD
         GGML["GGML Dialect Graph<br/><i>(Block Quantization: Q8_0, Q4_0)</i>"]
     end
 
-    subgraph Outputs["5. Deployment Targets"]
-        GGUF["Standard GGUF v3 Binary<br/><i>(High-Speed nanobind Runner / ggmlc-run)</i>"]
+    subgraph Outputs["5. Deployment & Execution Targets"]
+        GGUF["Standard GGUF v3 Binary<br/><i>(CPU &amp; CUDA nanobind Runner / ggmlc-run)</i>"]
         CPP["Standalone C++ Project Folder<br/><i>(&lt;Model&gt;.h, ggmlc_main.cpp, CMakeLists.txt)</i>"]
     end
 
@@ -82,7 +84,7 @@ graph TD
 
 ## ⚡ 3-Line Quickstarts
 
-### 1. Compile and Run a PyTorch Model
+### 1. Compile and Run on CPU or GPU (CUDA)
 ```python
 import ggmlc
 import torch
@@ -95,15 +97,21 @@ example_x = torch.randn(1, 3, 224, 224)
 # 2. Compile directly to a standard GGUF binary file
 model_path = ggmlc.compile(model, (example_x,), output="resnet18.gguf")
 
-# 3. Load into high-performance native runtime and evaluate
-runner = ggmlc.load(model_path, n_threads=4)
-output = runner(example_x.numpy())
+# 3. Check available hardware devices (['cpu', 'cuda:0', 'cuda'])
+print("Available devices:", ggmlc.get_available_devices())
+
+# 4. Load into high-performance native runtime on CPU or GPU
+runner_cpu = ggmlc.load(model_path, device="cpu", n_threads=4)
+runner_gpu = ggmlc.load(model_path, device="cuda")  # Runs natively on NVIDIA GPU
+
+output = runner_gpu(example_x.numpy())
 print("Output shape:", output.shape)
 ```
 
 ### 2. Compile and Run JAX / Flax
 ```python
 import ggmlc
+import jax
 import jax.numpy as jnp
 from examples.models.flax_models import FlaxTransformerLayer
 
@@ -115,12 +123,12 @@ params = model.init(jax.random.PRNGKey(0), x_sample)
 # 2. Compile JAX forward function to GGUF
 model_path = ggmlc.compile(lambda x: model.apply(params, x), (x_sample,), output="transformer.gguf")
 
-# 3. Fast native execution with zero-copy NumPy buffers
-runner = ggmlc.load(model_path)
+# 3. Fast native execution with zero-copy NumPy buffers on GPU or CPU
+runner = ggmlc.load(model_path, device="auto")
 out = runner(x_sample)
 ```
 
-### 3. Generate Standalone C++ Project
+### 3. Generate Standalone C++ Project (CPU & CUDA)
 ```python
 # Emit a complete, standalone C++ project linking against GGML
 ggmlc.codegen(
@@ -131,9 +139,9 @@ ggmlc.codegen(
 )
 ```
 Generates:
-- `ResNet18.h`: Self-contained C++ header with model tensor descriptors and computation graph.
-- `ggmlc_main.cpp`: Standalone CLI executable driver for inference and benchmarking.
-- `CMakeLists.txt`: Build configuration ready for compilation with MSVC, GCC, or Clang.
+- `ResNet18.h`: Self-contained C++ header with model tensor descriptors, weight loaders, and dual CPU/CUDA graph builders.
+- `ggmlc_main.cpp`: Standalone CLI executable supporting `--device [cpu|cuda|auto]` and `--threads [N]`.
+- `CMakeLists.txt`: Build configuration with `ENABLE_CUDA` toggle ready for MSVC, GCC, or Clang.
 
 ### 4. Graph & Pass Visualization (`ggmlc.visualize`)
 ```python
@@ -147,6 +155,22 @@ ggmlc.visualize(graph, output_path="resnet18.png")   # Pure-Python PNG rendering
 ggmlc.visualize(graph, output_path="resnet18.svg")   # Vector graphic
 ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan/zoom
 ```
+
+---
+
+## 🔍 Visual Graph Inspector
+
+`ggmlc` automatically renders semantic graphs with explicit tensor shapes, memory storage classes, fused operators, and execution schedules:
+
+### PyTorch Vision Block (Conv2D + BatchNorm + ReLU + Linear)
+<div align="center">
+  <img src="assets/pytorch_model_graph.png" alt="PyTorch Model Graph" width="95%"/>
+</div>
+
+### JAX SwiGLU Feed-Forward Network
+<div align="center">
+  <img src="assets/jax_model_graph.png" alt="JAX Model Graph" width="95%"/>
+</div>
 
 ---
 
@@ -185,29 +209,21 @@ pip install "ggmlc[all]"
 
 ### Native C++ Runtime Compilation
 
-#### Windows (MSVC)
+#### Windows (MSVC) - CPU Runtime
 ```powershell
 cmake -B build-win
 cmake --build build-win --target _runtime --config Release
 ```
 
-#### Linux / WSL (GCC / Clang)
+#### Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
 ```bash
+# CPU-only build
 cmake -B build
 cmake --build build --target _runtime -j$(nproc)
-```
 
----
-
-## 🔍 Graph & IR Pass Visualization
-
-`ggmlc` includes built-in Mermaid diagram export for inspectable compiler graph visualization:
-
-```python
-# Export pure-Python rendered PNG, SVG, or interactive HTML with zoom/pan
-ggmlc.visualize(graph, output_path="model_graph.png")  # Render to PNG image via mermaidx
-ggmlc.visualize(graph, output_path="model_graph.svg")  # Render to vector SVG
-ggmlc.visualize(graph, output_path="model_graph.html") # Interactive browser visualization
+# CUDA GPU build (NVIDIA Pascal GTX 1050/1080 through Hopper)
+cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build-wsl --target _runtime -j$(nproc)
 ```
 
 ---

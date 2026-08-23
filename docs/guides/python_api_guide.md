@@ -1,10 +1,10 @@
 # ggmlc Python High-Performance API & User Guide
 
-`ggmlc` provides a modern, unified, framework-agnostic Python API for compiling, optimizing, quantizing, and executing neural network models from **PyTorch**, **JAX**, and **Flax** directly onto GGML and CPU hardware backends.
+`ggmlc` provides a modern, unified, framework-agnostic Python API for compiling, optimizing, quantizing, and executing neural network models from **PyTorch**, **JAX**, and **Flax** directly onto CPU and **NVIDIA CUDA GPU** backends using GGML.
 
 ---
 
-## 1. Quickstart: Compiling & Running Models in 3 Lines
+## 1. Quickstart: Compiling & Running on CPU and GPU
 
 ```python
 import ggmlc
@@ -23,17 +23,31 @@ model_path = ggmlc.compile(
     model_name="resnet18",
 )
 
-# 3. Load into high-performance native C++ nanobind runtime
-runner = ggmlc.load(model_path, n_threads=4)
+# 3. Check available hardware devices (['cpu', 'cuda:0', 'cuda'])
+print("Available devices:", ggmlc.get_available_devices())
 
-# 4. Evaluate with zero-copy numpy buffers
-output = runner(example_input.numpy())
+# 4. Load into high-performance native C++ nanobind runtime on CPU or GPU
+runner_cpu = ggmlc.load(model_path, device="cpu", n_threads=4)
+runner_gpu = ggmlc.load(model_path, device="cuda")  # Executes natively on NVIDIA GPU
+
+# 5. Evaluate with zero-copy numpy buffers
+output = runner_gpu(example_input.numpy())
+print("GPU Runner device:", runner_gpu.device)
 print("Output shape:", output.shape)
 ```
 
 ---
 
 ## 2. Core Python APIs
+
+### `ggmlc.get_available_devices`
+Returns the list of hardware execution devices discovered and supported by the current runtime:
+```python
+devices = ggmlc.get_available_devices()
+# Example output: ['cpu', 'cuda:0', 'cuda']
+```
+
+---
 
 ### `ggmlc.compile`
 Compiles a PyTorch model, JAX callable, or Flax module into standardized GGUF v3 binary format.
@@ -50,6 +64,7 @@ def compile(
     fusion_options: dict[str, bool] | None = None,
     quantize: str | DType | None = None,
     return_runner: bool = False,
+    device: str = "cpu",
     **kwargs: Any,
 ) -> Path | bytes | ModelRunner:
 ```
@@ -63,6 +78,9 @@ def compile(
 - **`enable_fusion`**: If `True`, lowers composite subgraphs into high-performance fused ops.
 - **`quantize`**: Optional parameter quantization format: `"q8_0"`, `"q4_0"`, `DType.Q8_0`, `DType.Q4_0`.
 - **`return_runner`**: If `True`, automatically loads and returns an instantiated `ModelRunner`.
+- **`device`**: Hardware target when `return_runner=True` (`"cpu"`, `"cuda"`, `"cuda:0"`, `"auto"`).
+
+---
 
 ### `ggmlc.compile_to_bytes`
 Helper function for compiling and returning raw in-memory GGUF bytes when needed:
@@ -76,9 +94,14 @@ gguf_bytes = ggmlc.compile_to_bytes(model, sample_inputs=(x,), model_name="my_mo
 Loads a compiled model from a `.gguf` file path or in-memory `bytes` into a `ModelRunner`.
 
 ```python
-runner = ggmlc.load("model.gguf", n_threads=4)
-# Or from memory bytes:
-runner = ggmlc.load(gguf_bytes, n_threads=4)
+# CPU execution with multi-threading
+runner_cpu = ggmlc.load("model.gguf", device="cpu", n_threads=4)
+
+# GPU execution via NVIDIA CUDA
+runner_gpu = ggmlc.load("model.gguf", device="cuda")
+
+# Auto device selection (CUDA if available, falling back to CPU)
+runner_auto = ggmlc.load("model.gguf", device="auto")
 ```
 
 ### `ModelRunner` Invocation
@@ -96,87 +119,30 @@ out = runner(x_numpy, symbols={"seq": 64})
 ---
 
 ### `ggmlc.codegen`
-Generates an independent, standalone C++ model library and executable from a compiled model:
+Generates an independent, standalone C++ model library and executable with dual CPU and CUDA backend support:
 
 ```python
-artifacts = ggmlc.codegen(
+ggmlc.codegen(
     model=model,
-    sample_inputs=(sample_x,),
-    output_dir="./build_cpp_model",
-    model_name="my_model",
+    sample_inputs=(example_input,),
+    output_dir="./generated_cpp",
+    model_name="MyModel",
 )
 ```
 
-This generates:
-- `my_model.h`: Self-contained C++ header defining model tensor allocations and computation graph.
-- `ggmlc_main.cpp`: Standalone CLI driver for running inference and benchmarks.
-- `CMakeLists.txt`: Build script configured to compile natively against GGML.
+Generates:
+- `MyModel.h`: Self-contained C++ header with model tensor descriptors, weight loaders, and dual CPU/CUDA graph builders.
+- `ggmlc_main.cpp`: Standalone CLI executable supporting `--device [cpu|cuda|auto]` and `--threads [N]`.
+- `CMakeLists.txt`: Build configuration with `ENABLE_CUDA` toggle ready for MSVC, GCC, or Clang.
 
 ---
 
 ### `ggmlc.visualize`
-Visualizes Canonical IR or GGML dialect graphs and exports them to PNG, SVG, interactive HTML, or Mermaid markdown:
+Generates diagrammatic visualizations of Canonical IR or Lowered GGML execution graphs:
 
 ```python
-png_path = ggmlc.visualize(graph, output_path="model.png", format="png")   # Render directly to PNG
-svg_path = ggmlc.visualize(graph, output_path="model.svg", format="svg")   # Vector SVG
-html_path = ggmlc.visualize(graph, output_path="model.html", format="html") # Interactive browser HTML
-```
-
----
-
-## 3. Full JAX & Flax Support
-
-`ggmlc` natively ingests JAX expressions (`jaxpr`) and Flax linen modules:
-
-```python
-import jax
-import jax.numpy as jnp
-import flax.linen as nn
-import ggmlc
-
-class FlaxClassifier(nn.Module):
-    hidden_dim: int = 128
-    num_classes: int = 10
-
-    @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        x = nn.Dense(self.hidden_dim)(x)
-        x = nn.LayerNorm()(x)
-        x = nn.gelu(x)
-        return nn.Dense(self.num_classes)(x)
-
-model = FlaxClassifier()
-params = model.init(jax.random.PRNGKey(0), jnp.ones((1, 32)))
-
-def forward(x):
-    return model.apply(params, x)
-
-# 1. Compile Flax forward function directly to a GGUF file
-model_path = ggmlc.compile(
-    model=forward,
-    sample_inputs=(jnp.ones((1, 32)),),
-    output="flax_classifier.gguf",
-    model_name="flax_classifier",
-)
-
-# 2. Run high-speed native inference
-runner = ggmlc.load(model_path)
-out = runner(jnp.ones((1, 32)))
-```
-
----
-
-## 4. Native Multi-Platform Compilation
-
-### Building on Windows (MSVC)
-```powershell
-cmake -B build-win
-cmake --build build-win --target _runtime --config Release
-```
-
-### Building on Linux / WSL (GCC / Clang)
-```bash
-cmake -B build
-cmake --build build --target _runtime -j$(nproc)
+# Export pure-Python rendered PNG, SVG, or interactive HTML with zoom/pan
+ggmlc.visualize(graph, output_path="model_graph.png")  # Render to PNG image via mermaidx
+ggmlc.visualize(graph, output_path="model_graph.svg")  # Render to vector SVG
+ggmlc.visualize(graph, output_path="model_graph.html") # Interactive browser visualization
 ```

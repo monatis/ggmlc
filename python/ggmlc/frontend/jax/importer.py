@@ -48,6 +48,8 @@ JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
     "integer_pow": OpCode.POW,
     "pow": OpCode.POW,
     "erf": OpCode.GELU,
+    "logistic": OpCode.SIGMOID,
+    "sigmoid": OpCode.SIGMOID,
 }
 
 
