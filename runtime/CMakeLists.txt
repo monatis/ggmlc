@@ -1,3 +1,10 @@
+if (GGMLC_ENABLE_CUDA)
+    set(GGML_BACKEND_LIBS ggml ggml-base ggml-cpu ggml-cuda)
+    add_compile_definitions(GGML_USE_CUDA)
+else()
+    set(GGML_BACKEND_LIBS ggml_lib)
+endif()
+
 add_library(ggmlc_runtime STATIC
     src/loader.cpp
     src/executor.cpp
@@ -5,7 +12,7 @@ add_library(ggmlc_runtime STATIC
 )
 
 target_link_libraries(ggmlc_runtime PUBLIC
-    ggml_lib
+    ${GGML_BACKEND_LIBS}
 )
 
 # CLI Tool
@@ -25,7 +32,7 @@ add_library(ggmlc_runtime_shared SHARED
 )
 
 target_link_libraries(ggmlc_runtime_shared PUBLIC
-    ggml_lib
+    ${GGML_BACKEND_LIBS}
 )
 
 # Optional Python Bindings with nanobind
@@ -49,7 +56,7 @@ if (Python_FOUND)
             src/executor.cpp
             src/stdlib_kernels.cpp
         )
-        target_link_libraries(_runtime PRIVATE ggml_lib)
+        target_link_libraries(_runtime PRIVATE ${GGML_BACKEND_LIBS})
         
         # Set output directory to python/ggmlc for direct import
         set_target_properties(_runtime PROPERTIES

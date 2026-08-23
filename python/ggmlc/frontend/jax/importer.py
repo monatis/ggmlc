@@ -52,7 +52,10 @@ JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
 
 
 def _jax_dtype_to_dtype(dtype: Any) -> DType:
-    return DType.from_numpy(np.dtype(dtype))
+    dt = np.dtype(dtype)
+    if dt == np.dtype(np.float64):
+        return DType.F32
+    return DType.from_numpy(dt)
 
 
 def _import_equations(
@@ -112,6 +115,8 @@ def _import_equations(
         for in_var in eqn.invars:
             if hasattr(in_var, "val"):
                 np_val = np.asarray(in_var.val)
+                if np_val.dtype == np.float64:
+                    np_val = np_val.astype(np.float32)
                 c_t = g.add_tensor(
                     name=f"lit_{len(g.tensors)}",
                     shape=Shape.from_tuple(tuple(np_val.shape)),

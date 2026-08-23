@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ggmlc.runtime.runner import ModelRunner, load
+from ggmlc.runtime.runner import ModelRunner, get_available_devices, load
 
 __version__ = "0.1.0"
 
@@ -19,6 +19,7 @@ __all__ = [
     "compile",
     "compile_to_bytes",
     "generate_cpp_project",
+    "get_available_devices",
     "graph_to_mermaid",
     "load",
     "visualize",

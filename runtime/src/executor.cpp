@@ -2,129 +2,132 @@
 #include <iostream>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include "ggml.h"
+#include "ggml-backend.h"
 #include "ggml-cpu.h"
+#if defined(GGML_USE_CUDA)
+#include "ggml-cuda.h"
+#endif
 #include "ggmlc/stdlib_kernels.h"
 
 namespace ggmlc {
 
-ModelExecutor::ModelExecutor(const SerializedModelGraph& graph)
-    : model_graph_(graph), ctx_(nullptr), cgraph_(nullptr) {}
+std::vector<std::string> ModelExecutor::get_available_devices() {
+    std::vector<std::string> devices = {"cpu"};
+#if defined(GGML_USE_CUDA)
+    int n_cuda = ggml_backend_cuda_get_device_count();
+    for (int i = 0; i < n_cuda; ++i) {
+        devices.push_back("cuda:" + std::to_string(i));
+    }
+    if (n_cuda > 0) {
+        devices.push_back("cuda");
+    }
+#endif
+    return devices;
+}
+
+ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::string& device)
+    : model_graph_(graph), device_(device), backend_(nullptr), buffer_(nullptr), ctx_(nullptr), cgraph_(nullptr) {
+    std::string dev_lower = device_;
+    for (auto& c : dev_lower) c = std::tolower(static_cast<unsigned char>(c));
+
+    if (dev_lower == "auto") {
+#if defined(GGML_USE_CUDA)
+        if (ggml_backend_cuda_get_device_count() > 0) {
+            dev_lower = "cuda:0";
+            device_ = "cuda:0";
+        } else {
+            dev_lower = "cpu";
+            device_ = "cpu";
+        }
+#else
+        dev_lower = "cpu";
+        device_ = "cpu";
+#endif
+    }
+
+    if (dev_lower.rfind("cuda", 0) == 0) {
+#if defined(GGML_USE_CUDA)
+        int device_idx = 0;
+        if (dev_lower.size() > 5 && dev_lower[4] == ':') {
+            device_idx = std::stoi(dev_lower.substr(5));
+        }
+        backend_ = ggml_backend_cuda_init(device_idx);
+        if (!backend_) {
+            throw std::runtime_error("Failed to initialize GGML CUDA backend on device " + std::to_string(device_idx));
+        }
+        device_ = "cuda:" + std::to_string(device_idx);
+        is_cuda_ = true;
+#else
+        throw std::runtime_error("CUDA backend was requested ('" + device + "'), but ggmlc was compiled without CUDA support.");
+#endif
+    } else {
+        backend_ = ggml_backend_cpu_init();
+        if (!backend_) {
+            throw std::runtime_error("Failed to initialize GGML CPU backend.");
+        }
+        device_ = "cpu";
+        is_cuda_ = false;
+    }
+}
 
 ModelExecutor::~ModelExecutor() {
+    if (buffer_) {
+        ggml_backend_buffer_free(buffer_);
+        buffer_ = nullptr;
+    }
     if (ctx_) {
         ggml_free(ctx_);
         ctx_ = nullptr;
     }
+    if (backend_) {
+        ggml_backend_free(backend_);
+        backend_ = nullptr;
+    }
 }
 
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
+    if (buffer_) {
+        ggml_backend_buffer_free(buffer_);
+        buffer_ = nullptr;
+    }
     if (ctx_) {
         ggml_free(ctx_);
         ctx_ = nullptr;
     }
     ggml_tensors_.clear();
     concrete_shapes_.clear();
+    custom_params_storage_.clear();
+    output_host_buffers_.clear();
+    state_host_buffers_.clear();
 
-    // 1. Evaluate concrete shapes and compute required memory
-    size_t param_bytes = 0;
-    size_t state_bytes = 0;
-    size_t total_act_bytes = 0;
-    size_t total_tensor_bytes = 0;
+    // 1. Evaluate concrete shapes and metadata
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
         const auto& t = pair.second;
         std::array<int64_t, 4> ne;
-        int64_t numel = 1;
         for (int d = 0; d < 4; ++d) {
             ne[d] = t.ne[d]->evaluate(symbol_env, model_graph_.symbol_table);
-            numel *= ne[d];
         }
         concrete_shapes_[tid] = ne;
-
-        size_t type_size = ggml_type_size(t.type);
-        size_t blck_size = ggml_blck_size(t.type);
-        if (blck_size == 0) blck_size = 1;
-        size_t sz = (numel / blck_size) * type_size;
-        total_tensor_bytes += sz + ggml_tensor_overhead();
-
-        if (t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) {
-            param_bytes += sz;
-        } else if (t.storage == StorageClass::STATE) {
-            state_bytes += sz;
-        } else {
-            total_act_bytes += sz;
-        }
     }
 
-    size_t effective_act_bytes = total_act_bytes;
-    if (enable_arena_reuse) {
-        // Liveness analysis over ops for peak activation memory planning
-        int n_ops = static_cast<int>(model_graph_.ops.size());
-        std::unordered_map<uint32_t, std::pair<int, int>> liveness;
-        for (const auto& pair : model_graph_.tensors) {
-            uint32_t tid = pair.first;
-            bool is_persistent = (pair.second.storage == StorageClass::PARAMETER || pair.second.storage == StorageClass::STATE);
-            liveness[tid] = {is_persistent ? 0 : n_ops, is_persistent ? n_ops : 0};
-        }
-        for (int op_idx = 0; op_idx < n_ops; ++op_idx) {
-            const auto& op = model_graph_.ops[op_idx];
-            for (uint32_t out_id : op.outputs) {
-                if (liveness.count(out_id)) {
-                    liveness[out_id].first = std::min(liveness[out_id].first, op_idx);
-                    liveness[out_id].second = std::max(liveness[out_id].second, op_idx);
-                }
-            }
-            for (uint32_t in_id : op.inputs) {
-                if (liveness.count(in_id)) {
-                    liveness[in_id].second = std::max(liveness[in_id].second, op_idx);
-                }
-            }
-        }
-        for (uint32_t out_id : model_graph_.outputs) {
-            if (liveness.count(out_id)) liveness[out_id].second = n_ops;
-        }
-        for (uint32_t inp_id : model_graph_.inputs) {
-            if (liveness.count(inp_id)) liveness[inp_id].first = 0;
-        }
-
-        size_t peak_act_bytes = 0;
-        for (int op_idx = 0; op_idx < n_ops; ++op_idx) {
-            size_t step_bytes = 0;
-            for (const auto& pair : model_graph_.tensors) {
-                uint32_t tid = pair.first;
-                if (pair.second.storage == StorageClass::ACTIVATION || pair.second.storage == StorageClass::INPUT || pair.second.storage == StorageClass::OUTPUT) {
-                    if (liveness[tid].first <= op_idx && liveness[tid].second >= op_idx) {
-                        const auto& ne = concrete_shapes_[tid];
-                        size_t numel = ne[0] * ne[1] * ne[2] * ne[3];
-                        size_t t_size = ggml_type_size(pair.second.type);
-                        size_t b_size = ggml_blck_size(pair.second.type);
-                        if (b_size == 0) b_size = 1;
-                        step_bytes += (numel / b_size) * t_size;
-                    }
-                }
-            }
-            peak_act_bytes = std::max(peak_act_bytes, step_bytes);
-        }
-        if (peak_act_bytes > 0) {
-            effective_act_bytes = peak_act_bytes;
-        }
-    }
-
-    // Allocate robust ggml context with safe workspace headroom for Conv2D / Attention intermediate objects
-    size_t ctx_size = (param_bytes + state_bytes + effective_act_bytes) * 6 + 1024 * 1024 * 128 + model_graph_.ops.size() * 65536;
+    // Allocate ggml context with no_alloc=true so the backend buffer allocates memory
+    size_t ctx_meta_size = (model_graph_.tensors.size() + model_graph_.ops.size() * 16 + 256) * ggml_tensor_overhead() + 8 * 1024 * 1024;
     struct ggml_init_params params = {
-        /* .mem_size   = */ ctx_size,
+        /* .mem_size   = */ ctx_meta_size,
         /* .mem_buffer = */ nullptr,
-        /* .no_alloc   = */ false,
+        /* .no_alloc   = */ true,
     };
     ctx_ = ggml_init(params);
     if (!ctx_) {
         throw std::runtime_error("Failed to initialize ggml_context");
     }
 
-    // 2. Instantiate ggml_tensors
+    // 2. Instantiate ggml_tensors (metadata only)
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
         const auto& t = pair.second;
@@ -135,20 +138,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             throw std::runtime_error("Failed to allocate ggml_tensor for: " + t.name);
         }
         ggml_set_name(g_t, t.name.c_str());
-
-        // If parameter/constant with initial data, copy bytes
-        if (t.data_ptr && t.data_size > 0) {
-            std::memcpy(g_t->data, t.data_ptr, std::min<size_t>(t.data_size, ggml_nbytes(g_t)));
-        } else if (t.storage == StorageClass::STATE) {
-            auto s_it = persistent_states_.find(tid);
-            if (s_it != persistent_states_.end() && s_it->second.size() == ggml_nbytes(g_t)) {
-                std::memcpy(g_t->data, s_it->second.data(), s_it->second.size());
-            } else {
-                persistent_states_[tid].assign(ggml_nbytes(g_t), 0);
-                std::memset(g_t->data, 0, ggml_nbytes(g_t));
-            }
-        }
-
         ggml_tensors_[tid] = g_t;
     }
 
@@ -251,13 +240,11 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_SQRT: {
-                result = ggml_sqrt(ctx_, in0);
                 if (op.attributes.count("is_rsqrt") && op.attributes.at("is_rsqrt")) {
-                    struct ggml_tensor* one = ggml_new_f32(ctx_, 1.0f);
-                    if (ggml_can_repeat(one, result)) {
-                        one = ggml_repeat(ctx_, one, result);
-                    }
-                    result = ggml_div(ctx_, one, result);
+                    struct ggml_tensor* sqrt_x = ggml_sqrt(ctx_, in0);
+                    result = ggml_div(ctx_, sqrt_x, in0);
+                } else {
+                    result = ggml_sqrt(ctx_, in0);
                 }
                 break;
             }
@@ -566,7 +553,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!in0 || !in1) {
                     throw std::runtime_error("GGML_OP_CUSTOM_BIAS_GELU requires 2 inputs");
                 }
-                result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_bias_gelu, GGML_N_TASKS_MAX, nullptr);
+                if (is_cuda_) {
+                    struct ggml_tensor* b = in1;
+                    if (ggml_can_repeat(b, in0)) {
+                        b = ggml_repeat(ctx_, b, in0);
+                    }
+                    result = ggml_gelu(ctx_, ggml_add(ctx_, in0, b));
+                } else {
+                    result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_bias_gelu, GGML_N_TASKS_MAX, nullptr);
+                }
                 break;
             }
             case 201: { // GGML_OP_CUSTOM_LAYER_NORM: in0=x, in1=weight, in2=bias (optional)
@@ -574,29 +569,51 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 struct ggml_tensor* b = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
                 float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
-                custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
-                struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
-                params->eps = eps;
-
-                result = ggml_map_custom3(ctx_, in0, w, b, ggmlc_compute_forward_layer_norm, GGML_N_TASKS_MAX, params);
+                if (is_cuda_) {
+                    result = ggml_norm(ctx_, in0, eps);
+                    if (w) {
+                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
+                        result = ggml_mul(ctx_, result, w);
+                    }
+                    if (b) {
+                        if (ggml_can_repeat(b, result)) b = ggml_repeat(ctx_, b, result);
+                        result = ggml_add(ctx_, result, b);
+                    }
+                } else {
+                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                    params->eps = eps;
+                    result = ggml_map_custom3(ctx_, in0, w, b, ggmlc_compute_forward_layer_norm, GGML_N_TASKS_MAX, params);
+                }
                 break;
             }
             case 202: { // GGML_OP_CUSTOM_RMS_NORM: in0=x, in1=weight
                 struct ggml_tensor* w = in1;
                 float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
-                custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
-                struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
-                params->eps = eps;
-
-                result = ggml_map_custom2(ctx_, in0, w, ggmlc_compute_forward_rms_norm, GGML_N_TASKS_MAX, params);
+                if (is_cuda_) {
+                    result = ggml_rms_norm(ctx_, in0, eps);
+                    if (w) {
+                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
+                        result = ggml_mul(ctx_, result, w);
+                    }
+                } else {
+                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                    params->eps = eps;
+                    result = ggml_map_custom2(ctx_, in0, w, ggmlc_compute_forward_rms_norm, GGML_N_TASKS_MAX, params);
+                }
                 break;
             }
             case 203: { // GGML_OP_CUSTOM_SWIGLU: in0=gate, in1=up
                 if (!in0 || !in1) {
                     throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires 2 inputs (gate, up)");
                 }
-                result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_swiglu, GGML_N_TASKS_MAX, nullptr);
+                if (is_cuda_) {
+                    result = ggml_mul(ctx_, ggml_silu(ctx_, in0), in1);
+                } else {
+                    result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_swiglu, GGML_N_TASKS_MAX, nullptr);
+                }
                 break;
             }
             default:
@@ -613,6 +630,37 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             fprintf(stderr, "[OP BUILD FAIL] op %d (opcode %d) out_id %u produced NULL result!\n", op.id, op.opcode, out_id);
         }
     }
+
+    // 4. Allocate tensor storage on the backend (CPU or CUDA)
+    buffer_ = ggml_backend_alloc_ctx_tensors(ctx_, backend_);
+    if (!buffer_) {
+        throw std::runtime_error("Failed to allocate tensors via GGML backend (" + device_ + ")");
+    }
+
+    // 5. Initialize parameters and constants on device buffer
+    for (const auto& pair : model_graph_.tensors) {
+        uint32_t tid = pair.first;
+        const auto& t = pair.second;
+        if ((t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) && t.data_ptr && t.data_size > 0) {
+            auto it = ggml_tensors_.find(tid);
+            if (it != ggml_tensors_.end()) {
+                size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(it->second));
+                ggml_backend_tensor_set(it->second, t.data_ptr, 0, sz);
+            }
+        } else if (t.storage == StorageClass::STATE) {
+            auto s_it = persistent_states_.find(tid);
+            auto it = ggml_tensors_.find(tid);
+            if (it != ggml_tensors_.end()) {
+                size_t sz = ggml_nbytes(it->second);
+                if (s_it != persistent_states_.end() && s_it->second.size() == sz) {
+                    ggml_backend_tensor_set(it->second, s_it->second.data(), 0, sz);
+                } else {
+                    persistent_states_[tid].assign(sz, 0);
+                    ggml_backend_tensor_memset(it->second, 0, 0, sz);
+                }
+            }
+        }
+    }
 }
 
 void ModelExecutor::set_input(uint32_t tensor_id, const void* data, size_t size_bytes) {
@@ -627,7 +675,7 @@ void ModelExecutor::set_input(uint32_t tensor_id, const void* data, size_t size_
                                  ": got " + std::to_string(size_bytes) +
                                  ", expected " + std::to_string(expected_size));
     }
-    std::memcpy(t->data, data, size_bytes);
+    ggml_backend_tensor_set(t, data, 0, size_bytes);
 }
 
 void ModelExecutor::set_input_by_name(const std::string& name, const void* data, size_t size_bytes) {
@@ -641,12 +689,18 @@ void ModelExecutor::set_input_by_name(const std::string& name, const void* data,
 }
 
 void ModelExecutor::run(int n_threads) {
-    if (!ctx_ || !cgraph_) {
+    if (!ctx_ || !cgraph_ || !backend_) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
-    ggml_graph_compute_with_ctx(ctx_, cgraph_, n_threads);
+    if (ggml_backend_is_cpu(backend_)) {
+        ggml_backend_cpu_set_n_threads(backend_, n_threads);
+    }
+    enum ggml_status status = ggml_backend_graph_compute(backend_, cgraph_);
+    if (status != GGML_STATUS_SUCCESS) {
+        throw std::runtime_error("GGML backend graph compute failed with status: " + std::to_string(status));
+    }
 
-    // Save persistent states
+    // Save persistent states from backend
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
         if (pair.second.storage == StorageClass::STATE) {
@@ -654,7 +708,7 @@ void ModelExecutor::run(int n_threads) {
             if (it != ggml_tensors_.end()) {
                 size_t sz = ggml_nbytes(it->second);
                 persistent_states_[tid].resize(sz);
-                std::memcpy(persistent_states_[tid].data(), it->second->data, sz);
+                ggml_backend_tensor_get(it->second, persistent_states_[tid].data(), 0, sz);
             }
         }
     }
@@ -665,7 +719,7 @@ void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_
     std::memcpy(persistent_states_[tensor_id].data(), data, size_bytes);
     auto it = ggml_tensors_.find(tensor_id);
     if (it != ggml_tensors_.end() && ggml_nbytes(it->second) == size_bytes) {
-        std::memcpy(it->second->data, data, size_bytes);
+        ggml_backend_tensor_set(it->second, data, 0, size_bytes);
     }
 }
 
@@ -679,19 +733,23 @@ void ModelExecutor::set_state_by_name(const std::string& name, const void* data,
     throw std::runtime_error("State tensor name not found in model: " + name);
 }
 
-const void* ModelExecutor::get_state_data(uint32_t tensor_id) const {
+const void* ModelExecutor::get_state_data(uint32_t tensor_id) {
     auto it = persistent_states_.find(tensor_id);
     if (it != persistent_states_.end() && !it->second.empty()) {
         return it->second.data();
     }
     auto t_it = ggml_tensors_.find(tensor_id);
     if (t_it != ggml_tensors_.end()) {
-        return t_it->second->data;
+        size_t sz = ggml_nbytes(t_it->second);
+        auto& host_buf = state_host_buffers_[tensor_id];
+        host_buf.resize(sz);
+        ggml_backend_tensor_get(t_it->second, host_buf.data(), 0, sz);
+        return host_buf.data();
     }
     throw std::runtime_error("State tensor ID not found in executor: " + std::to_string(tensor_id));
 }
 
-const void* ModelExecutor::get_state_data_by_name(const std::string& name) const {
+const void* ModelExecutor::get_state_data_by_name(const std::string& name) {
     for (const auto& pair : model_graph_.tensors) {
         if (pair.second.name == name) {
             return get_state_data(pair.first);
@@ -708,18 +766,22 @@ void ModelExecutor::reset_state() {
         if (pair.second.storage == StorageClass::STATE) {
             auto it = ggml_tensors_.find(pair.first);
             if (it != ggml_tensors_.end()) {
-                std::memset(it->second->data, 0, ggml_nbytes(it->second));
+                ggml_backend_tensor_memset(it->second, 0, 0, ggml_nbytes(it->second));
             }
         }
     }
 }
 
-const void* ModelExecutor::get_output_data(uint32_t tensor_id) const {
+const void* ModelExecutor::get_output_data(uint32_t tensor_id) {
     auto it = ggml_tensors_.find(tensor_id);
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    return it->second->data;
+    size_t sz = ggml_nbytes(it->second);
+    auto& host_buf = output_host_buffers_[tensor_id];
+    host_buf.resize(sz);
+    ggml_backend_tensor_get(it->second, host_buf.data(), 0, sz);
+    return host_buf.data();
 }
 
 std::array<int64_t, 4> ModelExecutor::get_tensor_shape(uint32_t tensor_id) const {

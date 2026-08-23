@@ -1,6 +1,7 @@
 .venv
 build
 build-win
+build-wsl
 _build
 .pytest_cache
 __pycache__
@@ -9,6 +10,7 @@ __pycache__
 *.gguf
 scratch/
 *.pyd
+*.so
 *.whl
 *.egg-info
 *.dist-info

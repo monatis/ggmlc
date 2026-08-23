@@ -63,9 +63,13 @@ NB_MODULE(_runtime, m) {
             return graph;
         }, "data"_a);
 
+    // Query available devices
+    m.def("get_available_devices", &ggmlc::ModelExecutor::get_available_devices, "Query available execution devices");
+
     // ModelExecutor
     nb::class_<ggmlc::ModelExecutor>(m, "ModelExecutor")
-        .def(nb::init<const ggmlc::SerializedModelGraph&>(), "graph"_a)
+        .def(nb::init<const ggmlc::SerializedModelGraph&, const std::string&>(), "graph"_a, "device"_a = "cpu")
+        .def_prop_ro("device", &ggmlc::ModelExecutor::device)
         .def("prepare", [](ggmlc::ModelExecutor& self,
                            const std::unordered_map<std::string, int64_t>& symbols,
                            bool enable_arena_reuse) {

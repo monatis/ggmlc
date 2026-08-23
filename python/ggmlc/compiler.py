@@ -115,21 +115,21 @@ def compile(
         ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
 
     # 5. Stream directly to file or serialize to memory
+    from ggmlc.runtime.runner import load
     from ggmlc.serialization.gguf import save_to_gguf, serialize_to_gguf
+
+    device = kwargs.get("device", "cpu")
+    n_threads = kwargs.get("n_threads", 1)
 
     if output is not None:
         out_path = save_to_gguf(ggml_graph, output)
         if return_runner:
-            from ggmlc.runtime.runner import load
-
-            return load(out_path)
+            return load(out_path, n_threads=n_threads, device=device)
         return out_path
 
     if return_runner:
         gguf_bytes = serialize_to_gguf(ggml_graph)
-        from ggmlc.runtime.runner import load
-
-        return load(gguf_bytes)
+        return load(gguf_bytes, n_threads=n_threads, device=device)
 
     return serialize_to_gguf(ggml_graph)
 

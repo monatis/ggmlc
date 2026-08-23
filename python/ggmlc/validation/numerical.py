@@ -41,8 +41,17 @@ def run_compiled_model_wsl(
 ) -> dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[str, np.ndarray]]:
     """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
     if executable_path is None:
-        # Default to build path
-        executable_path = "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run"
+        # Check build-wsl first, then build
+        for candidate in (
+            "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run",
+            "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run",
+        ):
+            win_p = Path(candidate.replace("/mnt/c/", "C:/").replace("/mnt/C/", "C:/"))
+            if win_p.exists():
+                executable_path = candidate
+                break
+        if executable_path is None:
+            executable_path = "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run"
 
     symbols = symbols or {}
     states_in = states_in or {}
@@ -108,12 +117,21 @@ def run_compiled_model_wsl(
             + thread_args
             + extra_flags
         )
-        cmd = [
-            "wsl",
-            "bash",
-            "-c",
-            f"{executable_path} {wsl_model} {' '.join(all_args)}",
-        ]
+        import platform
+
+        if platform.system() == "Windows":
+            cmd = [
+                "wsl",
+                "bash",
+                "-c",
+                f"{executable_path} {wsl_model} {' '.join(all_args)}",
+            ]
+        else:
+            cmd = [
+                "bash",
+                "-c",
+                f"{executable_path} {wsl_model} {' '.join(all_args)}",
+            ]
 
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:

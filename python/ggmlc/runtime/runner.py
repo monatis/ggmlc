@@ -31,14 +31,26 @@ GGML_TYPE_TO_NUMPY: dict[int, np.dtype] = {
 }
 
 
+def get_available_devices() -> list[str]:
+    """Returns a list of hardware execution devices supported by the runtime (e.g. ['cpu', 'cuda:0'])."""
+    if _RUNTIME_AVAILABLE and hasattr(_runtime, "get_available_devices"):
+        return list(_runtime.get_available_devices())
+    return ["cpu"]
+
+
 class ModelRunner:
     """Zero-dependency high-performance runner for compiled GGUF models.
 
     Wraps the native nanobind C++ execution engine for in-memory model evaluation
-    with zero-copy numpy buffers and multi-threaded CPU execution.
+    with zero-copy numpy buffers, device placement (CPU, CUDA), and multi-threading.
     """
 
-    def __init__(self, model_source: str | Path | bytes, n_threads: int = 1) -> None:
+    def __init__(
+        self,
+        model_source: str | Path | bytes,
+        n_threads: int = 1,
+        device: str = "cpu",
+    ) -> None:
         if not _RUNTIME_AVAILABLE:
             raise RuntimeError(
                 "Native ggmlc C++ runtime extension '_runtime' is not available. "
@@ -65,7 +77,8 @@ class ModelRunner:
         except (ValueError, KeyError, struct.error, OSError):
             self.py_graph = None
 
-        self.executor = _runtime.ModelExecutor(self.graph)
+        self.executor = _runtime.ModelExecutor(self.graph, device)
+        self.device = getattr(self.executor, "device", device)
         self.name = self.graph.name
         self.symbol_table = list(self.graph.symbol_table)
         self.inputs = list(self.graph.inputs)
@@ -197,6 +210,19 @@ class ModelRunner:
         self.executor.reset_state()
 
 
-def load(model_source: str | Path | bytes, n_threads: int = 1) -> ModelRunner:
-    """Loads a compiled GGUF model into a high-performance native runner."""
-    return ModelRunner(model_source, n_threads=n_threads)
+def load(
+    model_source: str | Path | bytes,
+    n_threads: int = 1,
+    device: str = "cpu",
+) -> ModelRunner:
+    """Loads a compiled GGUF model into a high-performance native runner.
+
+    Args:
+        model_source: Path to .gguf file or raw GGUF bytes.
+        n_threads: Number of CPU threads to use during execution.
+        device: Hardware device to execute on ("cpu", "cuda", "cuda:0", "auto").
+
+    Returns:
+        Instantiated ModelRunner instance.
+    """
+    return ModelRunner(model_source, n_threads=n_threads, device=device)
