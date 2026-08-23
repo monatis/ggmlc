@@ -222,12 +222,14 @@ def _import_equations(
                         rhs_in_id = rhs_flat_t.id
 
                 matmul_out_shape = tuple(lhs_batch_dims + [rhs_out])
+                matmul_attrs = dict(eqn.params)
+                matmul_attrs["transpose_in0"] = 1
                 if matmul_out_shape == tuple(out_aval.shape):
                     g.add_op(
                         opcode=OpCode.MATMUL,
                         inputs=[lhs_in_id, rhs_in_id],
                         outputs=[out_t.id],
-                        attributes=dict(eqn.params),
+                        attributes=matmul_attrs,
                         name=f"matmul_{out_var}",
                     )
                 else:
@@ -241,7 +243,7 @@ def _import_equations(
                         opcode=OpCode.MATMUL,
                         inputs=[lhs_in_id, rhs_in_id],
                         outputs=[matmul_t.id],
-                        attributes=dict(eqn.params),
+                        attributes=matmul_attrs,
                         name=f"matmul_{out_var}",
                     )
                     g.add_op(
@@ -252,6 +254,17 @@ def _import_equations(
                     )
                 continue
 
+            elif len(lhs_batch) == 0:
+                attrs = dict(eqn.params)
+                attrs["transpose_in0"] = 1
+                g.add_op(
+                    opcode=OpCode.MATMUL,
+                    inputs=in_tids,
+                    outputs=[out_t.id],
+                    attributes=attrs,
+                    name=f"matmul_{out_var}",
+                )
+                continue
             elif len(lhs_batch) > 0:
 
                 def _dim_val(d):
@@ -305,11 +318,13 @@ def _import_equations(
                     )
                     rhs_in_id = perm_rhs_t.id
 
+                bmm_attrs = dict(eqn.params)
+                bmm_attrs["transpose_in0"] = 0
                 g.add_op(
                     opcode=OpCode.MATMUL,
                     inputs=[lhs_in_id, rhs_in_id],
                     outputs=[out_t.id],
-                    attributes=dict(eqn.params),
+                    attributes=bmm_attrs,
                     name=f"bmm_{out_var}",
                 )
                 continue

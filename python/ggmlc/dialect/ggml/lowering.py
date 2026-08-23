@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -345,19 +346,12 @@ def _lower_op(
     elif opcode == OpCode.MATMUL:
         x_t = c_graph.get_tensor(in_ids[0])
         w_t = c_graph.get_tensor(in_ids[1])
-        # In GGML mul_mat(w, x): w is mapped_inputs[0], x is mapped_inputs[1]
-        # Check contracting dimension orientation
-        if len(w_t.shape.dims) >= 2 and len(x_t.shape.dims) >= 2:
+        if "transpose_in0" in op.attributes:
+            attrs["transpose_in0"] = int(op.attributes["transpose_in0"])
+        elif len(w_t.shape.dims) >= 2 and len(x_t.shape.dims) >= 2:
             contracting_dim = x_t.shape.dims[-1]
-            if w_t.shape.dims[-2] == contracting_dim:
+            if w_t.shape.dims[-1] != contracting_dim and w_t.shape.dims[-2] == contracting_dim:
                 attrs["transpose_in0"] = 1
-            elif "dimension_numbers" in op.attributes:
-                dim_nums = op.attributes.get("dimension_numbers")
-                if dim_nums and isinstance(dim_nums, (tuple, list)) and len(dim_nums) > 0:
-                    rhs_contracting = dim_nums[0][1] if len(dim_nums[0]) > 1 else [0]
-                    attrs["transpose_in0"] = 1 if 0 in rhs_contracting else 0
-                else:
-                    attrs["transpose_in0"] = 0
             else:
                 attrs["transpose_in0"] = 0
         else:
