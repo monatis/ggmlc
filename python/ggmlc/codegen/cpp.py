@@ -38,6 +38,12 @@ class GGMLCCppCodeGenerator:
             "#include <memory>",
             "#include <cmath>",
             '#include "ggml.h"',
+            '#include "ggml-alloc.h"',
+            '#include "ggml-backend.h"',
+            '#include "ggml-cpu.h"',
+            "#if defined(GGML_USE_CUDA)",
+            '#include "ggml-cuda.h"',
+            "#endif",
             '#include "gguf.h"',
             '#include "ggmlc/stdlib_kernels.h"',
             "",
@@ -76,7 +82,6 @@ class GGMLCCppCodeGenerator:
                 f"            this->{ident} = ggml_new_tensor_4d(ctx, static_cast<enum ggml_type>({int(t.ggml_type)}), {shape_str});"
             )
             lines.append(f'            ggml_set_name(this->{ident}, "{t.name}");')
-            lines.append("            // Raw data pointer is mapped from GGUF container")
             lines.append("        }")
 
         lines.extend(
@@ -205,7 +210,6 @@ class GGMLCCppCodeGenerator:
         elif node.opcode == GGMLOpCode.GGML_OP_REPEAT:
             lines.append(f"    tensors[{out_id}] = ggml_repeat(ctx, {inp_vars[0]}, {inp_vars[1]});")
         elif node.opcode == GGMLOpCode.GGML_OP_RESHAPE:
-            # Reshape dimensions
             out_t = self.graph.tensors[out_id]
             ne_strs = [str(d.value if isinstance(d, StaticDim) else 1) for d in out_t.ne]
             lines.append(
@@ -221,24 +225,61 @@ class GGMLCCppCodeGenerator:
         elif node.opcode == GGMLOpCode.GGML_OP_TRANSPOSE:
             lines.append(f"    tensors[{out_id}] = ggml_transpose(ctx, {inp_vars[0]});")
         elif node.opcode == GGMLOpCode.GGML_OP_CUSTOM_BIAS_GELU:
+            lines.append("    #if defined(GGML_USE_CUDA)")
+            lines.append(
+                f"    struct ggml_tensor* b_{node.id} = {inp_vars[1]}; if (ggml_can_repeat(b_{node.id}, {inp_vars[0]})) b_{node.id} = ggml_repeat(ctx, b_{node.id}, {inp_vars[0]});"
+            )
+            lines.append(
+                f"    tensors[{out_id}] = ggml_gelu(ctx, ggml_add(ctx, {inp_vars[0]}, b_{node.id}));"
+            )
+            lines.append("    #else")
             lines.append(
                 f"    tensors[{out_id}] = ggml_map_custom2(ctx, {inp_vars[0]}, {inp_vars[1]}, ggmlc_compute_forward_bias_gelu, GGML_N_TASKS_MAX, nullptr);"
             )
+            lines.append("    #endif")
         elif node.opcode == GGMLOpCode.GGML_OP_CUSTOM_LAYER_NORM:
             w_arg = inp_vars[1] if len(inp_vars) > 1 else "nullptr"
             b_arg = inp_vars[2] if len(inp_vars) > 2 else "nullptr"
+            eps = node.attributes.get("eps", 1e-5)
+            lines.append("    #if defined(GGML_USE_CUDA)")
+            lines.append(f"    tensors[{out_id}] = ggml_norm(ctx, {inp_vars[0]}, {eps}f);")
+            if w_arg != "nullptr":
+                lines.append(
+                    f"    if ({w_arg}) {{ struct ggml_tensor* w = {w_arg}; if (ggml_can_repeat(w, tensors[{out_id}])) w = ggml_repeat(ctx, w, tensors[{out_id}]); tensors[{out_id}] = ggml_mul(ctx, tensors[{out_id}], w); }}"
+                )
+            if b_arg != "nullptr":
+                lines.append(
+                    f"    if ({b_arg}) {{ struct ggml_tensor* b = {b_arg}; if (ggml_can_repeat(b, tensors[{out_id}])) b = ggml_repeat(ctx, b, tensors[{out_id}]); tensors[{out_id}] = ggml_add(ctx, tensors[{out_id}], b); }}"
+                )
+            lines.append("    #else")
             lines.append(
                 f"    tensors[{out_id}] = ggml_map_custom3(ctx, {inp_vars[0]}, {w_arg}, {b_arg}, ggmlc_compute_forward_layer_norm, GGML_N_TASKS_MAX, nullptr);"
             )
+            lines.append("    #endif")
         elif node.opcode == GGMLOpCode.GGML_OP_CUSTOM_RMS_NORM:
             w_arg = inp_vars[1] if len(inp_vars) > 1 else "nullptr"
+            eps = node.attributes.get("eps", 1e-5)
+            lines.append("    #if defined(GGML_USE_CUDA)")
+            lines.append(f"    tensors[{out_id}] = ggml_rms_norm(ctx, {inp_vars[0]}, {eps}f);")
+            if w_arg != "nullptr":
+                lines.append(
+                    f"    if ({w_arg}) {{ struct ggml_tensor* w = {w_arg}; if (ggml_can_repeat(w, tensors[{out_id}])) w = ggml_repeat(ctx, w, tensors[{out_id}]); tensors[{out_id}] = ggml_mul(ctx, tensors[{out_id}], w); }}"
+                )
+            lines.append("    #else")
             lines.append(
                 f"    tensors[{out_id}] = ggml_map_custom2(ctx, {inp_vars[0]}, {w_arg}, ggmlc_compute_forward_rms_norm, GGML_N_TASKS_MAX, nullptr);"
             )
+            lines.append("    #endif")
         elif node.opcode == GGMLOpCode.GGML_OP_CUSTOM_SWIGLU:
+            lines.append("    #if defined(GGML_USE_CUDA)")
+            lines.append(
+                f"    tensors[{out_id}] = ggml_mul(ctx, ggml_silu(ctx, {inp_vars[0]}), {inp_vars[1]});"
+            )
+            lines.append("    #else")
             lines.append(
                 f"    tensors[{out_id}] = ggml_map_custom2(ctx, {inp_vars[0]}, {inp_vars[1]}, ggmlc_compute_forward_swiglu, GGML_N_TASKS_MAX, nullptr);"
             )
+            lines.append("    #endif")
         else:
             lines.append(f"    // Generic fallback for opcode {node.opcode.name}")
             lines.append(f"    tensors[{out_id}] = {inp_vars[0]};")
@@ -248,8 +289,8 @@ class GGMLCCppCodeGenerator:
     def generate_main(self) -> str:
         """Generates ggmlc_main.cpp standalone execution entry point."""
         return f"""// ============================================================================
-// Standalone GGML Model Runner: {self.model_name}
-// Automatically generated by ggmlc.
+// Standalone GGML Backend Model Runner: {self.model_name}
+// Automatically generated by ggmlc. Supports CPU and CUDA GPU execution.
 // ============================================================================
 
 #include "{self.model_name}.h"
@@ -257,9 +298,11 @@ class GGMLCCppCodeGenerator:
 #include <vector>
 #include <chrono>
 #include <cstring>
+#include <string>
 
 int main(int argc, char** argv) {{
     std::string gguf_path = "model.gguf";
+    std::string device = "cpu";
     int n_threads = 4;
 
     for (int i = 1; i < argc; ++i) {{
@@ -267,54 +310,99 @@ int main(int argc, char** argv) {{
             gguf_path = argv[++i];
         }} else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {{
             n_threads = std::atoi(argv[++i]);
+        }} else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {{
+            device = argv[++i];
         }}
     }}
 
-    std::cout << "=== Running {self.model_name} with GGML ===" << std::endl;
-    std::cout << "GGUF Model: " << gguf_path << " | Threads: " << n_threads << std::endl;
+    std::cout << "=== Running {self.model_name} with GGML Backend ===" << std::endl;
+    std::cout << "GGUF Model: " << gguf_path << " | Device: " << device << " | Threads: " << n_threads << std::endl;
 
-    // 1. Initialize GGML & GGUF context
+    // 1. Initialize execution backend (CPU or CUDA)
+    ggml_backend_t backend = nullptr;
+#if defined(GGML_USE_CUDA)
+    if (device == "auto" || device.rfind("cuda", 0) == 0) {{
+        int dev_idx = 0;
+        if (device.size() > 5 && device[4] == ':') {{
+            dev_idx = std::stoi(device.substr(5));
+        }}
+        backend = ggml_backend_cuda_init(dev_idx);
+        if (backend) {{
+            std::cout << "Initialized GGML CUDA Backend on GPU " << dev_idx << std::endl;
+        }}
+    }}
+#endif
+    if (!backend) {{
+        backend = ggml_backend_cpu_init();
+        if (ggml_backend_is_cpu(backend)) {{
+            ggml_backend_cpu_set_n_threads(backend, n_threads);
+        }}
+        std::cout << "Initialized GGML CPU Backend (" << n_threads << " threads)" << std::endl;
+    }}
+
+    // 2. Initialize GGML context for graph structures (no_alloc = true)
     struct ggml_init_params params = {{
         /*.mem_size   =*/ 128 * 1024 * 1024,
         /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ false,
+        /*.no_alloc   =*/ true,
     }};
     struct ggml_context* ctx = ggml_init(params);
     if (!ctx) {{
         std::cerr << "Failed to allocate GGML context" << std::endl;
+        if (backend) ggml_backend_free(backend);
         return 1;
     }}
 
-    // 2. Instantiate and load weights
+    // 3. Instantiate weights and load from GGUF metadata
     {self.model_name}::Weights weights;
 
     struct gguf_init_params gguf_params = {{ true, nullptr }};
     struct gguf_context* gguf_ctx = gguf_init_from_file(gguf_path.c_str(), gguf_params);
     if (gguf_ctx) {{
         weights.load(ctx, gguf_ctx);
-        gguf_free(gguf_ctx);
     }}
 
-    // 3. Prepare inputs
+    // 4. Prepare input nodes
     std::unordered_map<std::string, struct ggml_tensor*> inputs;
     struct ggml_tensor* in_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 16);
-    std::vector<float> dummy_data(16, 1.0f);
-    std::memcpy(in_tensor->data, dummy_data.data(), 16 * sizeof(float));
+    ggml_set_name(in_tensor, "input");
     inputs["input"] = in_tensor;
 
-    // 4. Build graph
-    auto t0 = std::chrono::high_resolution_clock::now();
+    // 5. Build computation graph
     struct ggml_cgraph* gf = {self.model_name}::build_graph(ctx, weights, inputs);
 
-    // 5. Execute computation
-    ggml_graph_compute_with_ctx(ctx, gf, n_threads);
+    // 6. Allocate memory on the target backend
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buffer) {{
+        std::cerr << "Failed to allocate backend tensor memory" << std::endl;
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        if (gguf_ctx) gguf_free(gguf_ctx);
+        return 1;
+    }}
+
+    // 7. Initialize input data via zero-copy backend transfer
+    std::vector<float> dummy_data(16, 1.0f);
+    ggml_backend_tensor_set(in_tensor, dummy_data.data(), 0, 16 * sizeof(float));
+
+    // 8. Execute computation on target backend
+    auto t0 = std::chrono::high_resolution_clock::now();
+    enum ggml_status status = ggml_backend_graph_compute(backend, gf);
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    std::cout << "Execution completed in " << elapsed_ms << " ms" << std::endl;
+    if (status == GGML_STATUS_SUCCESS) {{
+        std::cout << "Execution completed successfully in " << elapsed_ms << " ms" << std::endl;
+    }} else {{
+        std::cerr << "Backend execution failed with status: " << status << std::endl;
+    }}
 
+    // Clean up
+    if (gguf_ctx) gguf_free(gguf_ctx);
+    ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
-    return 0;
+    ggml_backend_free(backend);
+    return (status == GGML_STATUS_SUCCESS) ? 0 : 1;
 }}
 """
 
@@ -326,8 +414,17 @@ project({self.model_name}_standalone LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find ggmlc runtime / ggml library
+option(ENABLE_CUDA "Enable GGML CUDA GPU backend" OFF)
+
 find_package(Threads REQUIRED)
+
+if (ENABLE_CUDA)
+    enable_language(CUDA)
+    add_compile_definitions(GGML_USE_CUDA)
+    set(GGML_BACKEND_LIBS ggml ggml-base ggml-cpu ggml-cuda Threads::Threads)
+else()
+    set(GGML_BACKEND_LIBS ggml_lib Threads::Threads)
+endif()
 
 add_executable({self.model_name}_run
     ggmlc_main.cpp
@@ -338,7 +435,7 @@ target_include_directories({self.model_name}_run PRIVATE
 )
 
 target_link_libraries({self.model_name}_run PRIVATE
-    Threads::Threads
+    ${{GGML_BACKEND_LIBS}}
 )
 """
 
