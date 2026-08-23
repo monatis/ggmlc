@@ -115,10 +115,12 @@ This generates:
 ---
 
 ### `ggmlc.visualize`
-Visualizes Canonical IR or GGML dialect graphs and exports them to interactive HTML or Mermaid markdown:
+Visualizes Canonical IR or GGML dialect graphs and exports them to PNG, SVG, interactive HTML, or Mermaid markdown:
 
 ```python
-html_path = ggmlc.visualize(graph, output_path="model.html", format="html")
+png_path = ggmlc.visualize(graph, output_path="model.png", format="png")   # Render directly to PNG
+svg_path = ggmlc.visualize(graph, output_path="model.svg", format="svg")   # Vector SVG
+html_path = ggmlc.visualize(graph, output_path="model.html", format="html") # Interactive browser HTML
 ```
 
 ---

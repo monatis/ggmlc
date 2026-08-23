@@ -135,6 +135,19 @@ Generates:
 - `ggmlc_main.cpp`: Standalone CLI executable driver for inference and benchmarking.
 - `CMakeLists.txt`: Build configuration ready for compilation with MSVC, GCC, or Clang.
 
+### 4. Graph & Pass Visualization (`ggmlc.visualize`)
+```python
+from ggmlc.frontend.pytorch import export_torch_model
+
+# Export Canonical IR or Lowered GGML Graph
+graph = export_torch_model(model, (example_x,)).main_graph
+
+# Render directly to PNG, SVG, or interactive HTML (with embedded pan/zoom)
+ggmlc.visualize(graph, output_path="resnet18.png")   # Pure-Python PNG rendering via mermaidx
+ggmlc.visualize(graph, output_path="resnet18.svg")   # Vector graphic
+ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan/zoom
+```
+
 ---
 
 ## 📊 Verified Pretrained Model Zoo
@@ -191,8 +204,10 @@ cmake --build build --target _runtime -j$(nproc)
 `ggmlc` includes built-in Mermaid diagram export for inspectable compiler graph visualization:
 
 ```python
-# Export interactive HTML with zoom/pan or Mermaid markdown
-graph_path = ggmlc.visualize(graph, output_path="model_graph.html")
+# Export pure-Python rendered PNG, SVG, or interactive HTML with zoom/pan
+ggmlc.visualize(graph, output_path="model_graph.png")  # Render to PNG image via mermaidx
+ggmlc.visualize(graph, output_path="model_graph.svg")  # Render to vector SVG
+ggmlc.visualize(graph, output_path="model_graph.html") # Interactive browser visualization
 ```
 
 ---

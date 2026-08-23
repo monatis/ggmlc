@@ -62,3 +62,21 @@ def test_visualize_html_export():
         out_mmd = g.visualize(output_path=str(mmd_file), format="mmd")
         assert out_mmd.exists()
         assert "graph TD" in out_mmd.read_text(encoding="utf-8")
+
+
+def test_visualize_png_and_svg_export():
+    g = Graph(name="TestImageExport")
+    t_in = g.add_tensor("x", Shape([2, 8]), DType.F32, StorageClass.INPUT)
+    t_out = g.add_tensor("out", Shape([2, 8]), DType.F32, StorageClass.OUTPUT)
+    g.add_node(OpCode.GELU, [t_in.id], [t_out.id])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        png_file = Path(tmpdir) / "model.png"
+        out_png = ggmlc.visualize(g, output_path=png_file, format="png")
+        assert out_png.exists()
+        assert out_png.stat().st_size > 0
+
+        svg_file = Path(tmpdir) / "model.svg"
+        out_svg = g.visualize(output_path=str(svg_file), format="svg")
+        assert out_svg.exists()
+        assert out_svg.stat().st_size > 0

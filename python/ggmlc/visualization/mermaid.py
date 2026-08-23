@@ -283,8 +283,29 @@ def visualize(
         p.write_text(html_content, encoding="utf-8")
         return p
 
-    if chosen_format in ("png", "svg"):
-        # Check if mmdc CLI is available
+    if chosen_format in ("png", "svg", "pdf"):
+        # 1. Try pure-Python mermaidx / mmdc engine (QuickJS + resvg, zero Node.js needed)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                import mermaidx as mmdc_pkg  # type: ignore
+            except ImportError:
+                try:
+                    import mmdc as mmdc_pkg  # type: ignore
+                except ImportError:
+                    mmdc_pkg = None
+
+        if mmdc_pkg is not None:
+            try:
+                diagram = mmdc_pkg.render(mmd_code)
+                diagram.save(str(p), format=chosen_format)
+                return p
+            except (RuntimeError, ValueError, OSError):
+                pass
+
+        # 2. Check if external mmdc CLI binary is available
         mmdc_bin = shutil.which("mmdc")
         if mmdc_bin:
             tmp_mmd = p.with_suffix(".mmd")
@@ -296,7 +317,8 @@ def visualize(
                 return p
             except (subprocess.SubprocessError, OSError):
                 pass
-        # Fallback to HTML if mmdc is not installed
+
+        # 3. Fallback to HTML if neither Python package nor CLI is available
         html_path = p.with_suffix(".html")
         return visualize(graph, output_path=html_path, format="html", title=title)
 
