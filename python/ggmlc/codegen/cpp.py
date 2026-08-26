@@ -185,25 +185,90 @@ class GGMLCCppCodeGenerator:
                 )
         elif node.opcode == GGMLOpCode.GGML_OP_UNARY:
             u_type = node.attributes.get("unary_op", "gelu")
-            if "gelu" in str(u_type).lower():
+            u_str = str(u_type).lower()
+            if "gelu" in u_str or u_type == 8:
                 lines.append(
                     f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_GELU);"
                 )
-            elif "silu" in str(u_type).lower():
+            elif "silu" in u_str or u_type == 10:
                 lines.append(
                     f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_SILU);"
                 )
-            elif "relu" in str(u_type).lower():
+            elif "relu" in u_str or u_type == 6:
                 lines.append(
                     f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_RELU);"
                 )
-            elif "tanh" in str(u_type).lower():
+            elif "sigmoid" in u_str or u_type == 7:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_SIGMOID);"
+                )
+            elif "hardswish" in u_str or u_type == 11:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_HARDSWISH);"
+                )
+            elif "hardsigmoid" in u_str or u_type == 12:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_HARDSIGMOID);"
+                )
+            elif "tanh" in u_str or u_type == 4:
                 lines.append(
                     f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_TANH);"
                 )
             else:
                 lines.append(
-                    f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_GELU);"
+                    f"    tensors[{out_id}] = ggml_unary(ctx, {inp_vars[0]}, GGML_UNARY_OP_RELU);"
+                )
+        elif node.opcode == GGMLOpCode.GGML_OP_CLAMP:
+            min_v = node.attributes.get("min", 0.0)
+            max_v = node.attributes.get("max", 6.0)
+            lines.append(
+                f"    tensors[{out_id}] = ggml_clamp(ctx, {inp_vars[0]}, {min_v}f, {max_v}f);"
+            )
+        elif node.opcode == GGMLOpCode.GGML_OP_CONV_2D:
+            s0 = node.attributes.get("stride_w", 1)
+            s1 = node.attributes.get("stride_h", 1)
+            p0 = node.attributes.get("pad_w", 0)
+            p1 = node.attributes.get("pad_h", 0)
+            d0 = node.attributes.get("dilation_w", 1)
+            d1 = node.attributes.get("dilation_h", 1)
+            lines.append(
+                f"    tensors[{out_id}] = ggml_conv_2d(ctx, {inp_vars[0]}, {inp_vars[1]}, {s0}, {s1}, {p0}, {p1}, {d0}, {d1});"
+            )
+            if len(inp_vars) > 2:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_add(ctx, tensors[{out_id}], {inp_vars[2]});"
+                )
+        elif node.opcode == GGMLOpCode.GGML_OP_CONV_2D_DW:
+            s0 = node.attributes.get("stride_w", 1)
+            s1 = node.attributes.get("stride_h", 1)
+            p0 = node.attributes.get("pad_w", 0)
+            p1 = node.attributes.get("pad_h", 0)
+            d0 = node.attributes.get("dilation_w", 1)
+            d1 = node.attributes.get("dilation_h", 1)
+            lines.append(
+                f"    tensors[{out_id}] = ggml_conv_2d_dw(ctx, {inp_vars[0]}, {inp_vars[1]}, {s0}, {s1}, {p0}, {p1}, {d0}, {d1});"
+            )
+            if len(inp_vars) > 2:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_add(ctx, tensors[{out_id}], {inp_vars[2]});"
+                )
+        elif node.opcode == GGMLOpCode.GGML_OP_POOL_2D:
+            is_max = node.attributes.get("is_max", 0) != 0
+            pool_enum = "GGML_OP_POOL_MAX" if is_max else "GGML_OP_POOL_AVG"
+            is_adapt = node.attributes.get("is_adaptive", 0) != 0
+            if is_adapt:
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_pool_2d(ctx, {inp_vars[0]}, {pool_enum}, {inp_vars[0]}->ne[0], {inp_vars[0]}->ne[1], {inp_vars[0]}->ne[0], {inp_vars[0]}->ne[1], 0.0f, 0.0f);"
+                )
+            else:
+                k0 = node.attributes.get("ksize_w", 2)
+                k1 = node.attributes.get("ksize_h", 2)
+                s0 = node.attributes.get("stride_w", k0)
+                s1 = node.attributes.get("stride_h", k1)
+                p0 = node.attributes.get("pad_w", 0)
+                p1 = node.attributes.get("pad_h", 0)
+                lines.append(
+                    f"    tensors[{out_id}] = ggml_pool_2d(ctx, {inp_vars[0]}, {pool_enum}, {k0}, {k1}, {s0}, {s1}, {p0}.0f, {p1}.0f);"
                 )
         elif node.opcode == GGMLOpCode.GGML_OP_SOFT_MAX:
             lines.append(f"    tensors[{out_id}] = ggml_soft_max(ctx, {inp_vars[0]});")

@@ -270,6 +270,42 @@ def _lower_op(
             {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SILU)},
             op.name,
         )
+    elif opcode == OpCode.SIGMOID:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SIGMOID)},
+            op.name,
+        )
+    elif opcode == OpCode.HARDSWISH:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_HARDSWISH)},
+            op.name,
+        )
+    elif opcode == OpCode.HARDSIGMOID:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_HARDSIGMOID)},
+            op.name,
+        )
+    elif opcode == OpCode.CLAMP:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_CLAMP,
+            in_ids,
+            out_ids,
+            attrs,
+            op.name,
+        )
     elif opcode == OpCode.TANH:
         return GGMLOpDef(
             op.id,
@@ -367,6 +403,24 @@ def _lower_op(
         mapped_inputs = [w_id, x_id]
         if len(in_ids) > 2:
             mapped_inputs.append(in_ids[2])
+        groups = attrs.get("groups", 1)
+        w_t = c_graph.get_tensor(w_id)
+        x_t = c_graph.get_tensor(x_id)
+        is_dw = groups > 1
+        if (
+            not is_dw
+            and len(w_t.shape.dims) == 4
+            and len(x_t.shape.dims) == 4
+            and w_t.shape.dims[1].is_static()
+            and x_t.shape.dims[1].is_static()
+            and w_t.shape.dims[1].evaluate({}) == 1
+            and x_t.shape.dims[1].evaluate({}) > 1
+        ):
+            is_dw = True
+        if is_dw:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CONV_2D_DW, mapped_inputs, out_ids, attrs, op.name
+            )
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONV_2D, mapped_inputs, out_ids, attrs, op.name)
     elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)

@@ -218,3 +218,46 @@ def load_bge_m3_distill_model(
             return out.last_hidden_state
 
     return BGEM3Wrapper(model), example_input, input_names
+
+
+def load_mobilenet_v3_model(
+    variant: str = "small",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision MobileNetV3 checkpoint (small or large)."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "large":
+        model = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT).eval()
+    else:
+        model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_ssdlite320_mobilenet_v3_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision SSDLite320-MobileNetV3 object detection backbone + head checkpoint."""
+    from torchvision import models
+
+    model = models.detection.ssdlite320_mobilenet_v3_large(
+        weights=models.detection.SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+    ).eval()
+    example_input = (torch.randn(1, 3, 320, 320, dtype=torch.float32),)
+    input_names = ["images"]
+
+    class SSDLitePredictor(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.backbone = base.backbone
+            self.head = base.head
+
+        def forward(self, images):
+            features = self.backbone(images)
+            feature_list = list(features.values())
+            head_outputs = self.head(feature_list)
+            return head_outputs["bbox_regression"], head_outputs["cls_logits"]
+
+    return SSDLitePredictor(model), example_input, input_names

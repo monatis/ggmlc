@@ -54,6 +54,7 @@ struct JsonValue {
 
     int64_t get_int(int64_t def = 0) const {
         if (type == JsonType::NUMBER) return static_cast<int64_t>(num_val);
+        if (type == JsonType::BOOL) return bool_val ? 1 : 0;
         return def;
     }
 

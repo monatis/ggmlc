@@ -310,14 +310,24 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int u = (it != op.attributes.end()) ? static_cast<int>(it->second) : 6; // default RELU
                 if (u == 6) { // RELU
                     result = ggml_relu(ctx_, act_in);
+                } else if (u == 7) { // SIGMOID
+                    result = ggml_sigmoid(ctx_, act_in);
                 } else if (u == 8) { // GELU
                     result = ggml_gelu(ctx_, act_in);
                 } else if (u == 10) { // SILU
                     result = ggml_silu(ctx_, act_in);
+                } else if (u == 11) { // HARDSWISH
+                    result = ggml_hardswish(ctx_, act_in);
+                } else if (u == 12) { // HARDSIGMOID
+                    result = ggml_hardsigmoid(ctx_, act_in);
                 } else if (u == 4) { // TANH
                     result = ggml_tanh(ctx_, act_in);
                 } else if (u == 2) { // NEG
                     result = ggml_neg(ctx_, act_in);
+                } else if (u == 0) { // ABS
+                    result = ggml_abs(ctx_, act_in);
+                } else if (u == 13) { // EXP
+                    result = ggml_exp(ctx_, act_in);
                 } else {
                     result = ggml_relu(ctx_, act_in);
                 }
@@ -518,12 +528,52 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 2) {
                     struct ggml_tensor* bias = ggml_tensors_[op.inputs[2]];
                     if (bias) {
+                        if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
+                        if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
+                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                        }
                         if (ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
                         }
                         result = ggml_add(ctx_, result, bias);
                     }
                 }
+                if (op.attributes.count("fused_relu") && op.attributes.at("fused_relu") != 0) {
+                    result = ggml_relu(ctx_, result);
+                }
+                break;
+            }
+            case GGML_OP_CONV_2D_DW: {
+                // in0: weight [KW, KH, 1, C], in1: x [W, H, C, N]
+                int s0 = op.attributes.count("stride_w") ? static_cast<int>(op.attributes.at("stride_w")) : 1;
+                int s1 = op.attributes.count("stride_h") ? static_cast<int>(op.attributes.at("stride_h")) : 1;
+                int p0 = op.attributes.count("pad_w") ? static_cast<int>(op.attributes.at("pad_w")) : 0;
+                int p1 = op.attributes.count("pad_h") ? static_cast<int>(op.attributes.at("pad_h")) : 0;
+                int d0 = op.attributes.count("dilation_w") ? static_cast<int>(op.attributes.at("dilation_w")) : 1;
+                int d1 = op.attributes.count("dilation_h") ? static_cast<int>(op.attributes.at("dilation_h")) : 1;
+                result = ggml_conv_2d_dw(ctx_, in0, in1, s0, s1, p0, p1, d0, d1);
+                if (op.inputs.size() > 2) {
+                    struct ggml_tensor* bias = ggml_tensors_[op.inputs[2]];
+                    if (bias) {
+                        if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
+                        if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
+                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                        }
+                        if (ggml_can_repeat(bias, result)) {
+                            bias = ggml_repeat(ctx_, bias, result);
+                        }
+                        result = ggml_add(ctx_, result, bias);
+                    }
+                }
+                if (op.attributes.count("fused_relu") && op.attributes.at("fused_relu") != 0) {
+                    result = ggml_relu(ctx_, result);
+                }
+                break;
+            }
+            case GGML_OP_CLAMP: {
+                float min_val = op.attributes.count("min") ? static_cast<float>(op.attributes.at("min")) : 0.0f;
+                float max_val = op.attributes.count("max") ? static_cast<float>(op.attributes.at("max")) : 6.0f;
+                result = ggml_clamp(ctx_, in0, min_val, max_val);
                 break;
             }
             case GGML_OP_POOL_2D: {

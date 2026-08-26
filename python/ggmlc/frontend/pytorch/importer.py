@@ -510,20 +510,59 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[1]].id)
             if "n_dims" in node.kwargs:
                 attributes["n_dims"] = int(node.kwargs["n_dims"])
-        elif opcode == OpCode.CAST:
+        elif opcode in (OpCode.HARDSWISH, OpCode.HARDSIGMOID):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            if len(node.args) > 1 and isinstance(node.args[1], Node):
-                input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+        elif opcode == OpCode.CLAMP:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            target_str = str(node.target)
+            if "relu6" in target_str:
+                attributes["min"] = 0.0
+                attributes["max"] = 6.0
+            elif "hardtanh" in target_str:
+                min_v = node.args[1] if len(node.args) > 1 and node.args[1] is not None else -1.0
+                max_v = node.args[2] if len(node.args) > 2 and node.args[2] is not None else 1.0
+                attributes["min"] = float(min_v)
+                attributes["max"] = float(max_v)
+            else:
+                min_v = node.kwargs.get("min", node.args[1] if len(node.args) > 1 else None)
+                max_v = node.kwargs.get("max", node.args[2] if len(node.args) > 2 else None)
+                if min_v is not None and isinstance(min_v, (int, float)):
+                    attributes["min"] = float(min_v)
+                if max_v is not None and isinstance(max_v, (int, float)):
+                    attributes["max"] = float(max_v)
         elif opcode == OpCode.CONV2D:
             # aten.convolution.default(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups)
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             input_tensor_ids.append(node_to_tensor[node.args[1]].id)
-            if len(node.args) > 2 and isinstance(node.args[2], Node):
+            if (
+                len(node.args) > 2
+                and isinstance(node.args[2], Node)
+                and node.args[2] in node_to_tensor
+            ):
                 input_tensor_ids.append(node_to_tensor[node.args[2]].id)
             stride = node.args[3] if len(node.args) > 3 and node.args[3] else [1, 1]
             padding = node.args[4] if len(node.args) > 4 and node.args[4] else [0, 0]
             dilation = node.args[5] if len(node.args) > 5 and node.args[5] else [1, 1]
-            groups = int(node.args[8]) if len(node.args) > 8 and node.args[8] else 1
+            groups = node.kwargs.get("groups")
+            if groups is None:
+                if len(node.args) >= 9:
+                    groups = node.args[8]
+                elif len(node.args) >= 7:
+                    groups = node.args[6]
+            if groups is None:
+                in_t = node_to_tensor[node.args[0]]
+                w_t = node_to_tensor[node.args[1]]
+                if (
+                    len(in_t.shape.dims) == 4
+                    and len(w_t.shape.dims) == 4
+                    and in_t.shape.dims[1].is_static()
+                    and w_t.shape.dims[1].is_static()
+                ):
+                    ic_val = in_t.shape.dims[1].evaluate({})
+                    w_ic_val = w_t.shape.dims[1].evaluate({})
+                    if ic_val > 1 and w_ic_val == 1:
+                        groups = int(ic_val)
+            groups = int(groups) if groups is not None else 1
             attributes["stride_h"] = (
                 int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
             )
