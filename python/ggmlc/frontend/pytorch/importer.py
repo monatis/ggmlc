@@ -421,7 +421,9 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode in (OpCode.RESHAPE, OpCode.VIEW):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             dims = []
-            if len(node.args) > 1:
+            if "unflatten" in target_str:
+                dims = list(shape.dims)
+            elif len(node.args) > 1:
                 shape_arg = node.args[1]
                 if isinstance(shape_arg, (list, tuple)):
                     for d in shape_arg:
@@ -431,6 +433,8 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                             dims.append(_symint_to_dim(d))
                 else:
                     dims.append(_symint_to_dim(shape_arg))
+            if not dims and shape:
+                dims = list(shape.dims)
             attributes["shape"] = tuple(dims)
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
@@ -453,9 +457,15 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 if len(node.args) > 2 and node.args[2] is not None:
                     input_tensor_ids.append(node_to_tensor[node.args[2]].id)
         elif opcode == OpCode.EMBEDDING:
-            # aten.embedding.default(weight, indices)
+            # aten.embedding.default(weight, indices) or aten.index.Tensor(weight, [indices])
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            indices_arg = node.args[1]
+            if isinstance(indices_arg, (list, tuple)):
+                for idx_node in indices_arg:
+                    if isinstance(idx_node, Node) and idx_node in node_to_tensor:
+                        input_tensor_ids.append(node_to_tensor[idx_node].id)
+            elif isinstance(indices_arg, Node) and indices_arg in node_to_tensor:
+                input_tensor_ids.append(node_to_tensor[indices_arg].id)
         elif opcode == OpCode.RMS_NORM:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             if len(node.args) > 2 and isinstance(node.args[2], Node):
@@ -562,31 +572,45 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                     w_ic_val = w_t.shape.dims[1].evaluate({})
                     if ic_val > 1 and w_ic_val == 1:
                         groups = int(ic_val)
-            groups = int(groups) if groups is not None else 1
-            attributes["stride_h"] = (
-                int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
-            )
-            attributes["stride_w"] = (
-                int(stride[1])
-                if isinstance(stride, (list, tuple)) and len(stride) > 1
-                else attributes["stride_h"]
-            )
-            attributes["pad_h"] = (
-                int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
-            )
-            attributes["pad_w"] = (
-                int(padding[1])
-                if isinstance(padding, (list, tuple)) and len(padding) > 1
-                else attributes["pad_h"]
-            )
-            attributes["dilation_h"] = (
-                int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
-            )
-            attributes["dilation_w"] = (
-                int(dilation[1])
-                if isinstance(dilation, (list, tuple)) and len(dilation) > 1
-                else attributes["dilation_h"]
-            )
+            if "conv1d" in target_str:
+                attributes["stride_w"] = (
+                    int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+                )
+                attributes["stride_h"] = 1
+                attributes["pad_w"] = (
+                    int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+                )
+                attributes["pad_h"] = 0
+                attributes["dilation_w"] = (
+                    int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
+                )
+                attributes["dilation_h"] = 1
+                attributes["is_1d"] = 1
+            else:
+                attributes["stride_h"] = (
+                    int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+                )
+                attributes["stride_w"] = (
+                    int(stride[1])
+                    if isinstance(stride, (list, tuple)) and len(stride) > 1
+                    else attributes["stride_h"]
+                )
+                attributes["pad_h"] = (
+                    int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+                )
+                attributes["pad_w"] = (
+                    int(padding[1])
+                    if isinstance(padding, (list, tuple)) and len(padding) > 1
+                    else attributes["pad_h"]
+                )
+                attributes["dilation_h"] = (
+                    int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
+                )
+                attributes["dilation_w"] = (
+                    int(dilation[1])
+                    if isinstance(dilation, (list, tuple)) and len(dilation) > 1
+                    else attributes["dilation_h"]
+                )
             attributes["groups"] = groups
         elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
@@ -678,7 +702,11 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.REPEAT:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             if len(node.args) > 1:
-                attributes["repeats"] = int(node.args[1])
+                rep_arg = node.args[1]
+                if isinstance(rep_arg, (list, tuple)):
+                    attributes["repeats"] = str([int(r) for r in rep_arg])
+                elif rep_arg is not None:
+                    attributes["repeats"] = str(int(rep_arg))
             if len(node.args) > 2 and node.args[2] is not None:
                 attributes["dim"] = int(node.args[2])
         elif opcode == OpCode.BATCH_NORM:

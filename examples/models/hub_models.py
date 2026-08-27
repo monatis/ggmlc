@@ -261,3 +261,59 @@ def load_ssdlite320_mobilenet_v3_model() -> tuple[nn.Module, tuple[torch.Tensor,
             return head_outputs["bbox_regression"], head_outputs["cls_logits"]
 
     return SSDLitePredictor(model), example_input, input_names
+
+
+def load_vit_model(
+    variant: str = "b_16",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision Vision Transformer (ViT-B/16 or ViT-L/16) checkpoint."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "l_16":
+        model = models.vit_l_16(weights=models.ViT_L_16_Weights.DEFAULT).eval()
+    else:
+        model = models.vit_b_16(weights=models.ViT_B_16_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_whisper_model(
+    component: str = "encoder",
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads OpenAI Whisper model (tiny variant) encoder or decoder."""
+    from transformers import WhisperConfig, WhisperForConditionalGeneration
+
+    config = WhisperConfig.from_pretrained("openai/whisper-tiny")
+    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny").eval()
+
+    if component == "encoder":
+        enc = model.model.encoder
+        example_input = (torch.randn(1, 80, 3000, dtype=torch.float32),)
+        input_names = ["input_features"]
+        return enc, example_input, input_names
+    elif component == "decoder":
+        dec = model.model.decoder
+
+        class WhisperDecoderPredictor(nn.Module):
+            def __init__(self, dec):
+                super().__init__()
+                self.dec = dec
+
+            def forward(self, input_ids, encoder_hidden_states):
+                h = self.dec.embed_tokens(input_ids) + self.dec.embed_positions(input_ids)
+                h = self.dec.layers[0](h, encoder_hidden_states=encoder_hidden_states)[0]
+                return self.dec.layer_norm(h)
+
+        example_input = (
+            torch.tensor([[50258, 50259, 50359]], dtype=torch.long),
+            torch.randn(1, 1500, 384, dtype=torch.float32),
+        )
+        input_names = ["input_ids", "encoder_hidden_states"]
+        return WhisperDecoderPredictor(dec), example_input, input_names
+    else:
+        raise ValueError(f"Unknown Whisper component: {component}")
+

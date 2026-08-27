@@ -111,6 +111,9 @@ class ModelRunner:
         Returns:
             Computed output numpy array (if single output) or dict of outputs.
         """
+        if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
+            kwargs = args[0]
+            args = ()
         threads = n_threads if n_threads is not None else self.n_threads
         symbol_env: dict[str, int] = {}
         if symbols:

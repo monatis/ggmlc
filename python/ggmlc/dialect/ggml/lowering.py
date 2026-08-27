@@ -34,13 +34,27 @@ def canonical_shape_to_ggml_ne(shape: Shape) -> tuple[Dim, Dim, Dim, Dim]:
     """Converts a Canonical N-D shape [d0, d1, ..., d_k] (row-major) to GGML 4D ne[0..3].
 
     GGML ne[0] is the innermost dimension (contiguous, stride 1), so we reverse the dimensions.
-    Unused dimensions are set to StaticDim(1).
+    For N > 4, outer dimensions are folded into ne[3]. Unused dimensions are set to StaticDim(1).
     """
     dims = list(shape.dims)
-    rev_dims = dims[::-1]
-    while len(rev_dims) < 4:
-        rev_dims.append(StaticDim(1))
-    return (rev_dims[0], rev_dims[1], rev_dims[2], rev_dims[3])
+    if len(dims) == 0:
+        return (StaticDim(1), StaticDim(1), StaticDim(1), StaticDim(1))
+    elif len(dims) == 1:
+        return (dims[0], StaticDim(1), StaticDim(1), StaticDim(1))
+    elif len(dims) == 2:
+        return (dims[1], dims[0], StaticDim(1), StaticDim(1))
+    elif len(dims) == 3:
+        return (dims[2], dims[1], dims[0], StaticDim(1))
+    elif len(dims) == 4:
+        return (dims[3], dims[2], dims[1], dims[0])
+    else:
+        outer_val = 1
+        for d in dims[:-3]:
+            if isinstance(d, StaticDim):
+                outer_val *= d.value
+            else:
+                outer_val *= int(d)
+        return (dims[-1], dims[-2], dims[-3], StaticDim(outer_val))
 
 
 @dataclass
@@ -403,7 +417,8 @@ def _lower_op(
         mapped_inputs = [w_id, x_id]
         if len(in_ids) > 2:
             mapped_inputs.append(in_ids[2])
-        groups = attrs.get("groups", 1)
+        groups = attrs.get("groups")
+        groups = int(groups) if groups is not None else 1
         w_t = c_graph.get_tensor(w_id)
         x_t = c_graph.get_tensor(x_id)
         is_dw = groups > 1
@@ -436,11 +451,19 @@ def _lower_op(
         if isinstance(p, tuple):
             p = list(p)
         axes = [0, 1, 2, 3]
-        for i in range(4):
-            if i < R:
-                axes[i] = R - 1 - p.index(R - 1 - i)
-            else:
-                axes[i] = i
+        if R == 5 and p[0] == 0:
+            # 5D tensor with batch=1: fold leading batch dimension into 4D permute
+            q = [x - 1 for x in p[1:]]
+            for i in range(4):
+                axes[i] = 3 - q.index(3 - i)
+        else:
+            for i in range(4):
+                if i < R:
+                    axes[i] = R - 1 - p.index(R - 1 - i)
+                else:
+                    axes[i] = i
+        if any(ax >= 4 for ax in axes):
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
         attrs["axis0"] = axes[0]
         attrs["axis1"] = axes[1]
         attrs["axis2"] = axes[2]
@@ -461,9 +484,11 @@ def _lower_op(
         axes = [0, 1, 2, 3]
         for i in range(4):
             if i < R:
-                axes[i] = R - 1 - p.index(R - 1 - i)
+                axes[i] = R - 1 - p[R - 1 - i]
             else:
                 axes[i] = i
+        if R > 4 or any(ax >= 4 for ax in axes):
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
         attrs["axis0"] = axes[0]
         attrs["axis1"] = axes[1]
         attrs["axis2"] = axes[2]

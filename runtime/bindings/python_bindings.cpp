@@ -75,16 +75,16 @@ NB_MODULE(_runtime, m) {
                            bool enable_arena_reuse) {
             self.prepare(symbols, enable_arena_reuse);
         }, "symbols"_a = std::unordered_map<std::string, int64_t>{}, "enable_arena_reuse"_a = true)
-        .def("set_input_by_id", [](ggmlc::ModelExecutor& self, uint32_t tensor_id, nb::ndarray<nb::ro, nb::c_contig> array) {
+        .def("set_input_by_id", [](ggmlc::ModelExecutor& self, uint32_t tensor_id, nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu> array) {
             self.set_input(tensor_id, array.data(), array.size() * array.itemsize());
         }, "tensor_id"_a, "array"_a)
-        .def("set_input_by_name", [](ggmlc::ModelExecutor& self, const std::string& name, nb::ndarray<nb::ro, nb::c_contig> array) {
+        .def("set_input_by_name", [](ggmlc::ModelExecutor& self, const std::string& name, nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu> array) {
             self.set_input_by_name(name, array.data(), array.size() * array.itemsize());
         }, "name"_a, "array"_a)
-        .def("set_state_by_id", [](ggmlc::ModelExecutor& self, uint32_t tensor_id, nb::ndarray<nb::ro, nb::c_contig> array) {
+        .def("set_state_by_id", [](ggmlc::ModelExecutor& self, uint32_t tensor_id, nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu> array) {
             self.set_state(tensor_id, array.data(), array.size() * array.itemsize());
         }, "tensor_id"_a, "array"_a)
-        .def("set_state_by_name", [](ggmlc::ModelExecutor& self, const std::string& name, nb::ndarray<nb::ro, nb::c_contig> array) {
+        .def("set_state_by_name", [](ggmlc::ModelExecutor& self, const std::string& name, nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu> array) {
             self.set_state_by_name(name, array.data(), array.size() * array.itemsize());
         }, "name"_a, "array"_a)
         .def("run", [](ggmlc::ModelExecutor& self, int n_threads) {
