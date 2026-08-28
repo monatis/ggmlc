@@ -285,9 +285,8 @@ def load_whisper_model(
     component: str = "encoder",
 ) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
     """Loads OpenAI Whisper model (tiny variant) encoder or decoder."""
-    from transformers import WhisperConfig, WhisperForConditionalGeneration
+    from transformers import WhisperForConditionalGeneration
 
-    config = WhisperConfig.from_pretrained("openai/whisper-tiny")
     model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny").eval()
 
     if component == "encoder":
@@ -317,3 +316,38 @@ def load_whisper_model(
     else:
         raise ValueError(f"Unknown Whisper component: {component}")
 
+
+def load_convnext_model(
+    variant: str = "tiny",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision ConvNeXt (tiny or small) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "small":
+        model = models.convnext_small(weights=models.ConvNeXt_Small_Weights.DEFAULT).eval()
+    else:
+        model = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_efficientnet_model(
+    variant: str = "b0",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision EfficientNet (b0 or v2_s) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "v2_s":
+        model = models.efficientnet_v2_s(weights=models.EfficientNet_V2_S_Weights.DEFAULT).eval()
+    else:
+        model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names

@@ -183,15 +183,19 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **Vision-CNN** | **ResNet-18 / 50** | PyTorch / TorchVision | Residual Blocks, Conv2D + BatchNorm, AdaptiveAvgPool2D | ✅ **PASS** | `3.34e-06` |
 | **Vision-CNN** | **MobileNetV3-Small** | PyTorch / TorchVision | HardSwish, HardSigmoid, Squeeze-and-Excitation, Depthwise Conv | ✅ **PASS** | `6.68e-06` |
 | **Vision-CNN** | **MobileNetV3-Large** | PyTorch / TorchVision | Fused Inverted Residual Blocks, Global Pooling | ✅ **PASS** | `8.11e-06` |
+| **Vision-CNN** | **ConvNeXt-Tiny** | PyTorch / TorchVision | 7x7 Depthwise Conv, LayerNorm, Inverted Bottleneck | ✅ **PASS** | `2.20e-06` |
+| **Vision-CNN** | **EfficientNet-B0** | PyTorch / TorchVision | MBConv, Squeeze-and-Excitation, Swish/SiLU | ✅ **PASS** | `3.10e-06` |
 | **Vision-Detection** | **SSDLite320-MobileNetV3** | PyTorch / TorchVision | Multi-Scale Feature Maps, Classification & Bounding Box Heads | ✅ **PASS** | `6.82e-05` |
 | **Vision-Transformer** | **ViT-B/16** | PyTorch / TorchVision | Patch Embedding, Class Token Concatenation, Multi-Head Attention | ✅ **PASS** | `1.83e-02` |
 | **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
 | **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
 | **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
-| **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `2.39e-04` |
+| **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
-| **JAX / Flax** | **Flax Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | ✅ **PASS** | `1.00e-07` |
+| **JAX / Flax** | **Flax ResNet** | JAX / Flax | `conv_general_dilated`, LayerNorm, Residual Connections | ✅ **PASS** | `2.38e-06` |
+| **JAX / Flax** | **Flax Vision Transformer** | JAX / Flax | Patch Projection, Multi-Head Self-Attention, MLP Head | ✅ **PASS** | `1.43e-06` |
+| **JAX / Flax** | **Flax Multi-Layer Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | ✅ **PASS** | `1.00e-07` |
 | **JAX / Flax** | **Flax MLP Classifier** | JAX / Flax | Dense, LayerNorm, Multi-Class Logits | ✅ **PASS** | `7.45e-08` |
 
 ---
@@ -204,17 +208,19 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 | Category | Architecture | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **46.83 ms** | **20.91 inf/s** | `3.34e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **42.07 ms** | **23.31 inf/s** | `6.68e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **63.97 ms** | **15.87 inf/s** | `8.11e-06` | ✅ PASS |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **117.65 ms** | **8.44 inf/s** | `6.82e-05` | ✅ PASS |
-| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **428.66 ms** | **2.28 inf/s** | `1.83e-02` | ✅ PASS |
-| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **41.93 ms** | **24.57 inf/s** | `2.33e-03` | ✅ PASS |
-| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **511.91 ms** | **1.99 inf/s** | `1.73e-01` | ✅ PASS |
-| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **233.05 ms** | **3.96 inf/s** | `7.63e-05` | ✅ PASS |
-| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | **823.16 ms** | **1.21 inf/s** | `2.39e-04` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **130.57 ms** | **7.60 inf/s** | `3.96e-02` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **45.88 ms** | **21.55 inf/s** | `5.45e-01` | ✅ PASS |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **53.02 ms** | **18.93 inf/s** | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **29.72 ms** | **33.88 inf/s** | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **61.70 ms** | **16.23 inf/s** | `8.11e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **188.66 ms** | **5.30 inf/s** | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **92.76 ms** | **10.74 inf/s** | `4.41e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **123.41 ms** | **8.12 inf/s** | `6.82e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **436.83 ms** | **2.28 inf/s** | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **42.11 ms** | **24.00 inf/s** | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **469.73 ms** | **2.08 inf/s** | `1.73e-01` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **233.72 ms** | **4.25 inf/s** | `7.63e-05` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | **846.09 ms** | **1.19 inf/s** | `2.39e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **135.42 ms** | **7.24 inf/s** | `3.96e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **47.79 ms** | **20.96 inf/s** | `5.45e-01` | ✅ PASS |
 
 To reproduce or benchmark custom models:
 ```powershell

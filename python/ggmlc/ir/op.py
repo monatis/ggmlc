@@ -66,6 +66,7 @@ class OpCode(Enum):
     SQUEEZE = "squeeze"
     UNSQUEEZE = "unsqueeze"
     ARANGE = "arange"
+    PAD = "pad"
 
     # Custom/Special
     SWIGLU = "swiglu"

@@ -99,6 +99,8 @@ ATEN_OP_MAP: dict[str, OpCode] = {
     "aten._native_batch_norm_legit_no_training.default": OpCode.BATCH_NORM,
     "aten.native_batch_norm.default": OpCode.BATCH_NORM,
     "aten.gather.default": OpCode.GATHER,
+    "aten.pad.default": OpCode.PAD,
+    "aten.pad": OpCode.PAD,
     "aten.type_as.default": OpCode.CAST,
     "aten._to_copy.default": OpCode.CAST,
     "aten.to.dtype": OpCode.CAST,

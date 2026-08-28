@@ -143,20 +143,30 @@ def _fuse_swiglu_patterns(graph: Graph) -> None:
                 up_id = in0_id
 
             if silu_op is not None and gate_id is not None and up_id is not None:
-                # If the intermediate silu output is only consumed by this mul, we can prune it
-                if consumer_counts.get(silu_op.outputs[0], 0) <= 1:
-                    ops_to_remove.add(silu_op.id)
+                gate_t = graph.get_tensor(gate_id)
+                up_t = graph.get_tensor(up_id)
+                # SwiGLU is only valid for identical shape MLP projections (not Squeeze-and-Excitation or broadcasted gates)
+                if (
+                    gate_t is not None
+                    and up_t is not None
+                    and gate_t.shape == up_t.shape
+                    and (prod0 is None or prod0.opcode != OpCode.SIGMOID)
+                    and (prod1 is None or prod1.opcode != OpCode.SIGMOID)
+                ):
+                    # If the intermediate silu output is only consumed by this mul, we can prune it
+                    if consumer_counts.get(silu_op.outputs[0], 0) <= 1:
+                        ops_to_remove.add(silu_op.id)
 
-                fused_op = Operation(
-                    id=op.id,
-                    opcode=OpCode.SWIGLU,
-                    inputs=[gate_id, up_id],
-                    outputs=list(op.outputs),
-                    attributes=dict(op.attributes),
-                    name=f"{op.name or 'swiglu'}_fused",
-                )
-                new_nodes.append(fused_op)
-                continue
+                    fused_op = Operation(
+                        id=op.id,
+                        opcode=OpCode.SWIGLU,
+                        inputs=[gate_id, up_id],
+                        outputs=list(op.outputs),
+                        attributes=dict(op.attributes),
+                        name=f"{op.name or 'swiglu'}_fused",
+                    )
+                    new_nodes.append(fused_op)
+                    continue
 
         new_nodes.append(op)
 

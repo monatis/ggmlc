@@ -156,6 +156,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         auto match_broadcast = [&](struct ggml_tensor* a, struct ggml_tensor* b) -> std::pair<struct ggml_tensor*, struct ggml_tensor*> {
             if (!a || !b) return {a, b};
             if (ggml_are_same_shape(a, b)) return {a, b};
+
+            // If a or b is a 1D channel vector matching the other's channel dim (GGML dim 2), reshape to [1, 1, C, 1]
+            if (a->ne[1] == 1 && a->ne[2] == 1 && a->ne[3] == 1 && a->ne[0] == b->ne[2]) {
+                a = ggml_reshape_4d(ctx_, a, 1, 1, a->ne[0], 1);
+            }
+            if (b->ne[1] == 1 && b->ne[2] == 1 && b->ne[3] == 1 && b->ne[0] == a->ne[2]) {
+                b = ggml_reshape_4d(ctx_, b, 1, 1, b->ne[0], 1);
+            }
+
             if (ggml_can_repeat(b, a)) return {a, b};
             if (ggml_can_repeat(a, b)) return {b, a};
 
@@ -170,12 +179,16 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             if (need_repeat_a) {
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
                 struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                a = ggml_repeat(ctx_, a, target_a);
+                if (ggml_can_repeat(a, target_a)) {
+                    a = ggml_repeat(ctx_, a, target_a);
+                }
             }
             if (need_repeat_b) {
                 if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
                 struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, b->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                b = ggml_repeat(ctx_, b, target_b);
+                if (ggml_can_repeat(b, target_b)) {
+                    b = ggml_repeat(ctx_, b, target_b);
+                }
             }
             return {a, b};
         };

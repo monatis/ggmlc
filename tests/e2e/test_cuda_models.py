@@ -61,4 +61,18 @@ def test_cuda_minilm():
 
 def test_cuda_gpt2():
     model, inputs, _ = load_gpt2_model()
-    _verify_model_cuda(model, inputs, "gpt2", atol=1e-2)
+    _verify_model_cuda(model, inputs, "gpt2", atol=1e-3)
+
+
+def test_cuda_convnext():
+    from examples.models.hub_models import load_convnext_model
+
+    model, inputs, _ = load_convnext_model("tiny")
+    _verify_model_cuda(model, inputs, "convnext_tiny", atol=2e-2)
+
+
+def test_cuda_efficientnet():
+    from examples.models.hub_models import load_efficientnet_model
+
+    model, inputs, _ = load_efficientnet_model("b0")
+    _verify_model_cuda(model, inputs, "efficientnet_b0", atol=1e-3)

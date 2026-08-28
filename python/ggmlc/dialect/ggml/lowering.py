@@ -457,6 +457,30 @@ def _lower_op(
         mapped_inputs = [w_id, x_id]
         if len(in_ids) > 2:
             mapped_inputs.append(in_ids[2])
+        if "stride" in attrs:
+            stride = attrs["stride"]
+            if isinstance(stride, (list, tuple)):
+                attrs["stride_h"] = int(stride[0])
+                attrs["stride_w"] = int(stride[1]) if len(stride) > 1 else int(stride[0])
+            else:
+                attrs["stride_h"] = int(stride)
+                attrs["stride_w"] = int(stride)
+        if "padding" in attrs:
+            padding = attrs["padding"]
+            if isinstance(padding, (list, tuple)):
+                attrs["pad_h"] = int(padding[0])
+                attrs["pad_w"] = int(padding[1]) if len(padding) > 1 else int(padding[0])
+            else:
+                attrs["pad_h"] = int(padding)
+                attrs["pad_w"] = int(padding)
+        if "dilation" in attrs:
+            dilation = attrs["dilation"]
+            if isinstance(dilation, (list, tuple)):
+                attrs["dilation_h"] = int(dilation[0])
+                attrs["dilation_w"] = int(dilation[1]) if len(dilation) > 1 else int(dilation[0])
+            else:
+                attrs["dilation_h"] = int(dilation)
+                attrs["dilation_w"] = int(dilation)
         groups = attrs.get("groups")
         groups = int(groups) if groups is not None else 1
         w_t = c_graph.get_tensor(w_id)
@@ -487,7 +511,7 @@ def _lower_op(
     elif opcode == OpCode.PERMUTE:
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
-        p = attrs.get("dims") or attrs.get("permutation") or list(range(R))
+        p = attrs.get("axes") or attrs.get("dims") or attrs.get("permutation") or list(range(R))
         if isinstance(p, tuple):
             p = list(p)
         axes = [0, 1, 2, 3]

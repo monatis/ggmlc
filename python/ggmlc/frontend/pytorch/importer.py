@@ -264,6 +264,100 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name_to_tensor[node.name] = node_to_tensor[parent]
                 continue
 
+        if "pad" in target_str:
+            parent = node.args[0]
+            pad_spec = node.args[1] if len(node.args) > 1 else []
+            if (
+                isinstance(parent, Node)
+                and parent in node_to_tensor
+                and isinstance(pad_spec, (list, tuple))
+                and all(p == 0 for p in pad_spec)
+            ):
+                node_to_tensor[node] = node_to_tensor[parent]
+                name_to_tensor[node.name] = node_to_tensor[parent]
+                continue
+
+        if "roll" in target_str:
+            curr_tensor = node_to_tensor[node.args[0]]
+            shifts = node.args[1]
+            dims = node.args[2] if len(node.args) > 2 else [0]
+            if not isinstance(shifts, (list, tuple)):
+                shifts = [shifts]
+            if not isinstance(dims, (list, tuple)):
+                dims = [dims]
+            for s, d in zip(shifts, dims):
+                s = int(s)
+                d = int(d)
+                curr_shape = list(curr_tensor.shape.dims)
+                dim_len = (
+                    int(curr_shape[d].value)
+                    if hasattr(curr_shape[d], "value")
+                    else int(curr_shape[d])
+                )
+                k = (-s) % dim_len
+                if k == 0:
+                    continue
+                # slice 1: [k:dim_len]
+                s1_shape = [
+                    d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                    for d_elem in curr_shape
+                ]
+                s1_shape[d] = dim_len - k
+                t1 = g.add_tensor(
+                    name=f"{node.name}_roll_s1",
+                    shape=Shape.from_tuple(tuple(s1_shape)),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.SLICE,
+                    inputs=[curr_tensor.id],
+                    outputs=[t1.id],
+                    attributes={"dim": d, "start": k, "end": dim_len, "step": 1},
+                )
+                # slice 2: [0:k]
+                s2_shape = [
+                    d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                    for d_elem in curr_shape
+                ]
+                s2_shape[d] = k
+                t2 = g.add_tensor(
+                    name=f"{node.name}_roll_s2",
+                    shape=Shape.from_tuple(tuple(s2_shape)),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.SLICE,
+                    inputs=[curr_tensor.id],
+                    outputs=[t2.id],
+                    attributes={"dim": d, "start": 0, "end": k, "step": 1},
+                )
+                # concat [t1, t2] along dim d
+                out_rolled = g.add_tensor(
+                    name=f"{node.name}_rolled",
+                    shape=Shape.from_tuple(
+                        tuple(
+                            [
+                                d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                                for d_elem in curr_shape
+                            ]
+                        )
+                    ),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.CONCAT,
+                    inputs=[t1.id, t2.id],
+                    outputs=[out_rolled.id],
+                    attributes={"dim": d},
+                )
+                curr_tensor = out_rolled
+            node_to_tensor[node] = curr_tensor
+            name_to_tensor[node.name] = curr_tensor
+            continue
+
         if any(
             target_str.endswith(f".{op}.{sfx}")
             for op in (

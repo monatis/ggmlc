@@ -70,3 +70,81 @@ class FlaxFullTransformer(nn.Module):
             )(x)
         x = nn.LayerNorm(name="final_ln")(x)
         return x
+
+
+class FlaxResNetBlock(nn.Module):
+    """Residual convolutional block with LayerNorm and ReLU."""
+
+    channels: int
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        residual = x
+        y = nn.Conv(
+            self.channels, kernel_size=(3, 3), strides=(1, 1), padding="SAME", name="conv1"
+        )(x)
+        y = nn.LayerNorm(name="norm1")(y)
+        y = nn.relu(y)
+        y = nn.Conv(
+            self.channels, kernel_size=(3, 3), strides=(1, 1), padding="SAME", name="conv2"
+        )(y)
+        y = nn.LayerNorm(name="norm2")(y)
+        return nn.relu(residual + y)
+
+
+class FlaxResNet(nn.Module):
+    """Flax Residual Convolutional Network for image classification."""
+
+    num_classes: int = 10
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        x = nn.Conv(32, kernel_size=(3, 3), strides=(1, 1), padding="SAME", name="init_conv")(x)
+        x = nn.relu(x)
+        x = FlaxResNetBlock(32, name="b1")(x)
+        x = FlaxResNetBlock(32, name="b2")(x)
+        B = x.shape[0]
+        x = jnp.reshape(x, (B, -1))
+        x = nn.Dense(self.num_classes, name="fc")(x)
+        return x
+
+
+class FlaxVisionTransformer(nn.Module):
+    """Vision Transformer in Flax with patch tokenization and Self-Attention."""
+
+    patch_size: int = 4
+    embed_dim: int = 64
+    num_heads: int = 4
+    mlp_dim: int = 128
+    num_classes: int = 10
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        B, H, W, C = x.shape
+        x = jnp.reshape(
+            x,
+            (B, H // self.patch_size, self.patch_size, W // self.patch_size, self.patch_size, C),
+        )
+        x = jnp.transpose(x, (0, 1, 3, 2, 4, 5))
+        x = jnp.reshape(
+            x,
+            (
+                B,
+                (H // self.patch_size) * (W // self.patch_size),
+                self.patch_size * self.patch_size * C,
+            ),
+        )
+        x = nn.Dense(self.embed_dim, name="patch_proj")(x)
+        norm1 = nn.LayerNorm(name="ln1")(x)
+        attn = nn.SelfAttention(num_heads=self.num_heads, qkv_features=self.embed_dim, name="attn")(
+            norm1
+        )
+        x = x + attn
+        norm2 = nn.LayerNorm(name="ln2")(x)
+        mlp = nn.Dense(self.mlp_dim, name="mlp1")(norm2)
+        mlp = nn.gelu(mlp)
+        mlp = nn.Dense(self.embed_dim, name="mlp2")(mlp)
+        x = x + mlp
+        x = jnp.mean(x, axis=1)
+        x = nn.Dense(self.num_classes, name="head")(x)
+        return x

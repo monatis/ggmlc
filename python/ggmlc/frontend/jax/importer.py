@@ -50,6 +50,7 @@ JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
     "erf": OpCode.GELU,
     "logistic": OpCode.SIGMOID,
     "sigmoid": OpCode.SIGMOID,
+    "conv_general_dilated": OpCode.CONV2D,
 }
 
 
@@ -378,6 +379,112 @@ def _import_equations(
                     name=f"reshape_{out_var}",
                 )
                 continue
+
+        if prim_name == "conv_general_dilated":
+            lhs_t = g.get_tensor(in_tids[0])
+            rhs_t = g.get_tensor(in_tids[1])
+            params_dict = eqn.params
+            window_strides = params_dict.get("window_strides", (1, 1))
+            padding = params_dict.get("padding", ((0, 0), (0, 0)))
+            rhs_dilation = params_dict.get("rhs_dilation", (1, 1))
+            feature_group_count = params_dict.get("feature_group_count", 1)
+
+            def _dim_val(d):
+                return d.value if isinstance(d, StaticDim) else int(d)
+
+            # 1. Permute LHS (input) from NHWC to NCHW: (0, 3, 1, 2)
+            lhs_dims = [_dim_val(d) for d in lhs_t.shape.dims]
+            if len(lhs_dims) == 4:
+                lhs_nchw_shape = (lhs_dims[0], lhs_dims[3], lhs_dims[1], lhs_dims[2])
+                lhs_nchw_t = g.add_tensor(
+                    name=f"nchw_lhs_{out_var}",
+                    shape=Shape.from_tuple(lhs_nchw_shape),
+                    dtype=lhs_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.PERMUTE,
+                    inputs=[lhs_t.id],
+                    outputs=[lhs_nchw_t.id],
+                    attributes={"axes": (0, 3, 1, 2)},
+                    name=f"perm_lhs_{out_var}",
+                )
+                lhs_conv_id = lhs_nchw_t.id
+            else:
+                lhs_conv_id = lhs_t.id
+
+            # 2. Permute RHS (weights) from HWIO to OIHW: (3, 2, 0, 1)
+            rhs_dims = [_dim_val(d) for d in rhs_t.shape.dims]
+            if len(rhs_dims) == 4:
+                rhs_oihw_shape = (rhs_dims[3], rhs_dims[2], rhs_dims[0], rhs_dims[1])
+                if rhs_t.data is not None:
+                    rhs_t.data = np.ascontiguousarray(np.transpose(rhs_t.data, (3, 2, 0, 1)))
+                    rhs_t.shape = Shape.from_tuple(rhs_oihw_shape)
+                    rhs_conv_id = rhs_t.id
+                else:
+                    rhs_oihw_t = g.add_tensor(
+                        name=f"oihw_rhs_{out_var}",
+                        shape=Shape.from_tuple(rhs_oihw_shape),
+                        dtype=rhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.PERMUTE,
+                        inputs=[rhs_t.id],
+                        outputs=[rhs_oihw_t.id],
+                        attributes={"axes": (3, 2, 0, 1)},
+                        name=f"perm_rhs_{out_var}",
+                    )
+                    rhs_conv_id = rhs_oihw_t.id
+            else:
+                rhs_conv_id = rhs_t.id
+
+            # 3. Intermediate NCHW Conv output
+            out_dims = [_dim_val(d) for d in out_t.shape.dims]
+            if len(out_dims) == 4:
+                out_nchw_shape = (out_dims[0], out_dims[3], out_dims[1], out_dims[2])
+                out_nchw_t = g.add_tensor(
+                    name=f"nchw_conv_{out_var}",
+                    shape=Shape.from_tuple(out_nchw_shape),
+                    dtype=out_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                conv_attrs = {
+                    "stride": tuple(window_strides),
+                    "padding": (padding[0][0], padding[1][0]),
+                    "dilation": tuple(rhs_dilation),
+                    "groups": int(feature_group_count),
+                }
+                g.add_op(
+                    opcode=OpCode.CONV2D,
+                    inputs=[lhs_conv_id, rhs_conv_id],
+                    outputs=[out_nchw_t.id],
+                    attributes=conv_attrs,
+                    name=f"conv_{out_var}",
+                )
+                # 4. Permute NCHW back to NHWC (0, 2, 3, 1) into out_t
+                g.add_op(
+                    opcode=OpCode.PERMUTE,
+                    inputs=[out_nchw_t.id],
+                    outputs=[out_t.id],
+                    attributes={"axes": (0, 2, 3, 1)},
+                    name=f"perm_out_{out_var}",
+                )
+            else:
+                conv_attrs = {
+                    "stride": tuple(window_strides),
+                    "padding": (padding[0][0], padding[1][0]),
+                    "dilation": tuple(rhs_dilation),
+                    "groups": int(feature_group_count),
+                }
+                g.add_op(
+                    opcode=OpCode.CONV2D,
+                    inputs=[lhs_conv_id, rhs_conv_id],
+                    outputs=[out_t.id],
+                    attributes=conv_attrs,
+                    name=f"conv_{out_var}",
+                )
+            continue
 
         g.add_op(
             opcode=opcode,

@@ -16,14 +16,12 @@ Outputs:
 from __future__ import annotations
 
 import argparse
-import gc
 import json
-import os
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
 
 # Ensure repository root is in sys.path
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -32,9 +30,16 @@ if str(_ROOT_DIR) not in sys.path:
 
 import numpy as np
 import torch
+from ggmlc.dialect.ggml.lowering import lower_to_ggml
+from ggmlc.frontend.pytorch import export_torch_model
+from ggmlc.runtime.runner import ModelRunner
+from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.validation.numerical import check_numerical_accuracy
 
 from examples.models.hub_models import (
     load_bge_m3_distill_model,
+    load_convnext_model,
+    load_efficientnet_model,
     load_gpt2_model,
     load_minilm_model,
     load_mobilenet_v3_model,
@@ -44,11 +49,6 @@ from examples.models.hub_models import (
     load_vit_model,
     load_whisper_model,
 )
-from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.runtime.runner import ModelRunner
-from ggmlc.serialization.graph import serialize_ggml_graph
-from ggmlc.validation.numerical import check_numerical_accuracy
 
 
 @dataclass
@@ -92,8 +92,7 @@ class BenchmarkSuite:
             torch.manual_seed(42)
             np.random.seed(42)
             # 1. Load model and inputs
-            t0 = time.perf_counter()
-            model, example_inputs, input_names = loader_fn()
+            model, example_inputs, _input_names = loader_fn()
             model.eval()
 
             # 2. Reference inference
@@ -160,13 +159,27 @@ class BenchmarkSuite:
             elif hasattr(ref_out, "logits") and ref_out.logits is not None:
                 ref_list = [ref_out.logits]
             elif isinstance(ref_out, (tuple, list)):
-                ref_list = [x for x in ref_out if x is not None and (hasattr(x, "shape") or isinstance(x, np.ndarray))]
+                ref_list = [
+                    x
+                    for x in ref_out
+                    if x is not None and (hasattr(x, "shape") or isinstance(x, np.ndarray))
+                ]
             else:
                 ref_list = [ref_out]
 
-            tol = 0.6 if name in ("whisper_tiny_decoder",) else 0.2 if name in ("bge_m3", "whisper_tiny_encoder") else 5e-2
+            tol = (
+                0.6
+                if name in ("whisper_tiny_decoder",)
+                else 0.2
+                if name in ("bge_m3", "whisper_tiny_encoder")
+                else 5e-2
+            )
             for r_elem in ref_list:
-                r_arr = r_elem.detach().cpu().numpy() if hasattr(r_elem, "detach") else np.asarray(r_elem)
+                r_arr = (
+                    r_elem.detach().cpu().numpy()
+                    if hasattr(r_elem, "detach")
+                    else np.asarray(r_elem)
+                )
                 # Find matching output by element count
                 matched_act = None
                 for a_elem in act_list:
@@ -208,7 +221,7 @@ class BenchmarkSuite:
             self.records.append(record)
             return record
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"  -> ERROR: {e}")
             record = BenchmarkRecord(
                 model_name=name,
@@ -239,24 +252,29 @@ class BenchmarkSuite:
             ("resnet18", "Vision-CNN", lambda: load_resnet_model(variant="18")),
             ("mobilenet_v3_small", "Vision-CNN", lambda: load_mobilenet_v3_model(variant="small")),
             ("mobilenet_v3_large", "Vision-CNN", lambda: load_mobilenet_v3_model(variant="large")),
-
+            ("convnext_tiny", "Vision-CNN", lambda: load_convnext_model(variant="tiny")),
+            ("efficientnet_b0", "Vision-CNN", lambda: load_efficientnet_model(variant="b0")),
             # 2. Vision - Object Detection
             ("ssdlite320_mobilenet_v3", "Vision-Detection", load_ssdlite320_mobilenet_v3_model),
-
             # 3. Vision - Transformer
             ("vit_b_16", "Vision-Transformer", lambda: load_vit_model(variant="b_16")),
-
             # 4. Text - Embeddings
             ("minilm_l6", "Text-Embedding", load_minilm_model),
             ("bge_m3", "Text-Embedding", load_bge_m3_distill_model),
-
             # 5. Text - SLM / Decoder
             ("gpt2", "Text-SLM", lambda: load_gpt2_model(seq_len=8)),
             ("qwen2.5_0.5b", "Text-SLM", lambda: load_qwen_model(seq_len=8)),
-
             # 6. Audio - Seq2Seq & Cross-Attention
-            ("whisper_tiny_encoder", "Audio-Seq2Seq", lambda: load_whisper_model(component="encoder")),
-            ("whisper_tiny_decoder", "Audio-Seq2Seq", lambda: load_whisper_model(component="decoder")),
+            (
+                "whisper_tiny_encoder",
+                "Audio-Seq2Seq",
+                lambda: load_whisper_model(component="encoder"),
+            ),
+            (
+                "whisper_tiny_decoder",
+                "Audio-Seq2Seq",
+                lambda: load_whisper_model(component="decoder"),
+            ),
         ]
 
         for name, category, loader in all_models:
@@ -302,12 +320,22 @@ class BenchmarkSuite:
 
 def main():
     parser = argparse.ArgumentParser(description="GGMLC Benchmark Suite")
-    parser.add_argument("--backend", type=str, default="cpu", choices=["cpu", "cuda"], help="Execution device backend")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Execution device backend",
+    )
     parser.add_argument("--models", nargs="*", default=None, help="Subset of models to benchmark")
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup runs")
     parser.add_argument("--runs", type=int, default=5, help="Number of benchmark iterations")
-    parser.add_argument("--output-md", type=str, default="benchmark_report.md", help="Markdown output path")
-    parser.add_argument("--output-json", type=str, default="benchmark_report.json", help="JSON output path")
+    parser.add_argument(
+        "--output-md", type=str, default="benchmark_report.md", help="Markdown output path"
+    )
+    parser.add_argument(
+        "--output-json", type=str, default="benchmark_report.json", help="JSON output path"
+    )
     args = parser.parse_args()
 
     suite = BenchmarkSuite(backend=args.backend, warmup=args.warmup, runs=args.runs)

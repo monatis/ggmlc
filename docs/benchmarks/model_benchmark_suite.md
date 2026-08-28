@@ -12,17 +12,19 @@ Benchmarks were evaluated on an **NVIDIA GeForce GTX 1050/1080 (Pascal Architect
 
 | Category | Model Architecture | Nodes | Payload Size | CPU Latency (P50) | CUDA Latency (P50) | CUDA Speedup | Differential Max Diff | Status |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | 2329.84 ms | **46.83 ms** | **49.75x** | `3.34e-06` | ✅ **PASS** |
-| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | 159.53 ms | **42.07 ms** | **3.79x** | `6.68e-06` | ✅ **PASS** |
-| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | 478.58 ms | **63.97 ms** | **7.48x** | `8.11e-06` | ✅ **PASS** |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | 1203.11 ms | **117.65 ms** | **10.23x** | `6.82e-05` | ✅ **PASS** |
-| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | 21013.15 ms | **428.66 ms** | **49.02x** | `1.83e-02` | ✅ **PASS** |
-| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | 230.15 ms | **41.93 ms** | **5.49x** | `2.33e-03` | ✅ **PASS** |
-| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | 2399.81 ms | **511.91 ms** | **4.69x** | `1.73e-01` | ✅ **PASS** |
-| **Text-SLM** | `gpt2` | 462 | 622.13 MB | 1368.55 ms | **233.05 ms** | **5.87x** | `7.63e-05` | ✅ **PASS** |
-| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | 31288.15 ms | **823.16 ms** | **38.01x** | `2.39e-04` | ✅ **PASS** |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | 22251.48 ms | **130.57 ms** | **170.42x** | `3.96e-02` | ✅ **PASS** |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | 582.22 ms | **45.88 ms** | **12.69x** | `5.45e-01` | ✅ **PASS** |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | 291.37 ms | **53.02 ms** | **5.49x** | `3.34e-06` | ✅ **PASS** |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | 116.78 ms | **29.72 ms** | **3.93x** | `6.68e-06` | ✅ **PASS** |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | 328.13 ms | **61.70 ms** | **5.32x** | `8.11e-06` | ✅ **PASS** |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | 1142.41 ms | **188.66 ms** | **6.06x** | `1.12e-02` | ✅ **PASS** |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | 493.61 ms | **92.76 ms** | **5.32x** | `3.10e-06` | ✅ **PASS** |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | 705.59 ms | **123.41 ms** | **5.72x** | `6.82e-05` | ✅ **PASS** |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | 2152.96 ms | **436.83 ms** | **4.93x** | `1.83e-02` | ✅ **PASS** |
+| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | 52.02 ms | **42.11 ms** | **1.24x** | `2.33e-03` | ✅ **PASS** |
+| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | 702.27 ms | **469.73 ms** | **1.50x** | `1.73e-01` | ✅ **PASS** |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | 301.35 ms | **233.72 ms** | **1.29x** | `7.63e-05` | ✅ **PASS** |
+| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | 2262.94 ms | **846.09 ms** | **2.67x** | `1.08e-04` | ✅ **PASS** |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | 2852.14 ms | **135.42 ms** | **21.06x** | `3.96e-02` | ✅ **PASS** |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | 80.52 ms | **47.79 ms** | **1.68x** | `5.45e-01` | ✅ **PASS** |
 
 ---
 
