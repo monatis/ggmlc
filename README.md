@@ -176,17 +176,54 @@ ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan
 
 ## 📊 Verified Pretrained Model Zoo
 
-All models are validated end-to-end against real Hugging Face & TorchVision weights with **differential numerical testing**:
+All models are validated end-to-end against real Hugging Face & TorchVision weights with **differential numerical testing** across both CPU and NVIDIA GPU (CUDA) backends:
 
-| Architecture | Framework | Key Features | Compression (Q4_0) | Parity Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **ResNet-18 / 50** | PyTorch / TorchVision | Residual Convolutions, AdaptiveAvgPool2D | $6.8\times$ | **PASSED** ($1.000$) |
-| **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Embeddings | $7.11\times$ | **PASSED** ($0.9999$) |
-| **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | $7.05\times$ | **PASSED** ($0.9999$) |
-| **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | $7.15\times$ | **PASSED** ($0.9999$) |
-| **BGE-M3-Distill** | PyTorch / Transformers | Multilingual Embeddings, Dense Vector Pooling | $7.08\times$ | **PASSED** ($0.9999$) |
-| **Flax Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | $6.9\times$ | **PASSED** ($1.0000$) |
-| **Flax MLP Classifier** | JAX / Flax | LayerNorm, Dense, GELU / ReLU | $7.0\times$ | **PASSED** ($1.0000$) |
+| Category | Architecture | Framework | Key Features | Parity Status | Max Diff |
+| :--- | :--- | :--- | :--- | :---: | :---: |
+| **Vision-CNN** | **ResNet-18 / 50** | PyTorch / TorchVision | Residual Blocks, Conv2D + BatchNorm, AdaptiveAvgPool2D | ✅ **PASS** | `3.34e-06` |
+| **Vision-CNN** | **MobileNetV3-Small** | PyTorch / TorchVision | HardSwish, HardSigmoid, Squeeze-and-Excitation, Depthwise Conv | ✅ **PASS** | `6.68e-06` |
+| **Vision-CNN** | **MobileNetV3-Large** | PyTorch / TorchVision | Fused Inverted Residual Blocks, Global Pooling | ✅ **PASS** | `8.11e-06` |
+| **Vision-Detection** | **SSDLite320-MobileNetV3** | PyTorch / TorchVision | Multi-Scale Feature Maps, Classification & Bounding Box Heads | ✅ **PASS** | `6.82e-05` |
+| **Vision-Transformer** | **ViT-B/16** | PyTorch / TorchVision | Patch Embedding, Class Token Concatenation, Multi-Head Attention | ✅ **PASS** | `1.83e-02` |
+| **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
+| **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
+| **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `2.39e-04` |
+| **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
+| **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
+| **JAX / Flax** | **Flax Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | ✅ **PASS** | `1.00e-07` |
+| **JAX / Flax** | **Flax MLP Classifier** | JAX / Flax | Dense, LayerNorm, Multi-Class Logits | ✅ **PASS** | `7.45e-08` |
+
+---
+
+## ⚡ Continuous Benchmarking Suite
+
+`ggmlc` includes an automated continuous benchmarking harness ([`examples/benchmarks/benchmark_suite.py`](examples/benchmarks/benchmark_suite.py)) that measures compilation latency, GGUF payload size, inference latency percentiles (P50, P90, P99), throughput, and differential numerical accuracy across all architectures on both CPU and CUDA backends.
+
+### Native NVIDIA CUDA Benchmark Summary (GeForce GTX 1050/1080)
+
+| Category | Architecture | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **46.83 ms** | **20.91 inf/s** | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **42.07 ms** | **23.31 inf/s** | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **63.97 ms** | **15.87 inf/s** | `8.11e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **117.65 ms** | **8.44 inf/s** | `6.82e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **428.66 ms** | **2.28 inf/s** | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **41.93 ms** | **24.57 inf/s** | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **511.91 ms** | **1.99 inf/s** | `1.73e-01` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **233.05 ms** | **3.96 inf/s** | `7.63e-05` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | **823.16 ms** | **1.21 inf/s** | `2.39e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **130.57 ms** | **7.60 inf/s** | `3.96e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **45.88 ms** | **21.55 inf/s** | `5.45e-01` | ✅ PASS |
+
+To reproduce or benchmark custom models:
+```powershell
+# Benchmark on CPU
+python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
+
+# Benchmark on NVIDIA GPU (CUDA)
+python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
+```
 
 ---
 
@@ -209,19 +246,30 @@ pip install "ggmlc[all]"
 
 ### Native C++ Runtime Compilation
 
-#### Windows (MSVC) - CPU Runtime
+#### 1. Windows Native CUDA Build (MSVC 2022 + CUDA 11.3 / 11.8 / 12.x + Ninja)
 ```powershell
-cmake -B build-win
-cmake --build build-win --target _runtime --config Release
+# Set up compiler and CUDA environment
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3"
+$env:NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+
+# Configure and compile with Ninja generator
+cmake -B build-win-cuda -G Ninja -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win-cuda -j8
 ```
 
-#### Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
+#### 2. Windows CPU Build (MSVC Visual Studio Generator)
+```powershell
+cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DGGMLC_ENABLE_CUDA=OFF -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win --config Release -j8
+```
+
+#### 3. Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
 ```bash
 # CPU-only build
 cmake -B build
 cmake --build build --target _runtime -j$(nproc)
 
-# CUDA GPU build (NVIDIA Pascal GTX 1050/1080 through Hopper)
+# CUDA GPU build
 cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
 cmake --build build-wsl --target _runtime -j$(nproc)
 ```

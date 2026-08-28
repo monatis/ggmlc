@@ -55,6 +55,7 @@ reference/operator_reference
 :maxdepth: 2
 :caption: Benchmarks & Analysis
 
+benchmarks/model_benchmark_suite
 benchmarks/operator_fusion_speedup_analysis
 benchmarks/sequence_length_scaling_analysis
 ```
