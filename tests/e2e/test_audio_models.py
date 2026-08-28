@@ -2,13 +2,12 @@
 
 import pytest
 import torch
-from transformers import WhisperConfig, WhisperForConditionalGeneration
-
-from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.runner import ModelRunner
+from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
+from transformers import WhisperConfig, WhisperForConditionalGeneration
 
 
 @pytest.fixture(scope="module")

@@ -20,9 +20,9 @@ def dtype_to_ggml_type(dtype: DType) -> GGMLType:
         DType.F16: GGMLType.GGML_TYPE_F16,
         DType.BF16: GGMLType.GGML_TYPE_BF16,
         DType.I32: GGMLType.GGML_TYPE_I32,
-        DType.I64: GGMLType.GGML_TYPE_I64,
-        DType.I8: GGMLType.GGML_TYPE_I8,
-        DType.BOOL: GGMLType.GGML_TYPE_I8,
+        DType.I64: GGMLType.GGML_TYPE_I32,
+        DType.I8: GGMLType.GGML_TYPE_F32,
+        DType.BOOL: GGMLType.GGML_TYPE_F32,
         DType.Q4_0: GGMLType.GGML_TYPE_Q4_0,
         DType.Q4_K: GGMLType.GGML_TYPE_Q4_K,
         DType.Q8_0: GGMLType.GGML_TYPE_Q8_0,
@@ -120,6 +120,30 @@ def lower_to_ggml(
     if enable_fusion:
         fuse_operations(canonical_graph, fusion_options)
 
+    # 1.0 Ensure integer indices for EMBEDDING are I32
+    for op in canonical_graph.nodes:
+        if op.opcode == OpCode.EMBEDDING and len(op.inputs) > 1:
+            idx_id = op.inputs[1]
+            idx_t = canonical_graph.get_tensor(idx_id)
+            if idx_t and idx_t.dtype in (DType.I32, DType.I64):
+                idx_t.dtype = DType.I32
+                if idx_t.data is not None:
+                    idx_t.data = np.ascontiguousarray(idx_t.data.astype(np.int32))
+
+        # Promote mixed int/float operands in binary arithmetic to F32
+        if op.opcode in (OpCode.ADD, OpCode.SUB, OpCode.MUL, OpCode.DIV) and len(op.inputs) >= 2:
+            t0 = canonical_graph.get_tensor(op.inputs[0])
+            t1 = canonical_graph.get_tensor(op.inputs[1])
+            if t0 and t1:
+                if t0.dtype == DType.F32 and t1.dtype in (DType.I32, DType.I64, DType.BOOL):
+                    t1.dtype = DType.F32
+                    if t1.data is not None:
+                        t1.data = np.ascontiguousarray(t1.data.astype(np.float32))
+                elif t1.dtype == DType.F32 and t0.dtype in (DType.I32, DType.I64, DType.BOOL):
+                    t0.dtype = DType.F32
+                    if t0.data is not None:
+                        t0.data = np.ascontiguousarray(t0.data.astype(np.float32))
+
     ggml_graph = GGMLExecutionGraph(
         name=canonical_graph.name,
         inputs=list(canonical_graph.inputs),
@@ -134,14 +158,30 @@ def lower_to_ggml(
         for d in ne:
             symbols |= d.free_symbols()
 
+        t_data = t.data
+        if t_data is not None and not isinstance(t_data, np.ndarray):
+            t_data = np.asarray(t_data)
+        t_type = dtype_to_ggml_type(t.dtype)
+        if t_data is not None:
+            if t_type == GGMLType.GGML_TYPE_I32 and t_data.dtype == np.int64:
+                t_data = np.ascontiguousarray(t_data.astype(np.int32))
+            elif t_type == GGMLType.GGML_TYPE_F32 and t_data.dtype in (
+                np.bool_,
+                np.int8,
+                np.uint8,
+                np.int32,
+                np.int64,
+            ):
+                t_data = np.ascontiguousarray(t_data.astype(np.float32))
+
         ggml_tensor = GGMLTensorDef(
             id=t.id,
             name=t.name,
-            ggml_type=dtype_to_ggml_type(t.dtype),
+            ggml_type=t_type,
             ne=ne,
             storage=t.storage,
             producer_id=t.producer_id,
-            data=t.data,
+            data=t_data,
             role=t.role,
             original_rank=len(t.shape.dims),
         )

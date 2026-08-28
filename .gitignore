@@ -1,6 +1,7 @@
 .venv
 build
 build-win
+build-win-cuda
 build_win
 build-wsl
 _build

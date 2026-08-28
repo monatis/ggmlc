@@ -47,6 +47,23 @@ class RedundantCastPruner(Pass):
                 ):
                     is_identity = True
 
+            # Pattern 3: CAST same dtype or integer input adaptation
+            elif node.opcode == OpCode.CAST:
+                in_id = node.inputs[0]
+                out_id = node.outputs[0]
+                in_t = graph.get_tensor(in_id)
+                out_t = graph.get_tensor(out_id)
+                if in_t and out_t:
+                    if in_t.dtype == out_t.dtype:
+                        is_identity = True
+                    elif (
+                        in_id in graph.inputs
+                        and in_t.dtype.name.startswith("I")
+                        and out_t.dtype.name.startswith("I")
+                    ):
+                        in_t.dtype = out_t.dtype
+                        is_identity = True
+
             if is_identity:
                 in_id = node.inputs[0]
                 out_id = node.outputs[0]

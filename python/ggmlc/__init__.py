@@ -1,6 +1,36 @@
-"""ggmlc: High-Performance Neural Network Tensor Program Compiler to GGML."""
+import os
+import sys
+from pathlib import Path
 
-from __future__ import annotations
+# On Windows, register CUDA toolkit and build binary directories for native DLL loading
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    for cuda_cand in (
+        os.environ.get("CUDA_PATH", ""),
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0",
+    ):
+        if cuda_cand:
+            bin_p = Path(cuda_cand) / "bin"
+            if bin_p.exists():
+                try:
+                    os.add_dll_directory(str(bin_p))
+                except (OSError, ValueError):
+                    pass
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    for build_cand in (
+        repo_root / "build-win-cuda" / "bin",
+        repo_root / "build-win-cuda" / "runtime",
+        repo_root / "build-win" / "bin",
+        repo_root / "build-win" / "Release",
+        repo_root / "build-win" / "runtime" / "Release",
+    ):
+        if build_cand.exists():
+            try:
+                os.add_dll_directory(str(build_cand))
+            except (OSError, ValueError):
+                pass
 
 from typing import Any
 

@@ -1,14 +1,12 @@
 """End-to-end tests for Vision Transformer (ViT) architectures."""
 
-import pytest
 import torch
-from torchvision.models import vit_b_16
-
-from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
-from ggmlc.serialization.graph import serialize_ggml_graph
+from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.runner import ModelRunner
+from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
+from torchvision.models import vit_b_16
 
 
 def test_vit_b_16_cpu():

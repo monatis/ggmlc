@@ -156,6 +156,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         auto match_broadcast = [&](struct ggml_tensor* a, struct ggml_tensor* b) -> std::pair<struct ggml_tensor*, struct ggml_tensor*> {
             if (!a || !b) return {a, b};
             if (ggml_are_same_shape(a, b)) return {a, b};
+            if (ggml_can_repeat(b, a)) return {a, b};
+            if (ggml_can_repeat(a, b)) return {b, a};
 
             int64_t target_ne[4];
             bool need_repeat_a = false;
@@ -177,6 +179,13 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             return {a, b};
         };
+
+        if (getenv("GGMLC_DEBUG_OPS")) {
+            fprintf(stderr, "[OP %s (opcode=%d)] in0=%s(%d) in1=%s(%d)\n",
+                op.name.c_str(), (int)op.opcode,
+                in0 ? in0->name : "null", in0 ? (int)in0->type : -1,
+                in1 ? in1->name : "null", in1 ? (int)in1->type : -1);
+        }
 
         switch (op.opcode) {
             case GGML_OP_REPEAT: {
@@ -646,11 +655,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (is_cuda_) {
                     result = ggml_norm(ctx_, in0, eps);
                     if (w) {
-                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
                         result = ggml_mul(ctx_, result, w);
                     }
                     if (b) {
-                        if (ggml_can_repeat(b, result)) b = ggml_repeat(ctx_, b, result);
                         result = ggml_add(ctx_, result, b);
                     }
                 } else {
@@ -669,7 +676,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (is_cuda_) {
                     result = ggml_rms_norm(ctx_, in0, eps);
                     if (w) {
-                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
                         result = ggml_mul(ctx_, result, w);
                     }
                 } else {
