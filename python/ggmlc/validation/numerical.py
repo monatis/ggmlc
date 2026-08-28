@@ -41,17 +41,17 @@ def run_compiled_model_wsl(
 ) -> dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[str, np.ndarray]]:
     """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
     if executable_path is None:
-        # Check build-wsl first, then build
+        # Check build first, then build-wsl
         for candidate in (
-            "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run",
             "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run",
+            "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run",
         ):
             win_p = Path(candidate.replace("/mnt/c/", "C:/").replace("/mnt/C/", "C:/"))
             if win_p.exists():
                 executable_path = candidate
                 break
         if executable_path is None:
-            executable_path = "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run"
+            executable_path = "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run"
 
     symbols = symbols or {}
     states_in = states_in or {}
