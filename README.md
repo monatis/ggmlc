@@ -196,13 +196,12 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
-| **JAX / Flax** | **Flax ConvNeXt** | JAX / Flax | 7x7 Depthwise Conv, Inverted Bottleneck, Global Spatial Mean, LayerNorm | ✅ **PASS** | `3.58e-07` |
-| **JAX / Flax** | **Flax Causal LM** | JAX / Flax | Embedding, Causal Attention Masking, LayerNorm, Autoregressive LM Head | ✅ **PASS** | `1.67e-06` |
-| **JAX / Flax** | **Flax ResNet** | JAX / Flax | `conv_general_dilated`, LayerNorm, Residual Connections | ✅ **PASS** | `2.38e-06` |
-| **JAX / Flax** | **Flax Vision Transformer** | JAX / Flax | Patch Projection, Multi-Head Self-Attention, MLP Head | ✅ **PASS** | `1.43e-06` |
-| **JAX / Flax** | **Flax Multi-Layer Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | ✅ **PASS** | `1.00e-07` |
-| **JAX / Flax** | **Flax Transformer Layer** | JAX / Flax | Single Transformer Block with Self-Attention and Pre-LN | ✅ **PASS** | `1.00e-07` |
-| **JAX / Flax** | **Flax MLP Classifier** | JAX / Flax | Dense, LayerNorm, Multi-Class Logits | ✅ **PASS** | `7.45e-08` |
+| **JAX-Vision** | **Keras ResNet-50** | Keras 3 / JAX | 50-Layer Bottleneck Residual Network, BatchNorm, GlobalAvgPool | ✅ **PASS** | `6.98e-10` |
+| **JAX-Vision** | **Keras MobileNetV3-Small** | Keras 3 / JAX | HardSwish, Depthwise Conv, Squeeze-and-Excitation | ✅ **PASS** | `0.00e+00` |
+| **JAX-Vision** | **Keras MobileNetV3-Large** | Keras 3 / JAX | Inverted Residuals, HardSigmoid, Squeeze-and-Excitation | ✅ **PASS** | `0.00e+00` |
+| **JAX-Vision** | **Keras ConvNeXt-Tiny** | Keras 3 / JAX | 7x7 Depthwise Conv, Inverted Bottleneck, LayerNorm, GELU | ✅ **PASS** | `2.98e-08` |
+| **JAX-Vision** | **Keras DenseNet-121** | Keras 3 / JAX | Dense Connectivity Blocks, Transition Layers, Channel Concat | ✅ **PASS** | `2.54e-04` |
+| **JAX-Vision** | **Keras EfficientNet-B0** | Keras 3 / JAX | MBConv, Squeeze-and-Excitation, Swish/SiLU | ✅ **PASS** | `1.16e-10` |
 
 ---
 
@@ -214,28 +213,28 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 | Category | Architecture | Framework | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | **47.30 ms** | **21.2 inf/s** | `3.34e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | **36.37 ms** | **26.9 inf/s** | `6.68e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | **76.03 ms** | **13.4 inf/s** | `8.11e-06` | ✅ PASS |
-| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | **188.20 ms** | **5.1 inf/s** | `1.12e-02` | ✅ PASS |
-| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | **99.05 ms** | **9.9 inf/s** | `4.41e-06` | ✅ PASS |
-| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | **144.41 ms** | **6.8 inf/s** | `3.58e-06` | ✅ PASS |
-| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | **84.74 ms** | **12.1 inf/s** | `3.10e-06` | ✅ PASS |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | **130.08 ms** | **7.5 inf/s** | `6.82e-05` | ✅ PASS |
-| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | **434.78 ms** | **2.3 inf/s** | `1.83e-02` | ✅ PASS |
-| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | **47.77 ms** | **21.2 inf/s** | `2.33e-03` | ✅ PASS |
-| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | **521.10 ms** | **1.8 inf/s** | `1.73e-01` | ✅ PASS |
-| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | **183.43 ms** | **5.5 inf/s** | `1.84e-02` | ✅ PASS |
-| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | **256.18 ms** | **3.9 inf/s** | `7.63e-05` | ✅ PASS |
-| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | **939.37 ms** | **1.1 inf/s** | `2.39e-04` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | **140.20 ms** | **7.2 inf/s** | `3.96e-02` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | **53.84 ms** | **18.2 inf/s** | `5.45e-01` | ✅ PASS |
-| **JAX-Classifier** | `flax_mlp_classifier` | JAX/Flax | 31 | 0.05 MB | **3.07 ms** | **329.9 inf/s** | `3.58e-07` | ✅ PASS |
-| **JAX-Transformer** | `flax_transformer_layer` | JAX/Flax | 67 | 0.07 MB | **2.99 ms** | **248.3 inf/s** | `7.15e-07` | ✅ PASS |
-| **JAX-Vision** | `flax_resnet` | JAX/Flax | 94 | 0.51 MB | **7.07 ms** | **140.2 inf/s** | `2.58e-06` | ✅ PASS |
-| **JAX-Vision** | `flax_vit` | JAX/Flax | 76 | 0.19 MB | **4.33 ms** | **186.1 inf/s** | `9.54e-07` | ✅ PASS |
-| **JAX-Vision** | `flax_convnext` | JAX/Flax | 106 | 0.14 MB | **7.67 ms** | **137.1 inf/s** | `7.15e-07` | ✅ PASS |
-| **JAX-SLM** | `flax_causal_lm` | JAX/Flax | 155 | 0.40 MB | **9.20 ms** | **111.8 inf/s** | `1.67e-06` | ✅ PASS |
+| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | **45.44 ms** | **21.6 inf/s** | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | **40.27 ms** | **24.2 inf/s** | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | **121.79 ms** | **7.8 inf/s** | `8.11e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | **221.69 ms** | **4.5 inf/s** | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | **103.01 ms** | **9.6 inf/s** | `4.41e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | **150.45 ms** | **6.9 inf/s** | `3.58e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | **82.08 ms** | **12.2 inf/s** | `3.10e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | **131.45 ms** | **7.6 inf/s** | `6.82e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | **451.81 ms** | **2.2 inf/s** | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | **41.88 ms** | **23.9 inf/s** | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | **591.05 ms** | **1.6 inf/s** | `1.73e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | **172.83 ms** | **5.8 inf/s** | `1.84e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | **233.76 ms** | **4.3 inf/s** | `7.63e-05` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | **872.58 ms** | **1.2 inf/s** | `2.39e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | **150.17 ms** | **6.8 inf/s** | `3.96e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | **49.48 ms** | **20.4 inf/s** | `5.45e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | Keras 3 / JAX | 445 | 10.58 MB | **57.88 ms** | **17.3 inf/s** | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | Keras 3 / JAX | 508 | 22.29 MB | **104.67 ms** | **9.7 inf/s** | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | Keras 3 / JAX | 392 | 99.32 MB | **158.74 ms** | **6.3 inf/s** | `6.98e-10` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | Keras 3 / JAX | 772 | 109.74 MB | **254.94 ms** | **3.9 inf/s** | `2.98e-08` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | Keras 3 / JAX | 802 | 33.18 MB | **181.81 ms** | **5.4 inf/s** | `2.54e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | Keras 3 / JAX | 570 | 22.32 MB | **125.28 ms** | **8.1 inf/s** | `1.16e-10` | ✅ PASS |
 
 To reproduce or benchmark custom models:
 ```powershell

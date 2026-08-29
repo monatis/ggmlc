@@ -162,6 +162,9 @@ pytest tests/e2e/test_cuda_models.py -v
 # Run JAX / Flax E2E tests
 pytest tests/e2e/test_jax_flax_models.py -v
 
+# Run Keras 3 JAX Production Model E2E tests (ResNet-50, MobileNetV3, ConvNeXt, DenseNet, EfficientNet)
+pytest tests/e2e/test_keras_models.py -v
+
 # Run Vision Transformer (ViT) tests
 pytest tests/e2e/test_vit_models.py -v
 
@@ -169,13 +172,19 @@ pytest tests/e2e/test_vit_models.py -v
 pytest tests/e2e/test_audio_models.py -v
 ```
 
+### Multi-Framework Ingestion with Keras 3
+Keras 3 provides a unified API whose models can be executed and traced across multiple backends:
+- **JAX Backend (`KERAS_BACKEND=jax`)**: Traced directly via `jax.make_jaxpr` to standard `ClosedJaxpr` expressions and ingested by `ggmlc.frontend.jax`.
+- **PyTorch Backend (`KERAS_BACKEND=torch`)**: Pure PyTorch modules exported via `torch.export` to Canonical IR.
+- **Cross-Framework Verification**: Compile identical architectures from both backends to verify bit-level IR canonicalization and numerical parity.
+
 ### Continuous Benchmarking
 ```powershell
 # Run benchmark suite on CPU
-python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
+python examples/benchmarks/benchmark_suite.py --backend cpu --runs 3 --warmup 1 --output-md benchmark_cpu_report.md
 
 # Run benchmark suite on NVIDIA CUDA GPU
-python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
+python examples/benchmarks/benchmark_suite.py --backend cuda --runs 3 --warmup 1 --output-md benchmark_cuda_report.md
 ```
 
 ### Native Runtime Compilation
