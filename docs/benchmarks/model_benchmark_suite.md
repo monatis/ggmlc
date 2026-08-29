@@ -1,6 +1,6 @@
 # Multi-Model Benchmark Suite & CUDA GPU Acceleration
 
-This document reports the continuous performance benchmarking and differential numerical verification results of `ggmlc` across **26 production model architectures** spanning PyTorch, Keras 3, KerasHub, and Flax frontends (Vision-CNN, Object Detection, Vision Transformers, Text Embeddings, Text Encoders, Small Language Models, and Audio Seq2Seq).
+This document reports the continuous performance benchmarking and differential numerical verification results of `ggmlc` across **27 production model architectures** spanning PyTorch, Keras 3, KerasHub, and Flax frontends (Vision-CNN, Object Detection, Vision Transformers, Text Embeddings, Text Encoders, Small Language Models, and Audio Seq2Seq).
 
 ---
 
@@ -12,32 +12,33 @@ Benchmarks were evaluated on an **NVIDIA GeForce GTX 1050/1080 (Pascal Architect
 
 | Category | Model Architecture | Framework | Nodes | Payload Size | CPU Latency (P50) | CUDA Latency (P50) | CUDA Speedup | Differential Max Diff | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | 297.02 ms | **47.24 ms** | **6.29x** | `3.34e-06` | ✅ **PASS** |
-| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | 119.89 ms | **34.26 ms** | **3.50x** | `6.68e-06` | ✅ **PASS** |
-| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | 337.32 ms | **63.54 ms** | **5.31x** | `8.11e-06` | ✅ **PASS** |
-| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | 1112.64 ms | **187.26 ms** | **5.94x** | `1.12e-02` | ✅ **PASS** |
-| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | 536.86 ms | **93.12 ms** | **5.77x** | `4.41e-06` | ✅ **PASS** |
-| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | 970.78 ms | **138.42 ms** | **7.01x** | `3.58e-06` | ✅ **PASS** |
-| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | 265.61 ms | **71.00 ms** | **3.74x** | `3.10e-06` | ✅ **PASS** |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | 738.74 ms | **127.18 ms** | **5.81x** | `6.82e-05` | ✅ **PASS** |
-| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | 2313.80 ms | **425.14 ms** | **5.44x** | `1.83e-02` | ✅ **PASS** |
-| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | 47.09 ms | **37.05 ms** | **1.27x** | `2.33e-03` | ✅ **PASS** |
-| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | 744.27 ms | **471.63 ms** | **1.58x** | `1.73e-01` | ✅ **PASS** |
-| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | 276.74 ms | **155.94 ms** | **1.77x** | `1.84e-02` | ✅ **PASS** |
-| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | 310.04 ms | **233.13 ms** | **1.33x** | `7.63e-05` | ✅ **PASS** |
-| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | 1540.81 ms | **866.92 ms** | **1.78x** | `2.39e-04` | ✅ **PASS** |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | 2815.79 ms | **132.37 ms** | **21.27x** | `3.96e-02` | ✅ **PASS** |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | 80.21 ms | **47.81 ms** | **1.68x** | `5.45e-01` | ✅ **PASS** |
-| **JAX-Vision** | `keras_mobilenet_v3_small` | Keras 3 / JAX | 501 | 10.60 MB | 131.24 ms | **53.36 ms** | **2.46x** | `0.00e+00` | ✅ **PASS** |
-| **JAX-Vision** | `keras_mobilenet_v3_large` | Keras 3 / JAX | 566 | 22.31 MB | 331.86 ms | **103.92 ms** | **3.19x** | `0.00e+00` | ✅ **PASS** |
-| **JAX-Vision** | `keras_resnet50` | Keras 3 / JAX | 392 | 99.32 MB | 745.43 ms | **148.20 ms** | **5.03x** | `6.98e-10` | ✅ **PASS** |
-| **JAX-Vision** | `keras_convnext_tiny` | Keras 3 / JAX | 772 | 109.74 MB | 1442.28 ms | **249.69 ms** | **5.78x** | `1.96e-08` | ✅ **PASS** |
-| **JAX-Vision** | `keras_densenet121` | Keras 3 / JAX | 802 | 33.18 MB | 736.26 ms | **171.68 ms** | **4.29x** | `3.26e-04` | ✅ **PASS** |
-| **JAX-Vision** | `keras_efficientnet_b0` | Keras 3 / JAX | 570 | 22.32 MB | 550.35 ms | **127.54 ms** | **4.32x** | `1.16e-10` | ✅ **PASS** |
-| **JAX-Vision** | `flax_vit_b16` | Flax / JAX | 915 | 331.17 MB | 2913.21 ms | **272.78 ms** | **10.68x** | `8.31e-04` | ✅ **PASS** |
-| **JAX-NLP** | `kerashub_bert` | KerasHub / JAX | 389 | 40.74 MB | 90.33 ms | **36.91 ms** | **2.45x** | `1.19e-06` | ✅ **PASS** |
-| **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 374 | 40.48 MB | 84.27 ms | **39.07 ms** | **2.16x** | `4.90e-05` | ✅ **PASS** |
-| **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.53 MB | 108.62 ms | **46.29 ms** | **2.35x** | `2.98e-06` | ✅ **PASS** |
+| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | 295.54 ms | **50.32 ms** | **5.87x** | `3.34e-06` | ✅ **PASS** |
+| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | 123.30 ms | **32.96 ms** | **3.74x** | `6.68e-06` | ✅ **PASS** |
+| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | 333.95 ms | **61.94 ms** | **5.39x** | `8.11e-06` | ✅ **PASS** |
+| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | 1230.92 ms | **192.62 ms** | **6.39x** | `1.12e-02` | ✅ **PASS** |
+| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | 562.39 ms | **94.75 ms** | **5.94x** | `4.41e-06` | ✅ **PASS** |
+| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | 1013.78 ms | **137.56 ms** | **7.37x** | `3.58e-06` | ✅ **PASS** |
+| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | 259.44 ms | **90.48 ms** | **2.87x** | `3.10e-06` | ✅ **PASS** |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | 748.70 ms | **122.10 ms** | **6.13x** | `6.82e-05` | ✅ **PASS** |
+| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | 2248.20 ms | **426.40 ms** | **5.27x** | `1.83e-02` | ✅ **PASS** |
+| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | 49.74 ms | **35.67 ms** | **1.39x** | `2.33e-03` | ✅ **PASS** |
+| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | 709.18 ms | **517.32 ms** | **1.37x** | `1.73e-01` | ✅ **PASS** |
+| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | 296.49 ms | **172.37 ms** | **1.72x** | `1.84e-02` | ✅ **PASS** |
+| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | 330.39 ms | **230.29 ms** | **1.43x** | `7.63e-05` | ✅ **PASS** |
+| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | 1612.29 ms | **827.25 ms** | **1.95x** | `2.39e-04` | ✅ **PASS** |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | 3008.34 ms | **136.90 ms** | **21.97x** | `3.96e-02` | ✅ **PASS** |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | 89.60 ms | **50.93 ms** | **1.76x** | `5.45e-01` | ✅ **PASS** |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | Keras 3 / JAX | 501 | 10.60 MB | 142.58 ms | **53.75 ms** | **2.65x** | `0.00e+00` | ✅ **PASS** |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | Keras 3 / JAX | 566 | 22.31 MB | 353.15 ms | **94.88 ms** | **3.72x** | `0.00e+00` | ✅ **PASS** |
+| **JAX-Vision** | `keras_resnet50` | Keras 3 / JAX | 392 | 99.32 MB | 763.07 ms | **144.78 ms** | **5.27x** | `9.31e-10` | ✅ **PASS** |
+| **JAX-Vision** | `keras_convnext_tiny` | Keras 3 / JAX | 772 | 109.84 MB | 1450.47 ms | **249.34 ms** | **5.82x** | `2.70e-08` | ✅ **PASS** |
+| **JAX-Vision** | `keras_densenet121` | Keras 3 / JAX | 802 | 33.18 MB | 784.98 ms | **180.01 ms** | **4.36x** | `2.42e-04` | ✅ **PASS** |
+| **JAX-Vision** | `keras_efficientnet_b0` | Keras 3 / JAX | 570 | 22.32 MB | 566.51 ms | **117.34 ms** | **4.83x** | `1.16e-10` | ✅ **PASS** |
+| **JAX-Vision** | `flax_vit_b16` | Flax / JAX | 915 | 331.17 MB | 2970.99 ms | **286.78 ms** | **10.36x** | `8.31e-04` | ✅ **PASS** |
+| **JAX-NLP** | `kerashub_bert` | KerasHub / JAX | 385 | 40.75 MB | 91.67 ms | **36.27 ms** | **2.53x** | `1.43e-06` | ✅ **PASS** |
+| **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | 89.80 ms | **37.63 ms** | **2.39x** | `4.36e-05` | ✅ **PASS** |
+| **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | 100.24 ms | **47.12 ms** | **2.13x** | `2.86e-06` | ✅ **PASS** |
+| **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | 61.31 ms | **46.93 ms** | **1.31x** | `< 5e-1` | ✅ **PASS** |
 
 ---
 

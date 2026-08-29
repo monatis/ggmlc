@@ -64,6 +64,7 @@ from examples.models.keras_models import (
 from examples.models.kerashub_models import (
     load_kerashub_bert,
     load_kerashub_distilbert,
+    load_kerashub_gemma3,
     load_kerashub_gpt2,
 )
 
@@ -394,6 +395,7 @@ class BenchmarkSuite:
             ("kerashub_bert", "JAX-NLP", load_kerashub_bert),
             ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
             ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
+            ("kerashub_gemma3", "JAX-SLM", load_kerashub_gemma3),
         ]
 
         for name, category, loader in all_models:

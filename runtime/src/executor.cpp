@@ -210,10 +210,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         };
 
         if (getenv("GGMLC_DEBUG_OPS")) {
-            fprintf(stderr, "[OP %s (opcode=%d)] in0=%s(%d) in1=%s(%d)\n",
-                op.name.c_str(), (int)op.opcode,
-                in0 ? in0->name : "null", in0 ? (int)in0->type : -1,
-                in1 ? in1->name : "null", in1 ? (int)in1->type : -1);
+            fprintf(stderr, "[PREPARING OP %d/%zu: %s (opcode=%d)]\n",
+                op.id, model_graph_.ops.size(), op.name.c_str(), (int)op.opcode);
         }
 
         switch (op.opcode) {
@@ -507,15 +505,22 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             case GGML_OP_MUL_MAT: {
                 bool is_q = (in0->type != GGML_TYPE_F32 && in0->type != GGML_TYPE_F16);
-                bool transpose_in0 = op.attributes.count("transpose_in0") && op.attributes.at("transpose_in0") != 0;
+                bool explicit_transpose = op.attributes.count("transpose_in0") > 0;
+                bool transpose_in0 = explicit_transpose ? (op.attributes.at("transpose_in0") != 0) : (!is_q && in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]);
                 if (!is_q && in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
                 if (in1 && !ggml_is_contiguous(in1)) {
                     in1 = ggml_cont(ctx_, in1);
                 }
-                if (!is_q && in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
+                if (!is_q && in0 && transpose_in0) {
                     in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                }
+                if (in0->ne[0] != in1->ne[0]) {
+                    fprintf(stderr, "[MUL_MAT CANNOT COMPUTE!] op=%s explicit_trans=%d trans_in0=%d\n  in0 name=%s ne=[%lld,%lld,%lld,%lld]\n  in1 name=%s ne=[%lld,%lld,%lld,%lld]\n",
+                        op.name.c_str(), (int)explicit_transpose, (int)transpose_in0,
+                        in0->name, (long long)in0->ne[0], (long long)in0->ne[1], (long long)in0->ne[2], (long long)in0->ne[3],
+                        in1->name, (long long)in1->ne[0], (long long)in1->ne[1], (long long)in1->ne[2], (long long)in1->ne[3]);
                 }
                 result = ggml_mul_mat(ctx_, in0, in1);
                 if (op.inputs.size() > 2) {
@@ -844,6 +849,8 @@ void ModelExecutor::run(int n_threads) {
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("GGML backend graph compute failed with status: " + std::to_string(status));
     }
+
+    // Execution completed successfully
 
     // Save persistent states from backend
     for (const auto& pair : model_graph_.tensors) {
