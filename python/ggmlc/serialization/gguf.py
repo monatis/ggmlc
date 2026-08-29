@@ -366,8 +366,14 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
     writer.add_string("ggmlc.graph_spec", spec_json)
 
     # 3. Add Tensors with data (Parameters / Constants)
+    used_names: set[str] = set()
     for _tid, t in sorted(graph.tensors.items()):
         if t.data is not None:
+            name = t.name
+            if name in used_names:
+                name = f"{name}_{_tid}"
+            used_names.add(name)
+
             # Prepare raw byte buffer and match GGUF shape to concrete data
             if isinstance(t.data, (np.ndarray, np.generic, int, float)):
                 arr = np.ascontiguousarray(np.asarray(t.data))
@@ -403,7 +409,7 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
                 static_shape.append(1)
 
             writer.add_tensor_info(
-                name=t.name,
+                name=name,
                 shape=static_shape,
                 ggml_type=int(t.ggml_type),
                 data=raw_bytes,

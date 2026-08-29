@@ -185,17 +185,23 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **Vision-CNN** | **MobileNetV3-Large** | PyTorch / TorchVision | Fused Inverted Residual Blocks, Global Pooling | ✅ **PASS** | `8.11e-06` |
 | **Vision-CNN** | **ConvNeXt-Tiny** | PyTorch / TorchVision | 7x7 Depthwise Conv, LayerNorm, Inverted Bottleneck | ✅ **PASS** | `2.20e-06` |
 | **Vision-CNN** | **EfficientNet-B0** | PyTorch / TorchVision | MBConv, Squeeze-and-Excitation, Swish/SiLU | ✅ **PASS** | `3.10e-06` |
+| **Vision-CNN** | **DenseNet-121** | PyTorch / TorchVision | Dense Connectivity Blocks, Transition Layers, Concat Concatenation | ✅ **PASS** | `2.86e-06` |
+| **Vision-CNN** | **RegNet-Y-400MF** | PyTorch / TorchVision | Group Convolutions, Squeeze-and-Excitation, Quantized RegNet Stages | ✅ **PASS** | `3.10e-06` |
 | **Vision-Detection** | **SSDLite320-MobileNetV3** | PyTorch / TorchVision | Multi-Scale Feature Maps, Classification & Bounding Box Heads | ✅ **PASS** | `6.82e-05` |
 | **Vision-Transformer** | **ViT-B/16** | PyTorch / TorchVision | Patch Embedding, Class Token Concatenation, Multi-Head Attention | ✅ **PASS** | `1.83e-02` |
 | **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
 | **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
+| **Text-Encoder** | **BERT-base-uncased** | PyTorch / Transformers | 12-Layer Full Bidirectional Transformer, Segment Embeddings | ✅ **PASS** | `1.84e-02` |
 | **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
 | **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
+| **JAX / Flax** | **Flax ConvNeXt** | JAX / Flax | 7x7 Depthwise Conv, Inverted Bottleneck, Global Spatial Mean, LayerNorm | ✅ **PASS** | `3.58e-07` |
+| **JAX / Flax** | **Flax Causal LM** | JAX / Flax | Embedding, Causal Attention Masking, LayerNorm, Autoregressive LM Head | ✅ **PASS** | `1.67e-06` |
 | **JAX / Flax** | **Flax ResNet** | JAX / Flax | `conv_general_dilated`, LayerNorm, Residual Connections | ✅ **PASS** | `2.38e-06` |
 | **JAX / Flax** | **Flax Vision Transformer** | JAX / Flax | Patch Projection, Multi-Head Self-Attention, MLP Head | ✅ **PASS** | `1.43e-06` |
 | **JAX / Flax** | **Flax Multi-Layer Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | ✅ **PASS** | `1.00e-07` |
+| **JAX / Flax** | **Flax Transformer Layer** | JAX / Flax | Single Transformer Block with Self-Attention and Pre-LN | ✅ **PASS** | `1.00e-07` |
 | **JAX / Flax** | **Flax MLP Classifier** | JAX / Flax | Dense, LayerNorm, Multi-Class Logits | ✅ **PASS** | `7.45e-08` |
 
 ---
@@ -206,21 +212,30 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 ### Native NVIDIA CUDA Benchmark Summary (GeForce GTX 1050/1080)
 
-| Category | Architecture | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **53.02 ms** | **18.93 inf/s** | `3.34e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **29.72 ms** | **33.88 inf/s** | `6.68e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **61.70 ms** | **16.23 inf/s** | `8.11e-06` | ✅ PASS |
-| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **188.66 ms** | **5.30 inf/s** | `1.12e-02` | ✅ PASS |
-| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **92.76 ms** | **10.74 inf/s** | `4.41e-06` | ✅ PASS |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **123.41 ms** | **8.12 inf/s** | `6.82e-05` | ✅ PASS |
-| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **436.83 ms** | **2.28 inf/s** | `1.83e-02` | ✅ PASS |
-| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **42.11 ms** | **24.00 inf/s** | `2.33e-03` | ✅ PASS |
-| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **469.73 ms** | **2.08 inf/s** | `1.73e-01` | ✅ PASS |
-| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **233.72 ms** | **4.25 inf/s** | `7.63e-05` | ✅ PASS |
-| **Text-SLM** | `qwen2.5_0.5b` | 1432 | 2404.43 MB | **846.09 ms** | **1.19 inf/s** | `2.39e-04` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **135.42 ms** | **7.24 inf/s** | `3.96e-02` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **47.79 ms** | **20.96 inf/s** | `5.45e-01` | ✅ PASS |
+| Category | Architecture | Framework | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | **47.30 ms** | **21.2 inf/s** | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | **36.37 ms** | **26.9 inf/s** | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | **76.03 ms** | **13.4 inf/s** | `8.11e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | **188.20 ms** | **5.1 inf/s** | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | **99.05 ms** | **9.9 inf/s** | `4.41e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | **144.41 ms** | **6.8 inf/s** | `3.58e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | **84.74 ms** | **12.1 inf/s** | `3.10e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | **130.08 ms** | **7.5 inf/s** | `6.82e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | **434.78 ms** | **2.3 inf/s** | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | **47.77 ms** | **21.2 inf/s** | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | **521.10 ms** | **1.8 inf/s** | `1.73e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | **183.43 ms** | **5.5 inf/s** | `1.84e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | **256.18 ms** | **3.9 inf/s** | `7.63e-05` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | **939.37 ms** | **1.1 inf/s** | `2.39e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | **140.20 ms** | **7.2 inf/s** | `3.96e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | **53.84 ms** | **18.2 inf/s** | `5.45e-01` | ✅ PASS |
+| **JAX-Classifier** | `flax_mlp_classifier` | JAX/Flax | 31 | 0.05 MB | **3.07 ms** | **329.9 inf/s** | `3.58e-07` | ✅ PASS |
+| **JAX-Transformer** | `flax_transformer_layer` | JAX/Flax | 67 | 0.07 MB | **2.99 ms** | **248.3 inf/s** | `7.15e-07` | ✅ PASS |
+| **JAX-Vision** | `flax_resnet` | JAX/Flax | 94 | 0.51 MB | **7.07 ms** | **140.2 inf/s** | `2.58e-06` | ✅ PASS |
+| **JAX-Vision** | `flax_vit` | JAX/Flax | 76 | 0.19 MB | **4.33 ms** | **186.1 inf/s** | `9.54e-07` | ✅ PASS |
+| **JAX-Vision** | `flax_convnext` | JAX/Flax | 106 | 0.14 MB | **7.67 ms** | **137.1 inf/s** | `7.15e-07` | ✅ PASS |
+| **JAX-SLM** | `flax_causal_lm` | JAX/Flax | 155 | 0.40 MB | **9.20 ms** | **111.8 inf/s** | `1.67e-06` | ✅ PASS |
 
 To reproduce or benchmark custom models:
 ```powershell

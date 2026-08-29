@@ -485,27 +485,46 @@ def _lower_op(
         groups = int(groups) if groups is not None else 1
         w_t = c_graph.get_tensor(w_id)
         x_t = c_graph.get_tensor(x_id)
-        is_dw = groups > 1
+        is_dw = False
         if (
-            not is_dw
-            and len(w_t.shape.dims) == 4
+            len(w_t.shape.dims) == 4
             and len(x_t.shape.dims) == 4
             and w_t.shape.dims[1].is_static()
             and x_t.shape.dims[1].is_static()
-            and w_t.shape.dims[1].evaluate({}) == 1
-            and x_t.shape.dims[1].evaluate({}) > 1
         ):
+            w_ic = w_t.shape.dims[1].evaluate({})
+            x_ic = x_t.shape.dims[1].evaluate({})
+            if w_ic == 1 and (groups > 1 or x_ic > 1):
+                is_dw = True
+        elif groups > 1:
             is_dw = True
+
         if is_dw:
             return GGMLOpDef(
                 op.id, GGMLOpCode.GGML_OP_CONV_2D_DW, mapped_inputs, out_ids, attrs, op.name
             )
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONV_2D, mapped_inputs, out_ids, attrs, op.name)
     elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
+        attrs["is_max"] = 1 if opcode == OpCode.MAX_POOL2D else 0
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ADAPTIVE_AVG_POOL2D:
         attrs["is_adaptive"] = 1
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.PAD:
+        attrs["pad_w"] = int(attrs.get("pad_w", 0))
+        attrs["pad_h"] = int(attrs.get("pad_h", 0))
+        attrs["pad_c"] = int(attrs.get("pad_c", 0))
+        attrs["pad_n"] = int(attrs.get("pad_n", 0))
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_PAD, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.CONCAT:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", attrs.get("axis", attrs.get("dimension", 0)))
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim if R > 0 else 0
+        attrs["ggml_dim"] = int(ggml_dim)
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.PERMUTE:

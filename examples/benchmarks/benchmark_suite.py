@@ -37,17 +37,28 @@ from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 
 from examples.models.hub_models import (
+    load_bert_model,
     load_bge_m3_distill_model,
     load_convnext_model,
+    load_densenet_model,
     load_efficientnet_model,
     load_gpt2_model,
     load_minilm_model,
     load_mobilenet_v3_model,
     load_qwen_model,
+    load_regnet_model,
     load_resnet_model,
     load_ssdlite320_mobilenet_v3_model,
     load_vit_model,
     load_whisper_model,
+)
+from examples.models.keras_models import (
+    load_keras_convnext_tiny,
+    load_keras_densenet121,
+    load_keras_efficientnet_b0,
+    load_keras_mobilenet_v3_large,
+    load_keras_mobilenet_v3_small,
+    load_keras_resnet50,
 )
 
 
@@ -91,31 +102,52 @@ class BenchmarkSuite:
         try:
             torch.manual_seed(42)
             np.random.seed(42)
-            # 1. Load model and inputs
-            model, example_inputs, _input_names = loader_fn()
-            model.eval()
+            loaded = loader_fn()
+            if len(loaded) == 4:
+                model, example_inputs, _input_names, framework = loaded
+            else:
+                model, example_inputs, _input_names = loaded
+                framework = "pytorch"
 
-            # 2. Reference inference
-            with torch.no_grad():
-                ref_out = model(*example_inputs)
+            if framework == "jax":
+                import jax
+                from ggmlc.frontend.jax import import_jaxpr
 
-            # 3. Export to Canonical IR
-            t_exp_0 = time.perf_counter()
-            exported = export_torch_model(model, example_inputs, model_name=name)
-            export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
+                ref_out = np.asarray(model(*example_inputs))
 
-            # 4. Lower to GGML Dialect & Serialize
-            t_low_0 = time.perf_counter()
-            ggml_graph = lower_to_ggml(exported.main_graph)
-            ser_bytes = serialize_ggml_graph(ggml_graph)
-            lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
-            payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
+                t_exp_0 = time.perf_counter()
+                jaxpr = jax.make_jaxpr(model)(*example_inputs)
+                exported_graph = import_jaxpr(jaxpr, graph_name=name)
+                export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
 
-            # 5. Initialize ModelRunner
-            runner = ModelRunner(ser_bytes, device=self.backend)
+                t_low_0 = time.perf_counter()
+                ggml_graph = lower_to_ggml(exported_graph)
+                ser_bytes = serialize_ggml_graph(ggml_graph)
+                lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
+                payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
 
-            # 6. Prepare inputs
-            np_inputs = [x.numpy() for x in example_inputs]
+                runner = ModelRunner(ser_bytes, device=self.backend)
+                np_inputs = [np.asarray(x) for x in example_inputs]
+            else:
+                model.eval()
+                with torch.no_grad():
+                    ref_out = model(*example_inputs)
+
+                t_exp_0 = time.perf_counter()
+                exported = export_torch_model(model, example_inputs, model_name=name)
+                export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
+
+                t_low_0 = time.perf_counter()
+                ggml_graph = lower_to_ggml(exported.main_graph)
+                ser_bytes = serialize_ggml_graph(ggml_graph)
+                lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
+                payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
+
+                runner = ModelRunner(ser_bytes, device=self.backend)
+                np_inputs = [
+                    x.detach().cpu().numpy() if hasattr(x, "numpy") else np.asarray(x)
+                    for x in example_inputs
+                ]
 
             # 7. Warmup
             for _ in range(self.warmup):
@@ -247,6 +279,73 @@ class BenchmarkSuite:
 
     def run_all(self, selected_models: list[str] | None = None) -> list[BenchmarkRecord]:
         """Runs benchmarks across configured model categories."""
+
+        def _load_flax_mlp():
+            import jax
+
+            from examples.models.flax_models import FlaxMLPClassifier
+
+            m = FlaxMLPClassifier(hidden_dim=64, num_classes=10)
+            x = jax.random.normal(jax.random.PRNGKey(42), (2, 32))
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["x"], "jax")
+
+        def _load_flax_transformer():
+            import jax
+
+            from examples.models.flax_models import FlaxTransformerLayer
+
+            m = FlaxTransformerLayer(dim=32, num_heads=2, mlp_dim=64)
+            x = jax.random.normal(jax.random.PRNGKey(42), (1, 8, 32))
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["x"], "jax")
+
+        def _load_flax_resnet():
+            import jax
+            import jax.numpy as jnp
+
+            from examples.models.flax_models import FlaxResNet
+
+            m = FlaxResNet(num_classes=10)
+            x = jnp.ones((1, 16, 16, 3), dtype=jnp.float32)
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["x"], "jax")
+
+        def _load_flax_vit():
+            import jax
+            import jax.numpy as jnp
+
+            from examples.models.flax_models import FlaxVisionTransformer
+
+            m = FlaxVisionTransformer(
+                patch_size=4, embed_dim=64, num_heads=4, mlp_dim=128, num_classes=10
+            )
+            x = jnp.ones((1, 16, 16, 3), dtype=jnp.float32)
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["x"], "jax")
+
+        def _load_flax_convnext():
+            import jax
+            import jax.numpy as jnp
+
+            from examples.models.flax_models import FlaxConvNeXt
+
+            m = FlaxConvNeXt(num_classes=10)
+            x = jnp.ones((1, 32, 32, 3), dtype=jnp.float32)
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["x"], "jax")
+
+        def _load_flax_causal_lm():
+            import jax
+            import jax.numpy as jnp
+
+            from examples.models.flax_models import FlaxCausalLM
+
+            m = FlaxCausalLM(vocab_size=100, embed_dim=64, num_heads=4, num_layers=2)
+            x = jnp.array([[1, 5, 12, 42, 7, 3, 9, 15]], dtype=jnp.int32)
+            p = m.init(jax.random.PRNGKey(0), x)
+            return (lambda inp: m.apply(p, inp), (x,), ["token_ids"], "jax")
+
         all_models = [
             # 1. Vision - CNN
             ("resnet18", "Vision-CNN", lambda: load_resnet_model(variant="18")),
@@ -254,13 +353,16 @@ class BenchmarkSuite:
             ("mobilenet_v3_large", "Vision-CNN", lambda: load_mobilenet_v3_model(variant="large")),
             ("convnext_tiny", "Vision-CNN", lambda: load_convnext_model(variant="tiny")),
             ("efficientnet_b0", "Vision-CNN", lambda: load_efficientnet_model(variant="b0")),
+            ("densenet121", "Vision-CNN", lambda: load_densenet_model(variant="densenet121")),
+            ("regnet_y_400mf", "Vision-CNN", lambda: load_regnet_model(variant="regnet_y_400mf")),
             # 2. Vision - Object Detection
             ("ssdlite320_mobilenet_v3", "Vision-Detection", load_ssdlite320_mobilenet_v3_model),
             # 3. Vision - Transformer
             ("vit_b_16", "Vision-Transformer", lambda: load_vit_model(variant="b_16")),
-            # 4. Text - Embeddings
+            # 4. Text - Embeddings / Encoders
             ("minilm_l6", "Text-Embedding", load_minilm_model),
             ("bge_m3", "Text-Embedding", load_bge_m3_distill_model),
+            ("bert_base_uncased", "Text-Encoder", lambda: load_bert_model(seq_len=16)),
             # 5. Text - SLM / Decoder
             ("gpt2", "Text-SLM", lambda: load_gpt2_model(seq_len=8)),
             ("qwen2.5_0.5b", "Text-SLM", lambda: load_qwen_model(seq_len=8)),
@@ -275,6 +377,13 @@ class BenchmarkSuite:
                 "Audio-Seq2Seq",
                 lambda: load_whisper_model(component="decoder"),
             ),
+            # 7. JAX / Keras 3 Production Models
+            ("keras_mobilenet_v3_small", "JAX-Vision", load_keras_mobilenet_v3_small),
+            ("keras_mobilenet_v3_large", "JAX-Vision", load_keras_mobilenet_v3_large),
+            ("keras_resnet50", "JAX-Vision", load_keras_resnet50),
+            ("keras_convnext_tiny", "JAX-Vision", load_keras_convnext_tiny),
+            ("keras_densenet121", "JAX-Vision", load_keras_densenet121),
+            ("keras_efficientnet_b0", "JAX-Vision", load_keras_efficientnet_b0),
         ]
 
         for name, category, loader in all_models:

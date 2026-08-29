@@ -148,3 +148,72 @@ class FlaxVisionTransformer(nn.Module):
         x = jnp.mean(x, axis=1)
         x = nn.Dense(self.num_classes, name="head")(x)
         return x
+
+
+class FlaxConvNeXtBlock(nn.Module):
+    """ConvNeXt block with depthwise 7x7 conv and inverted bottleneck."""
+
+    dim: int = 32
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        residual = x
+        x = nn.Conv(
+            self.dim,
+            kernel_size=(7, 7),
+            padding="SAME",
+            feature_group_count=self.dim,
+            name="dwconv",
+        )(x)
+        x = nn.LayerNorm(name="norm")(x)
+        x = nn.Dense(self.dim * 4, name="pwconv1")(x)
+        x = nn.gelu(x)
+        x = nn.Dense(self.dim, name="pwconv2")(x)
+        return residual + x
+
+
+class FlaxConvNeXt(nn.Module):
+    """Flax ConvNeXt vision architecture with stem, inverted blocks, and global pooling."""
+
+    num_classes: int = 10
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        x = nn.Conv(32, kernel_size=(4, 4), strides=(4, 4), padding="VALID", name="stem")(x)
+        x = nn.LayerNorm(name="stem_norm")(x)
+        x = FlaxConvNeXtBlock(32, name="block1")(x)
+        x = FlaxConvNeXtBlock(32, name="block2")(x)
+        x = jnp.mean(x, axis=(1, 2))
+        x = nn.LayerNorm(name="head_norm")(x)
+        x = nn.Dense(self.num_classes, name="head")(x)
+        return x
+
+
+class FlaxCausalLM(nn.Module):
+    """Causal Language Model in Flax with Embedding, Causal Masking, LayerNorm, and Dense."""
+
+    vocab_size: int = 100
+    embed_dim: int = 64
+    num_heads: int = 4
+    num_layers: int = 2
+
+    @nn.compact
+    def __call__(self, token_ids: jnp.ndarray) -> jnp.ndarray:
+        x = nn.Embed(num_embeddings=self.vocab_size, features=self.embed_dim, name="wte")(token_ids)
+        mask = nn.make_causal_mask(token_ids)
+        for i in range(self.num_layers):
+            norm1 = nn.LayerNorm(name=f"ln1_{i}")(x)
+            attn = nn.SelfAttention(
+                num_heads=self.num_heads,
+                qkv_features=self.embed_dim,
+                name=f"attn_{i}",
+            )(norm1, mask=mask)
+            x = x + attn
+            norm2 = nn.LayerNorm(name=f"ln2_{i}")(x)
+            mlp = nn.Dense(self.embed_dim * 2, name=f"mlp_fc1_{i}")(norm2)
+            mlp = nn.gelu(mlp)
+            mlp = nn.Dense(self.embed_dim, name=f"mlp_fc2_{i}")(mlp)
+            x = x + mlp
+        x = nn.LayerNorm(name="ln_f")(x)
+        logits = nn.Dense(self.vocab_size, name="lm_head")(x)
+        return logits

@@ -76,3 +76,24 @@ def test_cuda_efficientnet():
 
     model, inputs, _ = load_efficientnet_model("b0")
     _verify_model_cuda(model, inputs, "efficientnet_b0", atol=1e-3)
+
+
+def test_cuda_densenet():
+    from examples.models.hub_models import load_densenet_model
+
+    model, inputs, _ = load_densenet_model("densenet121")
+    _verify_model_cuda(model, inputs, "densenet121", atol=1e-3)
+
+
+def test_cuda_regnet():
+    from examples.models.hub_models import load_regnet_model
+
+    model, inputs, _ = load_regnet_model("regnet_y_400mf")
+    _verify_model_cuda(model, inputs, "regnet_y_400mf", atol=1e-3)
+
+
+def test_cuda_bert():
+    from examples.models.hub_models import load_bert_model
+
+    model, inputs, _ = load_bert_model(seq_len=16)
+    _verify_model_cuda(model, inputs, "bert_base_uncased", atol=0.05)

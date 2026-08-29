@@ -65,7 +65,11 @@ def _import_equations(
     eqns: Sequence[Any],
     g: Graph,
     var_to_tensor: dict[Any, Tensor],
+    padded_vars: dict[Any, tuple[Any, tuple[int, int, int, int]]] | None = None,
 ) -> None:
+    if padded_vars is None:
+        padded_vars = {}
+
     for eqn in eqns:
         prim_name = eqn.primitive.name
 
@@ -75,10 +79,101 @@ def _import_equations(
             if inner_jaxpr is not None:
                 if hasattr(inner_jaxpr, "jaxpr"):
                     inner_jaxpr = inner_jaxpr.jaxpr
-                inner_var_map = dict(var_to_tensor)
+
+                # 1. Pattern: nn.Embed wrapped in jit (gather over table and indices)
+                if (
+                    any(eq.primitive.name == "gather" for eq in inner_jaxpr.eqns)
+                    and len(eqn.invars) == 2
+                    and len(eqn.outvars) == 1
+                ):
+                    in0_t = var_to_tensor.get(eqn.invars[0])
+                    in1_t = var_to_tensor.get(eqn.invars[1])
+                    if in0_t is not None and in1_t is not None:
+                        wte_t = (
+                            in0_t
+                            if in0_t.storage in (StorageClass.PARAMETER, StorageClass.CONSTANT)
+                            else in1_t
+                        )
+                        idx_t = in1_t if wte_t == in0_t else in0_t
+                        out_var = eqn.outvars[0]
+                        out_aval = out_var.aval
+                        out_shape = Shape.from_tuple(tuple(out_aval.shape))
+                        out_t = g.add_tensor(
+                            name=f"embed_{out_var}",
+                            shape=out_shape,
+                            dtype=_jax_dtype_to_dtype(out_aval.dtype),
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.EMBEDDING,
+                            inputs=[wte_t.id, idx_t.id],
+                            outputs=[out_t.id],
+                            attributes={"dim": 0},
+                            name=f"embed_{out_var}",
+                        )
+                        var_to_tensor[out_var] = out_t
+                        continue
+
+                # 2. Pattern: attention masking select_n wrapped in jit (where(mask, logits, -1e10))
+                if (
+                    any(eq.primitive.name == "select_n" for eq in inner_jaxpr.eqns)
+                    and len(eqn.outvars) == 1
+                ):
+                    # Find mask, false_val, and logits among eqn.invars
+                    mask_t = None
+                    false_val = -1e10
+                    logits_t = None
+                    for invar in eqn.invars:
+                        if hasattr(invar, "val"):
+                            val = np.asarray(invar.val)
+                            if val.size == 1 and val.item() < -1e3:
+                                false_val = float(val.item())
+                        elif not hasattr(invar, "val") and invar in var_to_tensor:
+                            t = var_to_tensor[invar]
+                            if t.data is not None:
+                                mask_t = t
+                            else:
+                                logits_t = t
+                    if mask_t is not None and mask_t.data is not None and logits_t is not None:
+                        mask_arr = mask_t.data.astype(bool)
+                        bias_arr = np.where(mask_arr, 0.0, false_val).astype(np.float32)
+                        out_var = eqn.outvars[0]
+                        out_aval = out_var.aval
+                        out_shape = Shape.from_tuple(tuple(out_aval.shape))
+                        bias_t = g.add_tensor(
+                            name=f"mask_bias_{len(g.tensors)}",
+                            shape=Shape.from_tuple(tuple(bias_arr.shape)),
+                            dtype=DType.F32,
+                            storage=StorageClass.CONSTANT,
+                            data=bias_arr,
+                            role="constant",
+                        )
+                        g.parameters.append(bias_t.id)
+                        out_t = g.add_tensor(
+                            name=f"masked_attn_{out_var}",
+                            shape=out_shape,
+                            dtype=_jax_dtype_to_dtype(out_aval.dtype),
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.ADD,
+                            inputs=[logits_t.id, bias_t.id],
+                            outputs=[out_t.id],
+                            name=f"masked_attn_{out_var}",
+                        )
+                        var_to_tensor[out_var] = out_t
+                        continue
+
+                # Standard inlining for composite subgraphs
+                inner_var_map: dict[Any, Tensor] = {}
+                inner_padded_vars: dict[Any, tuple[Any, tuple[int, int, int, int]]] = {}
+                outer_in_map: dict[Any, Any] = {}
                 for inner_in, outer_in in zip(inner_jaxpr.invars, eqn.invars):
+                    outer_in_map[inner_in] = outer_in
                     if hasattr(outer_in, "val"):
                         np_val = np.asarray(outer_in.val)
+                        if np_val.dtype == np.float64:
+                            np_val = np_val.astype(np.float32)
                         c_t = g.add_tensor(
                             name=f"lit_{len(g.tensors)}",
                             shape=Shape.from_tuple(tuple(np_val.shape)),
@@ -88,27 +183,80 @@ def _import_equations(
                         )
                         g.parameters.append(c_t.id)
                         inner_var_map[inner_in] = c_t
-                    elif outer_in in var_to_tensor:
+                    elif not hasattr(outer_in, "val") and outer_in in var_to_tensor:
                         inner_var_map[inner_in] = var_to_tensor[outer_in]
+                    if not hasattr(outer_in, "val") and outer_in in padded_vars:
+                        inner_padded_vars[inner_in] = padded_vars[outer_in]
 
-                _import_equations(inner_jaxpr.eqns, g, inner_var_map)
+                _import_equations(inner_jaxpr.eqns, g, inner_var_map, inner_padded_vars)
 
                 # Map inner outvars to outer outvars
                 for inner_out, outer_out in zip(inner_jaxpr.outvars, eqn.outvars):
                     if inner_out in inner_var_map:
                         var_to_tensor[outer_out] = inner_var_map[inner_out]
+                    if not hasattr(inner_out, "val") and inner_out in inner_padded_vars:
+                        in_orig, p_cfg = inner_padded_vars[inner_out]
+                        padded_vars[outer_out] = (outer_in_map.get(in_orig, in_orig), p_cfg)
                 continue
 
         # Handle identity primitives like stop_gradient, copy
         if prim_name in ("stop_gradient", "copy"):
             in_var = eqn.invars[0]
             out_var = eqn.outvars[0]
-            if in_var in var_to_tensor:
+            if not hasattr(in_var, "val") and in_var in var_to_tensor:
                 var_to_tensor[out_var] = var_to_tensor[in_var]
+            if not hasattr(in_var, "val") and in_var in padded_vars:
+                padded_vars[out_var] = padded_vars[in_var]
             continue
 
+        # Handle compile-time constant folding for static sub-expressions (e.g., masks, iota, shapes)
+        all_const = True
+        const_inputs = []
+        for in_var in eqn.invars:
+            if hasattr(in_var, "val"):
+                const_inputs.append(np.asarray(in_var.val))
+            elif (
+                not hasattr(in_var, "val")
+                and in_var in var_to_tensor
+                and var_to_tensor[in_var].data is not None
+            ):
+                const_inputs.append(var_to_tensor[in_var].data)
+            else:
+                all_const = False
+                break
+
+        if all_const:
+            try:
+                eval_res = eqn.primitive.bind(*const_inputs, **eqn.params)
+                if not isinstance(eval_res, (list, tuple)):
+                    eval_res = [eval_res]
+                for out_var, res_val in zip(eqn.outvars, eval_res):
+                    np_val = np.asarray(res_val)
+                    if np_val.dtype == np.float64:
+                        np_val = np_val.astype(np.float32)
+                    c_t = g.add_tensor(
+                        name=f"const_{len(g.tensors)}",
+                        shape=Shape.from_tuple(tuple(np_val.shape)),
+                        dtype=_jax_dtype_to_dtype(np_val.dtype),
+                        storage=StorageClass.CONSTANT,
+                        data=np_val,
+                    )
+                    g.parameters.append(c_t.id)
+                    var_to_tensor[out_var] = c_t
+                continue
+            except Exception:  # noqa: BLE001, S110
+                pass
+
         opcode = JAX_PRIMITIVE_MAP.get(prim_name)
-        if opcode is None:
+        if opcode is None and prim_name not in (
+            "gather",
+            "select_n",
+            "conv_general_dilated",
+            "pad",
+            "reduce_window_max",
+            "reduce_window_sum",
+            "erfc",
+        ):
             raise NotImplementedError(
                 f"Unsupported JAX primitive: '{prim_name}'. No Canonical IR lowering registered."
             )
@@ -381,13 +529,24 @@ def _import_equations(
                 continue
 
         if prim_name == "conv_general_dilated":
-            lhs_t = g.get_tensor(in_tids[0])
-            rhs_t = g.get_tensor(in_tids[1])
+            lhs_in_var = eqn.invars[0]
             params_dict = eqn.params
             window_strides = params_dict.get("window_strides", (1, 1))
-            padding = params_dict.get("padding", ((0, 0), (0, 0)))
+            padding = list(params_dict.get("padding", ((0, 0), (0, 0))))
             rhs_dilation = params_dict.get("rhs_dilation", (1, 1))
             feature_group_count = params_dict.get("feature_group_count", 1)
+
+            if not hasattr(lhs_in_var, "val") and lhs_in_var in padded_vars:
+                orig_in_var, (p_top, p_bot, p_left, p_right) = padded_vars[lhs_in_var]
+                lhs_t = var_to_tensor[orig_in_var]
+                padding = [
+                    (int(padding[0][0]) + p_top, int(padding[0][1]) + p_bot),
+                    (int(padding[1][0]) + p_left, int(padding[1][1]) + p_right),
+                ]
+            else:
+                lhs_t = g.get_tensor(in_tids[0])
+
+            rhs_t = g.get_tensor(in_tids[1])
 
             def _dim_val(d):
                 return d.value if isinstance(d, StaticDim) else int(d)
@@ -486,6 +645,210 @@ def _import_equations(
                 )
             continue
 
+        if prim_name == "gather":
+            # JAX gather(table, indices) -> Canonical IR OpCode.EMBEDDING
+            table_t = var_to_tensor[eqn.invars[0]]
+            indices_t = var_to_tensor[eqn.invars[1]]
+            g.add_op(
+                opcode=OpCode.EMBEDDING,
+                inputs=[table_t.id, indices_t.id],
+                outputs=[out_t.id],
+                attributes={"dim": 0},
+                name=f"embed_{out_var}",
+            )
+            continue
+
+        if prim_name == "select_n":
+            # select_n(cond, false_branch, true_branch)
+            # In attention masking: cond is constant boolean mask, false_branch is constant -1e10, true_branch is dynamic logits
+            cond_t = var_to_tensor.get(eqn.invars[0])
+            false_t = var_to_tensor.get(eqn.invars[1])
+            true_t = var_to_tensor.get(eqn.invars[2])
+
+            if (
+                cond_t is not None
+                and cond_t.data is not None
+                and false_t is not None
+                and false_t.data is not None
+                and true_t is not None
+            ):
+                # Lower to additive attention bias: true_t + where(cond, 0.0, false_val)
+                cond_arr = cond_t.data.astype(bool)
+                false_val = float(
+                    false_t.data.item() if false_t.data.ndim == 0 else false_t.data.flatten()[0]
+                )
+                bias_arr = np.where(cond_arr, 0.0, false_val).astype(np.float32)
+
+                bias_t = g.add_tensor(
+                    name=f"mask_bias_{len(g.tensors)}",
+                    shape=Shape.from_tuple(tuple(bias_arr.shape)),
+                    dtype=DType.F32,
+                    storage=StorageClass.CONSTANT,
+                    data=bias_arr,
+                    role="constant",
+                )
+                g.parameters.append(bias_t.id)
+                g.add_op(
+                    opcode=OpCode.ADD,
+                    inputs=[true_t.id, bias_t.id],
+                    outputs=[out_t.id],
+                    name=f"masked_attn_{out_var}",
+                )
+                continue
+
+        if prim_name in ("reduce_window_max", "reduce_window_sum"):
+            in_var_0 = eqn.invars[0]
+            params_dict = eqn.params
+            window_dimensions = params_dict.get("window_dimensions", (1, 1, 1, 1))
+            window_strides = params_dict.get("window_strides", (1, 1, 1, 1))
+            padding = list(params_dict.get("padding", ((0, 0), (0, 0), (0, 0), (0, 0))))
+
+            def _dim_val(d):
+                return d.value if isinstance(d, StaticDim) else int(d)
+
+            if not hasattr(in_var_0, "val") and in_var_0 in padded_vars:
+                orig_in_var, (p_top, p_bot, p_left, p_right) = padded_vars[in_var_0]
+                in_t = var_to_tensor[orig_in_var]
+                p_h = int(padding[1][0]) + p_top if len(padding) > 1 else p_top
+                p_w = int(padding[2][0]) + p_left if len(padding) > 2 else p_left
+            else:
+                in_t = g.get_tensor(in_tids[0])
+                p_h = int(padding[1][0]) if len(padding) > 1 else 0
+                p_w = int(padding[2][0]) if len(padding) > 2 else 0
+
+            lhs_dims = [_dim_val(d) for d in in_t.shape.dims]
+            if len(lhs_dims) == 4:
+                lhs_nchw_shape = (lhs_dims[0], lhs_dims[3], lhs_dims[1], lhs_dims[2])
+                lhs_nchw_t = g.add_tensor(
+                    name=f"nchw_in_{out_var}",
+                    shape=Shape.from_tuple(lhs_nchw_shape),
+                    dtype=in_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.PERMUTE,
+                    inputs=[in_t.id],
+                    outputs=[lhs_nchw_t.id],
+                    attributes={"axes": (0, 3, 1, 2)},
+                    name=f"perm_in_{out_var}",
+                )
+                pool_in_id = lhs_nchw_t.id
+
+                out_dims = [_dim_val(d) for d in out_t.shape.dims]
+                out_nchw_shape = (out_dims[0], out_dims[3], out_dims[1], out_dims[2])
+                out_nchw_t = g.add_tensor(
+                    name=f"nchw_pool_{out_var}",
+                    shape=Shape.from_tuple(out_nchw_shape),
+                    dtype=out_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                pool_opcode = (
+                    OpCode.MAX_POOL2D if prim_name == "reduce_window_max" else OpCode.AVG_POOL2D
+                )
+                k_h = int(window_dimensions[1])
+                k_w = int(window_dimensions[2])
+                s_h = int(window_strides[1])
+                s_w = int(window_strides[2])
+
+                pool_attrs = {
+                    "ksize_h": k_h,
+                    "ksize_w": k_w,
+                    "stride_h": s_h,
+                    "stride_w": s_w,
+                    "pad_h": p_h,
+                    "pad_w": p_w,
+                }
+                g.add_op(
+                    opcode=pool_opcode,
+                    inputs=[pool_in_id],
+                    outputs=[out_nchw_t.id],
+                    attributes=pool_attrs,
+                    name=f"pool_{out_var}",
+                )
+                g.add_op(
+                    opcode=OpCode.PERMUTE,
+                    inputs=[out_nchw_t.id],
+                    outputs=[out_t.id],
+                    attributes={"axes": (0, 2, 3, 1)},
+                    name=f"perm_out_{out_var}",
+                )
+            else:
+                pool_opcode = (
+                    OpCode.MAX_POOL2D if prim_name == "reduce_window_max" else OpCode.AVG_POOL2D
+                )
+                g.add_op(
+                    opcode=pool_opcode,
+                    inputs=[in_t.id],
+                    outputs=[out_t.id],
+                    attributes=dict(eqn.params),
+                    name=f"pool_{out_var}",
+                )
+            continue
+
+        if prim_name == "pad":
+            in_var = eqn.invars[0]
+            out_var = eqn.outvars[0]
+            padding_config = eqn.params.get("padding_config", ())
+            is_zero_pad = all(
+                int(c[0]) == 0 and int(c[1]) == 0 and int(c[2]) == 0 for c in padding_config
+            )
+            if is_zero_pad:
+                if not hasattr(in_var, "val") and in_var in var_to_tensor:
+                    var_to_tensor[out_var] = var_to_tensor[in_var]
+                continue
+
+            if len(padding_config) == 4:
+                p_top = int(padding_config[1][0])
+                p_bot = int(padding_config[1][1])
+                p_left = int(padding_config[2][0])
+                p_right = int(padding_config[2][1])
+                padded_vars[out_var] = (in_var, (p_top, p_bot, p_left, p_right))
+                if not hasattr(in_var, "val") and in_var in var_to_tensor:
+                    var_to_tensor[out_var] = var_to_tensor[in_var]
+                continue
+
+            in_t = g.get_tensor(in_tids[0])
+            g.add_op(
+                opcode=OpCode.PAD,
+                inputs=[in_t.id],
+                outputs=[out_t.id],
+                attributes=dict(eqn.params),
+                name=f"pad_{out_var}",
+            )
+            continue
+
+        if prim_name == "erfc":
+            # erfc(x) = 1.0 - erf(x)
+            in_t = g.get_tensor(in_tids[0])
+            one_t = g.add_tensor(
+                name=f"one_{len(g.tensors)}",
+                shape=Shape.from_tuple(()),
+                dtype=DType.F32,
+                storage=StorageClass.CONSTANT,
+                data=np.array(1.0, dtype=np.float32),
+                role="constant",
+            )
+            g.parameters.append(one_t.id)
+            erf_t = g.add_tensor(
+                name=f"erf_{out_var}",
+                shape=in_t.shape,
+                dtype=in_t.dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.GELU,
+                inputs=[in_t.id],
+                outputs=[erf_t.id],
+                name=f"erf_{out_var}",
+            )
+            g.add_op(
+                opcode=OpCode.SUB,
+                inputs=[one_t.id, erf_t.id],
+                outputs=[out_t.id],
+                name=f"erfc_{out_var}",
+            )
+            continue
+
         g.add_op(
             opcode=opcode,
             inputs=in_tids,
@@ -513,7 +876,7 @@ def import_jaxpr(
     for c_var, c_val in zip(jaxpr.constvars, consts):
         np_arr = np.asarray(c_val)
         t = g.add_tensor(
-            name=f"const_{c_var}",
+            name=f"const_{len(g.tensors)}",
             shape=Shape.from_tuple(tuple(np_arr.shape)),
             dtype=_jax_dtype_to_dtype(np_arr.dtype),
             storage=StorageClass.CONSTANT,

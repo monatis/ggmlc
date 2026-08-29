@@ -706,6 +706,183 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                     else attributes["dilation_h"]
                 )
             attributes["groups"] = groups
+            # Check if this is a grouped convolution that needs decomposition (1 < groups < in_channels)
+            in_t_candidate = node_to_tensor[node.args[0]]
+            w_t_candidate = node_to_tensor[node.args[1]]
+            bias_t_candidate = (
+                node_to_tensor.get(node.args[2])
+                if len(node.args) > 2
+                and isinstance(node.args[2], Node)
+                and node.args[2] in node_to_tensor
+                else None
+            )
+            if (
+                groups is not None
+                and int(groups) > 1
+                and len(in_t_candidate.shape.dims) == 4
+                and len(w_t_candidate.shape.dims) == 4
+                and in_t_candidate.shape.dims[1].is_static()
+                and w_t_candidate.shape.dims[0].is_static()
+            ):
+                cin_val = int(in_t_candidate.shape.dims[1].evaluate({}))
+                cout_val = int(w_t_candidate.shape.dims[0].evaluate({}))
+                g_val = int(groups)
+                if 1 < g_val < cin_val:
+                    cin_per_group = cin_val // g_val
+                    cout_per_group = cout_val // g_val
+                    out_group_tensors = []
+                    for g_idx in range(g_val):
+                        # Slice input channels
+                        x_g_out = g.add_tensor(
+                            name=f"{node.name}_x_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    in_t_candidate.shape.dims[0],
+                                    StaticDim(cin_per_group),
+                                    in_t_candidate.shape.dims[2],
+                                    in_t_candidate.shape.dims[3],
+                                ]
+                            ),
+                            dtype=in_t_candidate.dtype,
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.SLICE,
+                            inputs=[in_t_candidate.id],
+                            outputs=[x_g_out.id],
+                            attributes={
+                                "dim": 1,
+                                "start": g_idx * cin_per_group,
+                                "end": (g_idx + 1) * cin_per_group,
+                                "step": 1,
+                            },
+                            name=f"{node.name}_x_slice_g{g_idx}",
+                        )
+                        # Slice weight filters
+                        w_g_data = (
+                            w_t_candidate.data[
+                                g_idx * cout_per_group : (g_idx + 1) * cout_per_group
+                            ]
+                            if w_t_candidate.data is not None
+                            else None
+                        )
+                        w_g_out = g.add_tensor(
+                            name=f"{w_t_candidate.name}_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    StaticDim(cout_per_group),
+                                    w_t_candidate.shape.dims[1],
+                                    w_t_candidate.shape.dims[2],
+                                    w_t_candidate.shape.dims[3],
+                                ]
+                            ),
+                            dtype=w_t_candidate.dtype,
+                            storage=StorageClass.CONSTANT
+                            if w_t_candidate.storage == StorageClass.CONSTANT
+                            else StorageClass.ACTIVATION,
+                            data=w_g_data,
+                            role="parameter",
+                        )
+                        if (
+                            w_t_candidate.storage == StorageClass.CONSTANT
+                            and w_t_candidate.data is not None
+                        ):
+                            g.parameters.append(w_g_out.id)
+                            w_slice_id = w_g_out.id
+                        else:
+                            g.add_op(
+                                opcode=OpCode.SLICE,
+                                inputs=[w_t_candidate.id],
+                                outputs=[w_g_out.id],
+                                attributes={
+                                    "dim": 0,
+                                    "start": g_idx * cout_per_group,
+                                    "end": (g_idx + 1) * cout_per_group,
+                                    "step": 1,
+                                },
+                                name=f"{node.name}_w_slice_g{g_idx}",
+                            )
+                            w_slice_id = w_g_out.id
+
+                        conv_g_inputs = [x_g_out.id, w_slice_id]
+                        if bias_t_candidate is not None:
+                            if (
+                                bias_t_candidate.storage == StorageClass.CONSTANT
+                                and bias_t_candidate.data is not None
+                            ):
+                                bias_g_t = g.add_tensor(
+                                    name=f"{bias_t_candidate.name}_g{g_idx}",
+                                    shape=Shape([StaticDim(cout_per_group)]),
+                                    dtype=bias_t_candidate.dtype,
+                                    storage=StorageClass.CONSTANT,
+                                    data=bias_t_candidate.data[
+                                        g_idx * cout_per_group : (g_idx + 1) * cout_per_group
+                                    ],
+                                    role="parameter",
+                                )
+                                g.parameters.append(bias_g_t.id)
+                                conv_g_inputs.append(bias_g_t.id)
+                            else:
+                                bias_g_t = g.add_tensor(
+                                    name=f"{bias_t_candidate.name}_g{g_idx}",
+                                    shape=Shape([StaticDim(cout_per_group)]),
+                                    dtype=bias_t_candidate.dtype,
+                                    storage=StorageClass.ACTIVATION,
+                                )
+                                g.add_op(
+                                    opcode=OpCode.SLICE,
+                                    inputs=[bias_t_candidate.id],
+                                    outputs=[bias_g_t.id],
+                                    attributes={
+                                        "dim": 0,
+                                        "start": g_idx * cout_per_group,
+                                        "end": (g_idx + 1) * cout_per_group,
+                                        "step": 1,
+                                    },
+                                    name=f"{node.name}_bias_slice_g{g_idx}",
+                                )
+                                conv_g_inputs.append(bias_g_t.id)
+
+                        group_conv_attrs = dict(attributes)
+                        group_conv_attrs["groups"] = 1
+                        out_g_t = g.add_tensor(
+                            name=f"{node.name}_conv_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    shape.dims[0],
+                                    StaticDim(cout_per_group),
+                                    shape.dims[2],
+                                    shape.dims[3],
+                                ]
+                            ),
+                            dtype=dtype,
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.CONV2D,
+                            inputs=conv_g_inputs,
+                            outputs=[out_g_t.id],
+                            attributes=group_conv_attrs,
+                            name=f"{node.name}_conv_g{g_idx}",
+                        )
+                        out_group_tensors.append(out_g_t.id)
+
+                    out_t = g.add_tensor(
+                        name=node.name,
+                        shape=shape,
+                        dtype=dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    node_to_tensor[node] = out_t
+                    name_to_tensor[node.name] = out_t
+                    g.add_op(
+                        opcode=OpCode.CONCAT,
+                        inputs=out_group_tensors,
+                        outputs=[out_t.id],
+                        attributes={"dim": 1},
+                        name=node.name,
+                    )
+                    continue
         elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             ksize = node.args[1] if len(node.args) > 1 else [2, 2]

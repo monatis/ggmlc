@@ -6,6 +6,7 @@
 #include <cctype>
 #include <stdexcept>
 #include "ggml.h"
+#include "ggml-impl.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #if defined(GGML_USE_CUDA)
@@ -166,7 +167,11 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
 
             if (ggml_can_repeat(b, a)) return {a, b};
-            if (ggml_can_repeat(a, b)) return {b, a};
+            if (ggml_can_repeat(a, b)) {
+                if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
+                a = ggml_repeat(ctx_, a, b);
+                return {a, b};
+            }
 
             int64_t target_ne[4];
             bool need_repeat_a = false;
@@ -286,28 +291,42 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_MEAN: {
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                const auto& out_ne = concrete_shapes_[out_id];
                 if (g_dim == 1) {
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    t = ggml_mean(ctx_, t);
+                    result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
+                } else if (g_dim >= 2) {
+                    // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
+                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    flat_hw = ggml_cont(ctx_, flat_hw);
+                    struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_mean(ctx_, t);
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else {
                     result = ggml_mean(ctx_, in0);
                 }
-                const auto& out_ne = concrete_shapes_[out_id];
                 result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_SUM:
             case GGML_OP_SUM_ROWS: {
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                const auto& out_ne = concrete_shapes_[out_id];
                 if (g_dim == 1) {
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    t = ggml_sum_rows(ctx_, t);
+                    result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
+                } else if (g_dim >= 2) {
+                    // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
+                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    flat_hw = ggml_cont(ctx_, flat_hw);
+                    struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_sum_rows(ctx_, t);
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else {
                     result = ggml_sum_rows(ctx_, in0);
                 }
-                const auto& out_ne = concrete_shapes_[out_id];
                 result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
@@ -325,8 +344,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             case GGML_OP_UNARY: {
                 struct ggml_tensor* act_in = in0;
-                if (act_in && ggml_nelements(act_in) == 1 && in1 && ggml_nelements(in1) > 1) {
-                    act_in = in1;
+                if (op.inputs.size() > 1) {
+                    uint32_t in0_id = op.inputs[0];
+                    uint32_t in1_id = op.inputs[1];
+                    auto t0_it = model_graph_.tensors.find(in0_id);
+                    auto t1_it = model_graph_.tensors.find(in1_id);
+                    if (t0_it != model_graph_.tensors.end() && t1_it != model_graph_.tensors.end()) {
+                        if (t0_it->second.storage == StorageClass::CONSTANT && t1_it->second.storage != StorageClass::CONSTANT) {
+                            act_in = in1;
+                        } else if (t1_it->second.storage == StorageClass::CONSTANT && t0_it->second.storage != StorageClass::CONSTANT) {
+                            act_in = in0;
+                        } else if (ggml_nelements(in0) == 1 && ggml_nelements(in1) > 1) {
+                            act_in = in1;
+                        }
+                    }
                 }
                 auto it = op.attributes.find("unary_op");
                 int u = (it != op.attributes.end()) ? static_cast<int>(it->second) : 6; // default RELU
@@ -642,6 +673,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     p1 = op.attributes.count("pad_h") ? static_cast<int>(op.attributes.at("pad_h")) : 0;
                 }
                 result = ggml_pool_2d(ctx_, in0, pool_type, k0, k1, s0, s1, static_cast<float>(p0), static_cast<float>(p1));
+                break;
+            }
+            case GGML_OP_PAD: {
+                int p0 = op.attributes.count("pad_w") ? static_cast<int>(op.attributes.at("pad_w")) : 0;
+                int p1 = op.attributes.count("pad_h") ? static_cast<int>(op.attributes.at("pad_h")) : 0;
+                int p2 = op.attributes.count("pad_c") ? static_cast<int>(op.attributes.at("pad_c")) : 0;
+                int p3 = op.attributes.count("pad_n") ? static_cast<int>(op.attributes.at("pad_n")) : 0;
+                result = ggml_pad(ctx_, in0, p0, p1, p2, p3);
                 break;
             }
             case 200: { // GGML_OP_CUSTOM_BIAS_GELU: in0=x, in1=bias

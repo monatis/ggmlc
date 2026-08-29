@@ -351,3 +351,62 @@ def load_efficientnet_model(
     example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
     input_names = ["x"]
     return model, example_input, input_names
+
+
+def load_densenet_model(
+    variant: str = "densenet121",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision DenseNet (densenet121) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "densenet161":
+        model = models.densenet161(weights=models.DenseNet161_Weights.DEFAULT).eval()
+    else:
+        model = models.densenet121(weights=models.DenseNet121_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_regnet_model(
+    variant: str = "regnet_y_400mf",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision RegNet (regnet_y_400mf) model with group convolutions."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "regnet_y_800mf":
+        model = models.regnet_y_800mf(weights=models.RegNet_Y_800MF_Weights.DEFAULT).eval()
+    else:
+        model = models.regnet_y_400mf(weights=models.RegNet_Y_400MF_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_bert_model(
+    seq_len: int = 16,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Hugging Face BERT-base-uncased checkpoint."""
+    from transformers import BertModel
+
+    model = BertModel.from_pretrained("bert-base-uncased").eval()
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
+    example_input = (input_ids,)
+    input_names = ["input_ids"]
+
+    class BertWrapper(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def forward(self, input_ids):
+            out = self.base(input_ids=input_ids)
+            return out.last_hidden_state
+
+    return BertWrapper(model), example_input, input_names

@@ -61,6 +61,7 @@ class GGMLOpCode(IntEnum):
     GGML_OP_CONV_2D = 56
     GGML_OP_CONV_2D_DW = 58
     GGML_OP_POOL_2D = 61
+    GGML_OP_PAD = 64
     GGML_OP_FLASH_ATTN_EXT = 74
     GGML_OP_UNARY = 91
     GGML_OP_GLU = 100
