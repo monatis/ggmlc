@@ -1073,7 +1073,14 @@ def _import_equations(
         if prim_name in ("gt", "ge", "lt", "le", "eq", "ne"):
             in0_t = g.get_tensor(in_tids[0])
             in1_t = g.get_tensor(in_tids[1])
-            if in1_t.data is not None and np.all(in1_t.data == 0) and prim_name == "ne" or in1_t.data is not None and np.all(in1_t.data == 1) and prim_name == "eq":
+            if (
+                in1_t.data is not None
+                and np.all(in1_t.data == 0)
+                and prim_name == "ne"
+                or in1_t.data is not None
+                and np.all(in1_t.data == 1)
+                and prim_name == "eq"
+            ):
                 var_to_tensor[out_var] = in0_t
                 continue
             else:

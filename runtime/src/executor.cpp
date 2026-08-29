@@ -729,6 +729,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     if (b) {
                         result = ggml_add(ctx_, result, b);
                     }
+                } else if (!w && !b) {
+                    result = ggml_norm(ctx_, in0, eps);
+                } else if (!b) {
+                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                    params->eps = eps;
+                    result = ggml_map_custom2(ctx_, in0, w, [](struct ggml_tensor* dst, const struct ggml_tensor* a, const struct ggml_tensor* wt, int ith, int nth, void* userdata) {
+                        ggmlc_compute_forward_layer_norm(dst, a, wt, nullptr, ith, nth, userdata);
+                    }, GGML_N_TASKS_MAX, params);
                 } else {
                     custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
                     struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());

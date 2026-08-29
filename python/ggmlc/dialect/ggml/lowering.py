@@ -436,22 +436,12 @@ def _lower_op(
                 op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
             )
     elif opcode == OpCode.MATMUL:
-        x_t = c_graph.get_tensor(in_ids[0])
-        w_t = c_graph.get_tensor(in_ids[1])
         if "transpose_in1" in op.attributes:
             # In Canonical IR: lhs @ rhs.T (transpose_in1=1) -> GGML mul_mat(rhs, lhs) = lhs @ rhs.T (transpose_in0=0)
             # In Canonical IR: lhs @ rhs (transpose_in1=0) -> GGML mul_mat(rhs.T, lhs) = lhs @ rhs (transpose_in0=1)
             attrs["transpose_in0"] = 0 if op.attributes["transpose_in1"] != 0 else 1
         elif "transpose_in0" in op.attributes:
             attrs["transpose_in0"] = int(op.attributes["transpose_in0"])
-        elif len(w_t.shape.dims) >= 2 and len(x_t.shape.dims) >= 2:
-            contracting_dim = x_t.shape.dims[-1]
-            if w_t.shape.dims[-1] == contracting_dim:
-                attrs["transpose_in0"] = 0
-            else:
-                attrs["transpose_in0"] = 1
-        else:
-            attrs["transpose_in0"] = 1
 
         mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)

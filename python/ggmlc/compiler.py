@@ -81,7 +81,8 @@ def compile(
             raise ValueError("sample_inputs must be provided when compiling a JAX function.")
         inputs_tuple = tuple(sample_inputs) if isinstance(sample_inputs, list) else sample_inputs
         jaxpr = jax.make_jaxpr(model)(*inputs_tuple)
-        canonical_graph = import_jaxpr(jaxpr, graph_name=model_name, **kwargs)
+        import_kwargs = {k: v for k, v in kwargs.items() if k not in ("device", "n_threads")}
+        canonical_graph = import_jaxpr(jaxpr, graph_name=model_name, **import_kwargs)
     else:
         # Fallback PyTorch export attempt
         from ggmlc.frontend.pytorch import export_torch_model
@@ -98,7 +99,9 @@ def compile(
 
     # 2. Run Canonical IR Graph Optimizations
     if enable_optimizations:
-        pipeline = create_standard_optimization_pipeline()
+        pipeline = create_standard_optimization_pipeline(
+            enable_fusion=enable_fusion, options=fusion_options
+        )
         opt_result = pipeline.run(canonical_graph)
         canonical_graph = opt_result.graph
 

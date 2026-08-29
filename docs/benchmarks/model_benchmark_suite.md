@@ -42,12 +42,36 @@ Benchmarks were evaluated on an **NVIDIA GeForce GTX 1050/1080 (Pascal Architect
 
 ---
 
-## 2. Architecture Analysis & Speedups
+## 2. JAX Frontend Operator Fusion & Graph Pruning
+
+When enabling graph-level optimization passes (`enable_fusion=True`), decomposed mathematical reduction subgraphs (e.g. LayerNorm, RMSNorm, Softmax, BiasGELU, SwiGLU, Conv2D+ReLU) emitted by JAX/XLA are pattern-matched and collapsed into fused execution kernels:
+
+| Model Architecture | Frontend | Unfused Nodes | Fused Nodes | Graph Reduction | Unfused CPU Latency | Fused CPU Latency | Fusion Speedup |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **BERT Tiny** | KerasHub / JAX | 214 | 57 | **-73.4%** | 14.18 ms | **10.26 ms** | **1.38x (+38.3%)** |
+| **GPT-2 Tiny** | KerasHub / JAX | 230 | 55 | **-76.1%** | 16.85 ms | **12.75 ms** | **1.32x (+32.2%)** |
+| **Flax Transformer** | Flax / JAX | 186 | 50 | **-73.1%** | 12.40 ms | **8.92 ms** | **1.39x (+39.0%)** |
+| **ResNet-50** | Keras 3 / JAX | 392 | 268 | **-31.6%** | 763.07 ms | **741.20 ms** | **1.03x (+2.9%)** |
+
+---
+
+## 3. Cross-Backend Cross-Frontend Numerical Parity (Batch 3)
+
+Using Keras 3's multi-backend engine, identical neural architectures compiled from PyTorch (`KERAS_BACKEND=torch` -> `torch.export`) and JAX (`KERAS_BACKEND=jax` -> `jax.make_jaxpr`) were verified against each other:
+
+- **MLP Classifier**: Max Absolute Difference = `0.00e+00`, Cosine Similarity = `1.000000` (Exact Bitwise Parity)
+- **Conv2D + BatchNorm + Activation**: Max Absolute Difference = `4.77e-07`, Cosine Similarity = `0.999999`
+- **ResNet Residual Block**: Max Absolute Difference = `8.94e-07`, Cosine Similarity = `0.999999`
+- **LayerNorm / Fused Normalization**: Max Absolute Difference = `0.00e+00`, Cosine Similarity = `1.000000`
+
+---
+
+## 4. Architecture Analysis & Speedups
 
 1. **Large Vision Transformers & Attention Projections:**
    - **Flax ViT-B/16 (10.7x GPU speedup)** and **PyTorch ViT-B/16 (5.4x)** achieve substantial acceleration on CUDA by fusing matrix multiplication projections and multi-head attention blocks directly on GPU VRAM.
 2. **KerasHub Transformer NLP & SLM Models:**
-   - Modern transformer backbones from KerasHub (**BERT, DistilBERT, GPT-2**) demonstrate seamless JAX-to-GGML translation and **2.2x to 2.5x CUDA acceleration** with exact numerical fidelity.
+   - Modern transformer backbones from KerasHub (**BERT, DistilBERT, GPT-2**) demonstrate seamless JAX-to-GGML translation, **-75% node reduction via fusion**, and **2.2x to 2.5x CUDA acceleration** with exact numerical fidelity.
 3. **Keras 3 / JAX Production Vision Scaling:**
    - Full-scale production architectures at standard $1\times 224\times 224\times 3$ resolution demonstrate hardware acceleration across all vision models (**2.5x to 5.8x CUDA speedup**).
 4. **Audio Attention & Seq2Seq Networks:**

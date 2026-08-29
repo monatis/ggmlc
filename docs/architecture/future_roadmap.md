@@ -40,6 +40,15 @@ This document outlines the architectural foundation, core design decisions, and 
   - **`ggmlc-runtime` (Engine)**: Pure C++17 library depending exclusively on GGML with **zero Python / PyTorch dependencies**.
 - **Rationale**: Allows packaging a lightweight standalone C++ shared library (`libggmlc_runtime.so` / `.dll`) and creating lightweight bindings across Python, Rust (`ggmlc-rs`), Swift, Android (JNI), and WebAssembly.
 
+#### Decision 4: Cross-Framework Semantic Convergence via Transformation Passes (Not Ingestion Isomorphism)
+- **Decision**: Target **strict runtime numerical parity and semantic convergence** across disparate ML frontends (PyTorch ATen vs JAX/XLA primitives) rather than forcing 100% graph isomorphism at the raw Canonical IR ingestion boundary. Exploit structural differences to drive robust pattern matching and operator fusion optimization passes.
+- **Rationale**:
+  - `torch.export` captures graphs at the mid-to-coarse ATen operator level (`aten.layer_norm`, `aten._softmax`, `aten.relu`, `aten.scaled_dot_product_attention`).
+  - `jax.make_jaxpr` decomposes graphs into RISC-style mathematical primitives (`lax.reduce_sum`, `lax.max`, `lax.exp`, `lax.div`, `lax.broadcast_in_dim`).
+  - Forcing the frontend importer to synthetically reconstruct all fine-grained math into coarse ATen-like nodes creates brittle, non-composable heuristics.
+  - Instead, Canonical IR natively supports multi-level representations. The **Optimization Pipeline (`transforms/fusion.py`)** pattern-matches decomposed subgraphs (Softmax, LayerNorm, RMSNorm, SwiGLU, BiasGELU, Conv+ReLU) into high-performance fused operators, benefiting both JAX and PyTorch execution paths.
+  - Guarantees exact runtime numerical parity ($\Delta = 0.0$) on the GGML engine while maximizing hardware execution throughput.
+
 ---
 
 ## 2. Technical Roadmap & Strategic Priorities

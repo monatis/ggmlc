@@ -533,6 +533,10 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
+        elif opcode == OpCode.MATMUL:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            attributes["transpose_in0"] = 1
         elif opcode == OpCode.LINEAR:
             if "addmm" in target_str:
                 # aten.addmm.default(bias, input, weight)
@@ -1102,6 +1106,32 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name=node.name,
             )
             continue
+        elif opcode == OpCode.SUB and "rsub" in target_str:
+            # rsub(self, other) computes (other - self)
+            rsub_args = [node.args[1], node.args[0]]
+            for arg_idx, arg in enumerate(rsub_args):
+                if isinstance(arg, Node):
+                    if arg in node_to_tensor:
+                        input_tensor_ids.append(node_to_tensor[arg].id)
+                    else:
+                        raise RuntimeError(f"Referenced node {arg.name} was not imported.")
+                elif isinstance(arg, (int, float, bool)):
+                    c_name = f"const_{node.name}_arg{arg_idx}"
+                    dt = (
+                        DType.F32
+                        if isinstance(arg, float)
+                        else (DType.I64 if isinstance(arg, int) else DType.BOOL)
+                    )
+                    np_val = np.array(arg, dtype=np.float32 if dt == DType.F32 else np.int64)
+                    c_t = g.add_tensor(
+                        name=c_name,
+                        shape=Shape([]),
+                        dtype=dt,
+                        storage=StorageClass.CONSTANT,
+                        data=np_val,
+                    )
+                    g.parameters.append(c_t.id)
+                    input_tensor_ids.append(c_t.id)
         else:
             # Default generic arg parsing
             for arg_idx, arg in enumerate(node.args):
