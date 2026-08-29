@@ -404,7 +404,16 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
                 raw_bytes = arr.tobytes()
                 static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
 
-            # Ensure 4D
+            # Ensure strictly 4D
+            if len(static_shape) > 4:
+                import math
+
+                static_shape = [
+                    static_shape[0],
+                    static_shape[1],
+                    static_shape[2],
+                    math.prod(static_shape[3:]),
+                ]
             while len(static_shape) < 4:
                 static_shape.append(1)
 

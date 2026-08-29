@@ -280,7 +280,7 @@ def _lower_op(
         ggml_dim = R - 1 - dim
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MEAN, in_ids, out_ids, attrs, op.name)
-    elif opcode == OpCode.SUM:
+    elif opcode in (OpCode.SUM, OpCode.AMAX, OpCode.AMIN):
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
         axes = attrs.get("axes", None) or attrs.get("dim", -1)
@@ -525,6 +525,28 @@ def _lower_op(
         ggml_dim = R - 1 - dim if R > 0 else 0
         attrs["ggml_dim"] = int(ggml_dim)
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SLICE:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", attrs.get("axis", 0))
+        start = attrs.get("start", 0)
+        if "start_indices" in attrs:
+            s_indices = attrs["start_indices"]
+            l_indices = attrs.get("limit_indices", [])
+            in_shape = [d.value if isinstance(d, StaticDim) else 1 for d in in_t.shape.dims]
+            for i in range(len(s_indices)):
+                if s_indices[i] > 0 or (
+                    i < len(l_indices) and i < len(in_shape) and l_indices[i] < in_shape[i]
+                ):
+                    dim = i
+                    start = s_indices[i]
+                    break
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim if R > 0 else 0
+        attrs["ggml_dim"] = int(ggml_dim)
+        attrs["start"] = int(start)
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_VIEW, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.PERMUTE:

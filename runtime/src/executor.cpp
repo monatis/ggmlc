@@ -195,6 +195,17 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     b = ggml_repeat(ctx_, b, target_b);
                 }
             }
+            if (a->type != b->type) {
+                if (a->type == GGML_TYPE_I32 && b->type == GGML_TYPE_F32) {
+                    if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
+                    struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, a->ne[0], a->ne[1], a->ne[2], a->ne[3]);
+                    a = ggml_cpy(ctx_, a, target_a);
+                } else if (b->type == GGML_TYPE_I32 && a->type == GGML_TYPE_F32) {
+                    if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
+                    struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, b->ne[0], b->ne[1], b->ne[2], b->ne[3]);
+                    b = ggml_cpy(ctx_, b, target_b);
+                }
+            }
             return {a, b};
         };
 
@@ -222,7 +233,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             case GGML_OP_CPY: {
                 const auto& out_ne = concrete_shapes_[out_id];
                 if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
-                struct ggml_tensor* dst = ggml_new_tensor_4d(ctx_, in0->type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                auto out_type = model_graph_.tensors.at(out_id).type;
+                struct ggml_tensor* dst = ggml_new_tensor_4d(ctx_, out_type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 result = ggml_cpy(ctx_, in0, dst);
                 break;
             }

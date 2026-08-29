@@ -7,7 +7,8 @@ from examples.models.flax_models import (
     FlaxMLPClassifier,
     FlaxResNet,
     FlaxTransformerLayer,
-    FlaxVisionTransformer,
+    FlaxViTB16,
+    load_flax_vit_b16,
 )
 from examples.models.hub_models import (
     load_bert_model,
@@ -33,6 +34,11 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
 )
+from examples.models.kerashub_models import (
+    load_kerashub_bert,
+    load_kerashub_distilbert,
+    load_kerashub_gpt2,
+)
 
 __all__ = [
     "FlaxCausalLM",
@@ -41,12 +47,13 @@ __all__ = [
     "FlaxMLPClassifier",
     "FlaxResNet",
     "FlaxTransformerLayer",
-    "FlaxVisionTransformer",
+    "FlaxViTB16",
     "load_bert_model",
     "load_bge_m3_distill_model",
     "load_convnext_model",
     "load_densenet_model",
     "load_efficientnet_model",
+    "load_flax_vit_b16",
     "load_gpt2_model",
     "load_keras_convnext_tiny",
     "load_keras_densenet121",
@@ -54,6 +61,9 @@ __all__ = [
     "load_keras_mobilenet_v3_large",
     "load_keras_mobilenet_v3_small",
     "load_keras_resnet50",
+    "load_kerashub_bert",
+    "load_kerashub_distilbert",
+    "load_kerashub_gpt2",
     "load_minilm_model",
     "load_mobilenet_v3_model",
     "load_qwen_model",

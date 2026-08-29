@@ -42,6 +42,11 @@ JAX_PRIMITIVE_MAP: dict[str, OpCode] = {
     "reduce_sum": OpCode.SUM,
     "reduce_max": OpCode.AMAX,
     "reduce_min": OpCode.AMIN,
+    "reduce_and": OpCode.AMIN,
+    "reduce_or": OpCode.AMAX,
+    "and": OpCode.MUL,
+    "or": OpCode.MAXIMUM,
+    "not": OpCode.NEG,
     "convert_element_type": OpCode.CAST,
     "squeeze": OpCode.RESHAPE,
     "square": OpCode.POW,
@@ -66,9 +71,17 @@ def _import_equations(
     g: Graph,
     var_to_tensor: dict[Any, Tensor],
     padded_vars: dict[Any, tuple[Any, tuple[int, int, int, int]]] | None = None,
+    gelu_state: dict[str, Any] | None = None,
 ) -> None:
     if padded_vars is None:
         padded_vars = {}
+    if gelu_state is None:
+        gelu_state = {
+            "half_vars": {},
+            "neg_vars": {},
+            "scaled_neg_vars": {},
+            "erfc_vars": {},
+        }
 
     for eqn in eqns:
         prim_name = eqn.primitive.name
@@ -256,6 +269,15 @@ def _import_equations(
             "reduce_window_max",
             "reduce_window_sum",
             "erfc",
+            "dynamic_slice",
+            "gt",
+            "ge",
+            "lt",
+            "le",
+            "eq",
+            "ne",
+            "split",
+            "stack",
         ):
             raise NotImplementedError(
                 f"Unsupported JAX primitive: '{prim_name}'. No Canonical IR lowering registered."
@@ -476,13 +498,78 @@ def _import_equations(
 
                 bmm_attrs = dict(eqn.params)
                 bmm_attrs["transpose_in0"] = 0
-                g.add_op(
-                    opcode=OpCode.MATMUL,
-                    inputs=[lhs_in_id, rhs_in_id],
-                    outputs=[out_t.id],
-                    attributes=bmm_attrs,
-                    name=f"bmm_{out_var}",
-                )
+
+                lhs_dims_val = [_dim_val(lhs_t.shape.dims[i]) for i in target_lhs_perm]
+                rhs_dims_val = [_dim_val(rhs_t.shape.dims[i]) for i in target_rhs_perm]
+                out_dims_val = [_dim_val(d) for d in out_t.shape.dims]
+
+                if len(lhs_dims_val) > 4:
+                    non_one_lhs = [d for d in lhs_dims_val if d != 1]
+                    while len(non_one_lhs) < 4:
+                        non_one_lhs.insert(0, 1)
+                    lhs_4d_t = g.add_tensor(
+                        name=f"lhs4d_{out_var}",
+                        shape=Shape.from_tuple(tuple(non_one_lhs[:4])),
+                        dtype=lhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[lhs_in_id],
+                        outputs=[lhs_4d_t.id],
+                        name=f"reshape_lhs4d_{out_var}",
+                    )
+                    lhs_in_id = lhs_4d_t.id
+
+                if len(rhs_dims_val) > 4:
+                    non_one_rhs = [d for d in rhs_dims_val if d != 1]
+                    while len(non_one_rhs) < 4:
+                        non_one_rhs.insert(0, 1)
+                    rhs_4d_t = g.add_tensor(
+                        name=f"rhs4d_{out_var}",
+                        shape=Shape.from_tuple(tuple(non_one_rhs[:4])),
+                        dtype=rhs_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[rhs_in_id],
+                        outputs=[rhs_4d_t.id],
+                        name=f"reshape_rhs4d_{out_var}",
+                    )
+                    rhs_in_id = rhs_4d_t.id
+
+                if len(out_dims_val) > 4:
+                    non_one_out = [d for d in out_dims_val if d != 1]
+                    while len(non_one_out) < 4:
+                        non_one_out.insert(0, 1)
+                    bmm_4d_t = g.add_tensor(
+                        name=f"bmm4d_{out_var}",
+                        shape=Shape.from_tuple(tuple(non_one_out[:4])),
+                        dtype=out_t.dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.MATMUL,
+                        inputs=[lhs_in_id, rhs_in_id],
+                        outputs=[bmm_4d_t.id],
+                        attributes=bmm_attrs,
+                        name=f"bmm_{out_var}",
+                    )
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[bmm_4d_t.id],
+                        outputs=[out_t.id],
+                        name=f"reshape_out_{out_var}",
+                    )
+                else:
+                    g.add_op(
+                        opcode=OpCode.MATMUL,
+                        inputs=[lhs_in_id, rhs_in_id],
+                        outputs=[out_t.id],
+                        attributes=bmm_attrs,
+                        name=f"bmm_{out_var}",
+                    )
                 continue
 
         # Special handling for broadcast_in_dim
@@ -660,7 +747,6 @@ def _import_equations(
 
         if prim_name == "select_n":
             # select_n(cond, false_branch, true_branch)
-            # In attention masking: cond is constant boolean mask, false_branch is constant -1e10, true_branch is dynamic logits
             cond_t = var_to_tensor.get(eqn.invars[0])
             false_t = var_to_tensor.get(eqn.invars[1])
             true_t = var_to_tensor.get(eqn.invars[2])
@@ -694,6 +780,143 @@ def _import_equations(
                     outputs=[out_t.id],
                     name=f"masked_attn_{out_var}",
                 )
+                continue
+            elif cond_t is not None and cond_t.data is not None:
+                # Static boolean scalar condition: choose branch directly
+                cond_val = bool(
+                    cond_t.data.item() if cond_t.data.ndim == 0 else cond_t.data.flatten()[0]
+                )
+                selected_t = true_t if cond_val else false_t
+                if selected_t is not None:
+                    var_to_tensor[out_var] = selected_t
+                    continue
+            elif cond_t is not None and true_t is not None and false_t is not None:
+                # Dynamic condition: true_t * cond + false_t * (1 - cond)
+                # Cast cond, true_t, false_t to F32 for arithmetic
+                cond_float_t = cond_t
+                if cond_t.dtype != DType.F32:
+                    cond_float_t = g.add_tensor(
+                        name=f"cond_f32_{len(g.tensors)}",
+                        shape=cond_t.shape,
+                        dtype=DType.F32,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.CAST,
+                        inputs=[cond_t.id],
+                        outputs=[cond_float_t.id],
+                        attributes={"dtype": DType.F32},
+                        name=f"cast_cond_{out_var}",
+                    )
+
+                true_float_t = true_t
+                if true_t.dtype != DType.F32:
+                    true_float_t = g.add_tensor(
+                        name=f"true_f32_{len(g.tensors)}",
+                        shape=true_t.shape,
+                        dtype=DType.F32,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.CAST,
+                        inputs=[true_t.id],
+                        outputs=[true_float_t.id],
+                        attributes={"dtype": DType.F32},
+                        name=f"cast_true_{out_var}",
+                    )
+
+                false_float_t = false_t
+                if false_t.dtype != DType.F32:
+                    false_float_t = g.add_tensor(
+                        name=f"false_f32_{len(g.tensors)}",
+                        shape=false_t.shape,
+                        dtype=DType.F32,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.CAST,
+                        inputs=[false_t.id],
+                        outputs=[false_float_t.id],
+                        attributes={"dtype": DType.F32},
+                        name=f"cast_false_{out_var}",
+                    )
+
+                one_t = g.add_tensor(
+                    name=f"one_{len(g.tensors)}",
+                    shape=Shape.from_tuple(()),
+                    dtype=DType.F32,
+                    storage=StorageClass.CONSTANT,
+                    data=np.array(1.0, dtype=np.float32),
+                    role="constant",
+                )
+                g.parameters.append(one_t.id)
+
+                inv_cond_t = g.add_tensor(
+                    name=f"inv_cond_{len(g.tensors)}",
+                    shape=cond_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.SUB,
+                    inputs=[one_t.id, cond_float_t.id],
+                    outputs=[inv_cond_t.id],
+                    name=f"sub_cond_{out_var}",
+                )
+
+                false_term_t = g.add_tensor(
+                    name=f"false_term_{len(g.tensors)}",
+                    shape=out_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.MUL,
+                    inputs=[inv_cond_t.id, false_float_t.id],
+                    outputs=[false_term_t.id],
+                    name=f"mul_false_{out_var}",
+                )
+
+                true_term_t = g.add_tensor(
+                    name=f"true_term_{len(g.tensors)}",
+                    shape=out_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.MUL,
+                    inputs=[cond_float_t.id, true_float_t.id],
+                    outputs=[true_term_t.id],
+                    name=f"mul_true_{out_var}",
+                )
+
+                if out_t.dtype == DType.F32:
+                    g.add_op(
+                        opcode=OpCode.ADD,
+                        inputs=[true_term_t.id, false_term_t.id],
+                        outputs=[out_t.id],
+                        name=f"where_{out_var}",
+                    )
+                else:
+                    sum_f32_t = g.add_tensor(
+                        name=f"sum_f32_{len(g.tensors)}",
+                        shape=out_t.shape,
+                        dtype=DType.F32,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    g.add_op(
+                        opcode=OpCode.ADD,
+                        inputs=[true_term_t.id, false_term_t.id],
+                        outputs=[sum_f32_t.id],
+                        name=f"where_f32_{out_var}",
+                    )
+                    g.add_op(
+                        opcode=OpCode.CAST,
+                        inputs=[sum_f32_t.id],
+                        outputs=[out_t.id],
+                        attributes={"dtype": out_t.dtype},
+                        name=f"where_cast_{out_var}",
+                    )
                 continue
 
         if prim_name in ("reduce_window_max", "reduce_window_sum"):
@@ -817,8 +1040,80 @@ def _import_equations(
             )
             continue
 
+        if prim_name == "neg":
+            gelu_state["neg_vars"][eqn.outvars[0]] = eqn.invars[0]
+
+        if prim_name == "mul" and len(eqn.invars) == 2:
+            v0, v1 = eqn.invars[0], eqn.invars[1]
+            val0 = (
+                v0.val
+                if hasattr(v0, "val")
+                else (
+                    var_to_tensor[v0].data
+                    if v0 in var_to_tensor and var_to_tensor[v0].data is not None
+                    else None
+                )
+            )
+            val1 = (
+                v1.val
+                if hasattr(v1, "val")
+                else (
+                    var_to_tensor[v1].data
+                    if v1 in var_to_tensor and var_to_tensor[v1].data is not None
+                    else None
+                )
+            )
+
+            if val0 is not None and np.allclose(val0, 0.5):
+                gelu_state["half_vars"][eqn.outvars[0]] = v1
+            elif val1 is not None and np.allclose(val1, 0.5):
+                gelu_state["half_vars"][eqn.outvars[0]] = v0
+
+            if (
+                val0 is not None
+                and np.allclose(val0, 0.70710678, atol=1e-4)
+                and not hasattr(v1, "val")
+                and v1 in gelu_state["neg_vars"]
+            ):
+                gelu_state["scaled_neg_vars"][eqn.outvars[0]] = gelu_state["neg_vars"][v1]
+            elif (
+                val1 is not None
+                and np.allclose(val1, 0.70710678, atol=1e-4)
+                and not hasattr(v0, "val")
+                and v0 in gelu_state["neg_vars"]
+            ):
+                gelu_state["scaled_neg_vars"][eqn.outvars[0]] = gelu_state["neg_vars"][v0]
+
+            x_orig = None
+            if (
+                not hasattr(v0, "val")
+                and v0 in gelu_state["erfc_vars"]
+                and not hasattr(v1, "val")
+                and gelu_state["half_vars"].get(v1) == gelu_state["erfc_vars"][v0]
+            ):
+                x_orig = gelu_state["erfc_vars"][v0]
+            elif (
+                not hasattr(v1, "val")
+                and v1 in gelu_state["erfc_vars"]
+                and not hasattr(v0, "val")
+                and gelu_state["half_vars"].get(v0) == gelu_state["erfc_vars"][v1]
+            ):
+                x_orig = gelu_state["erfc_vars"][v1]
+
+            if x_orig is not None and x_orig in var_to_tensor:
+                x_t = var_to_tensor[x_orig]
+                g.add_op(
+                    opcode=OpCode.GELU,
+                    inputs=[x_t.id],
+                    outputs=[out_t.id],
+                    name=f"gelu_{out_var}",
+                )
+                continue
+
         if prim_name == "erfc":
-            # erfc(x) = 1.0 - erf(x)
+            in_var = eqn.invars[0]
+            if not hasattr(in_var, "val") and in_var in gelu_state["scaled_neg_vars"]:
+                gelu_state["erfc_vars"][eqn.outvars[0]] = gelu_state["scaled_neg_vars"][in_var]
             in_t = g.get_tensor(in_tids[0])
             one_t = g.add_tensor(
                 name=f"one_{len(g.tensors)}",
@@ -848,6 +1143,255 @@ def _import_equations(
                 name=f"erfc_{out_var}",
             )
             continue
+
+        if prim_name == "min" and len(in_tids) == 2:
+            in0_t = g.get_tensor(in_tids[0])
+            in1_t = g.get_tensor(in_tids[1])
+            t0_id = in0_t.id
+            t1_id = in1_t.id
+            if in0_t.dtype != DType.F32:
+                c0_t = g.add_tensor(
+                    name=f"cast_min0_{out_var}",
+                    shape=in0_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.CAST,
+                    inputs=[in0_t.id],
+                    outputs=[c0_t.id],
+                    attributes={"dtype": DType.F32},
+                    name=f"cast_min0_{out_var}",
+                )
+                t0_id = c0_t.id
+
+            if in1_t.dtype != DType.F32:
+                c1_t = g.add_tensor(
+                    name=f"cast_min1_{out_var}",
+                    shape=in1_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.CAST,
+                    inputs=[in1_t.id],
+                    outputs=[c1_t.id],
+                    attributes={"dtype": DType.F32},
+                    name=f"cast_min1_{out_var}",
+                )
+                t1_id = c1_t.id
+
+            diff_t = g.add_tensor(
+                name=f"diff_min_{out_var}",
+                shape=out_t.shape,
+                dtype=DType.F32,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.SUB,
+                inputs=[t0_id, t1_id],
+                outputs=[diff_t.id],
+                name=f"diff_min_{out_var}",
+            )
+            relu_t = g.add_tensor(
+                name=f"relu_min_{out_var}",
+                shape=out_t.shape,
+                dtype=DType.F32,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.RELU,
+                inputs=[diff_t.id],
+                outputs=[relu_t.id],
+                name=f"relu_min_{out_var}",
+            )
+            sub_out_id = out_t.id
+            if out_t.dtype != DType.F32:
+                sub_f32_t = g.add_tensor(
+                    name=f"sub_min_f32_{out_var}",
+                    shape=out_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                sub_out_id = sub_f32_t.id
+
+            g.add_op(
+                opcode=OpCode.SUB,
+                inputs=[t0_id, relu_t.id],
+                outputs=[sub_out_id],
+                name=f"sub_min_{out_var}",
+            )
+
+            if out_t.dtype != DType.F32:
+                g.add_op(
+                    opcode=OpCode.CAST,
+                    inputs=[sub_out_id],
+                    outputs=[out_t.id],
+                    attributes={"dtype": out_t.dtype},
+                    name=f"cast_min_out_{out_var}",
+                )
+            continue
+
+        if prim_name == "dynamic_slice":
+            in_t = g.get_tensor(in_tids[0])
+            slice_sizes = eqn.params.get("slice_sizes", ())
+            start_indices = []
+            for v in eqn.invars[1:]:
+                if hasattr(v, "val"):
+                    start_indices.append(int(v.val))
+                elif (
+                    not hasattr(v, "val")
+                    and v in var_to_tensor
+                    and var_to_tensor[v].data is not None
+                ):
+                    start_indices.append(int(var_to_tensor[v].data.item()))
+                else:
+                    start_indices.append(0)
+            limit_indices = [s + sz for s, sz in zip(start_indices, slice_sizes)]
+            attrs = {
+                "start_indices": list(start_indices),
+                "limit_indices": list(limit_indices),
+                "strides": [1] * len(start_indices),
+            }
+            g.add_op(
+                opcode=OpCode.SLICE,
+                inputs=[in_t.id],
+                outputs=[out_t.id],
+                attributes=attrs,
+                name=f"dynamic_slice_{out_var}",
+            )
+            continue
+
+        if prim_name in ("gt", "ge", "lt", "le", "eq", "ne"):
+            in_t = g.get_tensor(in_tids[0])
+            clamp_in = in_t.id
+            if in_t.dtype != DType.F32:
+                cast_t = g.add_tensor(
+                    name=f"cast_cmp_in_{out_var}",
+                    shape=in_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.CAST,
+                    inputs=[in_t.id],
+                    outputs=[cast_t.id],
+                    attributes={"dtype": DType.F32},
+                    name=f"cast_cmp_in_{out_var}",
+                )
+                clamp_in = cast_t.id
+
+            clamp_out = out_t.id
+            if out_t.dtype != DType.F32:
+                clamp_f32 = g.add_tensor(
+                    name=f"clamp_f32_{out_var}",
+                    shape=out_t.shape,
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
+                clamp_out = clamp_f32.id
+
+            min_val = 0.0
+            max_val = 0.0 if prim_name in ("lt", "le") else 1.0
+            g.add_op(
+                opcode=OpCode.CLAMP,
+                inputs=[clamp_in],
+                outputs=[clamp_out],
+                attributes={"min": min_val, "max": max_val},
+                name=f"{prim_name}_{out_var}",
+            )
+
+            if out_t.dtype != DType.F32:
+                g.add_op(
+                    opcode=OpCode.CAST,
+                    inputs=[clamp_out],
+                    outputs=[out_t.id],
+                    attributes={"dtype": out_t.dtype},
+                    name=f"cast_cmp_out_{out_var}",
+                )
+            continue
+
+        if prim_name == "split":
+            in_t = g.get_tensor(in_tids[0])
+            axis = int(eqn.params.get("axis", eqn.params.get("dimension", -1)))
+            sizes = tuple(eqn.params.get("sizes", ()))
+            in_shape_dims = [_dim_val(d) for d in in_t.shape.dims]
+            if axis < 0:
+                axis += len(in_shape_dims)
+
+            offset = 0
+            for i, out_v in enumerate(eqn.outvars):
+                split_sz = (
+                    int(sizes[i]) if i < len(sizes) else (in_shape_dims[axis] // len(eqn.outvars))
+                )
+                out_av = out_v.aval
+                out_sh = Shape.from_tuple(tuple(out_av.shape))
+                out_sp_t = g.add_tensor(
+                    name=f"split_{out_v}",
+                    shape=out_sh,
+                    dtype=_jax_dtype_to_dtype(out_av.dtype),
+                    storage=StorageClass.ACTIVATION,
+                )
+                var_to_tensor[out_v] = out_sp_t
+
+                start_indices = [0] * len(in_shape_dims)
+                limit_indices = list(in_shape_dims)
+                start_indices[axis] = offset
+                limit_indices[axis] = offset + split_sz
+
+                g.add_op(
+                    opcode=OpCode.SLICE,
+                    inputs=[in_t.id],
+                    outputs=[out_sp_t.id],
+                    attributes={
+                        "start_indices": start_indices,
+                        "limit_indices": limit_indices,
+                        "strides": [1] * len(start_indices),
+                    },
+                    name=f"split_slice_{out_v}",
+                )
+                offset += split_sz
+            continue
+
+        if prim_name == "stack":
+            dim = int(eqn.params.get("dimension", eqn.params.get("axis", 0)))
+            out_shape_dims = [_dim_val(d) for d in out_t.shape.dims]
+            if dim < 0:
+                dim += len(out_shape_dims)
+
+            expanded_ids = []
+            for i, in_tid in enumerate(in_tids):
+                in_t = g.get_tensor(in_tid)
+                in_dims = [_dim_val(d) for d in in_t.shape.dims]
+                exp_dims = list(in_dims)
+                exp_dims.insert(dim, 1)
+                exp_t = g.add_tensor(
+                    name=f"exp_stack_{i}_{out_var}",
+                    shape=Shape.from_tuple(tuple(exp_dims)),
+                    dtype=in_t.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_op(
+                    opcode=OpCode.RESHAPE,
+                    inputs=[in_t.id],
+                    outputs=[exp_t.id],
+                    name=f"reshape_stack_{i}_{out_var}",
+                )
+                expanded_ids.append(exp_t.id)
+
+            g.add_op(
+                opcode=OpCode.CONCAT,
+                inputs=expanded_ids,
+                outputs=[out_t.id],
+                attributes={"dim": dim},
+                name=f"stack_concat_{out_var}",
+            )
+            continue
+
+        if opcode is None:
+            raise NotImplementedError(
+                f"Unhandled primitive '{prim_name}' reached op emission with None opcode."
+            )
 
         g.add_op(
             opcode=opcode,

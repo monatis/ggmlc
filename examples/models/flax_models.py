@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 class FlaxMLPClassifier(nn.Module):
@@ -217,3 +222,101 @@ class FlaxCausalLM(nn.Module):
         x = nn.LayerNorm(name="ln_f")(x)
         logits = nn.Dense(self.vocab_size, name="lm_head")(x)
         return logits
+
+
+class FlaxSelfAttention(nn.Module):
+    """Multi-Head Self-Attention for Vision Transformer in Flax."""
+
+    num_heads: int = 12
+    qkv_features: int = 768
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        B, S, C = x.shape
+        head_dim = self.qkv_features // self.num_heads
+        qkv = nn.Dense(self.qkv_features * 3, use_bias=True, name="qkv")(x)
+        qkv = qkv.reshape((B, S, 3, self.num_heads, head_dim))
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        q = jnp.transpose(q, (0, 2, 1, 3))
+        k = jnp.transpose(k, (0, 2, 1, 3))
+        v = jnp.transpose(v, (0, 2, 1, 3))
+        scale = 1.0 / np.sqrt(head_dim)
+        scores = jnp.matmul(q, jnp.swapaxes(k, -1, -2)) * scale
+        weights = jax.nn.softmax(scores, axis=-1)
+        out = jnp.matmul(weights, v)
+        out = jnp.transpose(out, (0, 2, 1, 3)).reshape((B, S, C))
+        return nn.Dense(C, use_bias=True, name="proj")(out)
+
+
+class FlaxViTBlock(nn.Module):
+    """Transformer Encoder Block in Flax."""
+
+    dim: int = 768
+    num_heads: int = 12
+    mlp_ratio: float = 4.0
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        h = nn.LayerNorm(name="ln1")(x)
+        h = FlaxSelfAttention(num_heads=self.num_heads, qkv_features=self.dim, name="attn")(h)
+        x = x + h
+        h = nn.LayerNorm(name="ln2")(x)
+        mlp_hidden = int(self.dim * self.mlp_ratio)
+        h = nn.Dense(mlp_hidden, name="mlp_dense1")(h)
+        h = jax.nn.gelu(h, approximate=False)
+        h = nn.Dense(self.dim, name="mlp_dense2")(h)
+        return x + h
+
+
+class FlaxViTB16(nn.Module):
+    """Full Vision Transformer ViT-B/16 (224x224, 12 layers, 768 dim, 86M params) in Flax."""
+
+    num_classes: int = 1000
+    num_layers: int = 12
+    dim: int = 768
+    num_heads: int = 12
+    patch_size: int = 16
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        B, H, W, _C = x.shape
+        P = self.patch_size
+        patches = nn.Conv(
+            self.dim, kernel_size=(P, P), strides=(P, P), padding="VALID", name="patch_embed"
+        )(x)
+        num_patches = (H // P) * (W // P)
+        patches = patches.reshape((B, num_patches, self.dim))
+
+        cls_token = self.param("cls", nn.initializers.zeros, (1, 1, self.dim))
+        cls_tokens = jnp.tile(cls_token, (B, 1, 1))
+        x = jnp.concatenate([cls_tokens, patches], axis=1)
+
+        pos_embed = self.param(
+            "pos_embed", nn.initializers.normal(0.02), (1, num_patches + 1, self.dim)
+        )
+        x = x + pos_embed
+
+        for i in range(self.num_layers):
+            x = FlaxViTBlock(dim=self.dim, num_heads=self.num_heads, name=f"block_{i}")(x)
+
+        x = nn.LayerNorm(name="norm")(x)
+        cls_out = x[:, 0]
+        return nn.Dense(self.num_classes, name="head")(cls_out)
+
+
+def load_flax_vit_b16(
+    resolution: int = 224,
+    num_layers: int = 12,
+    dim: int = 768,
+    num_heads: int = 12,
+) -> tuple[Callable[..., Any], tuple[np.ndarray, ...], list[str], str]:
+    """Loads full production Vision Transformer ViT-B/16 in Flax Linen."""
+    model = FlaxViTB16(num_layers=num_layers, dim=dim, num_heads=num_heads)
+    x = np.random.randn(1, resolution, resolution, 3).astype(np.float32)
+    key = jax.random.PRNGKey(42)
+    params = model.init(key, jnp.asarray(x))
+
+    def forward(inp: np.ndarray) -> np.ndarray:
+        return model.apply(params, inp)
+
+    return forward, (x,), ["x"], "jax"

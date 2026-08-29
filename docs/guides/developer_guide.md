@@ -165,6 +165,9 @@ pytest tests/e2e/test_jax_flax_models.py -v
 # Run Keras 3 JAX Production Model E2E tests (ResNet-50, MobileNetV3, ConvNeXt, DenseNet, EfficientNet)
 pytest tests/e2e/test_keras_models.py -v
 
+# Run KerasHub & Flax ViT E2E tests (BERT, DistilBERT, GPT-2, Flax ViT-B/16)
+pytest tests/e2e/test_kerashub_models.py -v
+
 # Run Vision Transformer (ViT) tests
 pytest tests/e2e/test_vit_models.py -v
 

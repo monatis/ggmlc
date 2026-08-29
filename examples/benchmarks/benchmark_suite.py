@@ -36,6 +36,7 @@ from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 
+from examples.models.flax_models import load_flax_vit_b16
 from examples.models.hub_models import (
     load_bert_model,
     load_bge_m3_distill_model,
@@ -59,6 +60,11 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_large,
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
+)
+from examples.models.kerashub_models import (
+    load_kerashub_bert,
+    load_kerashub_distilbert,
+    load_kerashub_gpt2,
 )
 
 
@@ -384,6 +390,10 @@ class BenchmarkSuite:
             ("keras_convnext_tiny", "JAX-Vision", load_keras_convnext_tiny),
             ("keras_densenet121", "JAX-Vision", load_keras_densenet121),
             ("keras_efficientnet_b0", "JAX-Vision", load_keras_efficientnet_b0),
+            ("flax_vit_b16", "JAX-Vision", load_flax_vit_b16),
+            ("kerashub_bert", "JAX-NLP", load_kerashub_bert),
+            ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
+            ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
         ]
 
         for name, category, loader in all_models:
