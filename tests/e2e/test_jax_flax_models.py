@@ -100,3 +100,113 @@ def test_flax_full_multi_layer_transformer_e2e():
 
     cos_sim = cosine_similarity(ref_out, out_np)
     assert cos_sim > 0.999, f"Flax Full Transformer cosine similarity too low: {cos_sim}"
+
+
+def test_flax_resnet_e2e():
+    from examples.models.flax_models import FlaxResNet
+
+    model = FlaxResNet(num_classes=10)
+    x_sample = jnp.ones((1, 16, 16, 3), dtype=jnp.float32)
+    params = model.init(jax.random.PRNGKey(0), x_sample)
+
+    def forward(x):
+        return model.apply(params, x)
+
+    ref_out = np.asarray(forward(x_sample))
+    x_np = np.asarray(x_sample)
+    gguf_bytes = ggmlc.compile(
+        model=forward,
+        sample_inputs=(x_np,),
+        model_name="flax_resnet",
+    )
+
+    runner = ggmlc.load(gguf_bytes)
+    out_np = runner(x=x_np)
+
+    res = check_numerical_accuracy(ref_out, out_np, atol=1e-4, rtol=1e-3)
+    cos_sim = cosine_similarity(ref_out, out_np)
+    assert res.passed, f"Flax ResNet parity failed: {res.message}, cos_sim={cos_sim}"
+    assert cos_sim > 0.9999
+
+
+def test_flax_vision_transformer_e2e():
+    from examples.models.flax_models import FlaxVisionTransformer
+
+    model = FlaxVisionTransformer(
+        patch_size=4, embed_dim=64, num_heads=4, mlp_dim=128, num_classes=10
+    )
+    x_sample = jnp.ones((1, 16, 16, 3), dtype=jnp.float32)
+    params = model.init(jax.random.PRNGKey(42), x_sample)
+
+    def forward(x):
+        return model.apply(params, x)
+
+    ref_out = np.asarray(forward(x_sample))
+    x_np = np.asarray(x_sample)
+    gguf_bytes = ggmlc.compile(
+        model=forward,
+        sample_inputs=(x_np,),
+        model_name="flax_vit",
+    )
+
+    runner = ggmlc.load(gguf_bytes)
+    out_np = runner(x=x_np)
+
+    res = check_numerical_accuracy(ref_out, out_np, atol=1e-4, rtol=1e-3)
+    cos_sim = cosine_similarity(ref_out, out_np)
+    assert res.passed, f"Flax ViT parity failed: {res.message}, cos_sim={cos_sim}"
+    assert cos_sim > 0.9999
+
+
+def test_flax_convnext_e2e():
+    from examples.models.flax_models import FlaxConvNeXt
+
+    model = FlaxConvNeXt(num_classes=10)
+    x_sample = jnp.ones((1, 32, 32, 3), dtype=jnp.float32)
+    params = model.init(jax.random.PRNGKey(42), x_sample)
+
+    def forward(x):
+        return model.apply(params, x)
+
+    ref_out = np.asarray(forward(x_sample))
+    x_np = np.asarray(x_sample)
+    gguf_bytes = ggmlc.compile(
+        model=forward,
+        sample_inputs=(x_np,),
+        model_name="flax_convnext",
+    )
+
+    runner = ggmlc.load(gguf_bytes)
+    out_np = runner(x=x_np).reshape(ref_out.shape)
+
+    res = check_numerical_accuracy(ref_out, out_np, atol=1e-4, rtol=1e-3)
+    cos_sim = cosine_similarity(ref_out, out_np)
+    assert res.passed, f"Flax ConvNeXt parity failed: {res.message}, cos_sim={cos_sim}"
+    assert cos_sim > 0.9999
+
+
+def test_flax_causal_lm_e2e():
+    from examples.models.flax_models import FlaxCausalLM
+
+    model = FlaxCausalLM(vocab_size=100, embed_dim=64, num_heads=4, num_layers=2)
+    tokens = jnp.array([[1, 5, 12, 42, 7, 3, 9, 15]], dtype=jnp.int32)
+    params = model.init(jax.random.PRNGKey(42), tokens)
+
+    def forward(t):
+        return model.apply(params, t)
+
+    ref_out = np.asarray(forward(tokens))
+    tokens_np = np.asarray(tokens)
+    gguf_bytes = ggmlc.compile(
+        model=forward,
+        sample_inputs=(tokens_np,),
+        model_name="flax_causal_lm",
+    )
+
+    runner = ggmlc.load(gguf_bytes)
+    out_np = runner(x=tokens_np).reshape(ref_out.shape)
+
+    res = check_numerical_accuracy(ref_out, out_np, atol=1e-4, rtol=1e-3)
+    cos_sim = cosine_similarity(ref_out, out_np)
+    assert res.passed, f"Flax Causal LM parity failed: {res.message}, cos_sim={cos_sim}"
+    assert cos_sim > 0.9999

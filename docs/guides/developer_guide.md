@@ -148,28 +148,73 @@ def test_my_new_op_numerical_parity():
 
 ## 5. Development & Testing Commands
 
+### Python Testing
+```powershell
+# Run entire test suite (Windows)
+pytest -v --ignore=tests/numerical/test_ggml_ops_differential.py
+
+# Run E2E full model tests (ResNet, MiniLM, GPT-2, Qwen, BGE-M3)
+pytest tests/e2e/test_full_models.py -v
+
+# Run Native CUDA E2E tests on GPU
+pytest tests/e2e/test_cuda_models.py -v
+
+# Run JAX / Flax E2E tests
+pytest tests/e2e/test_jax_flax_models.py -v
+
+# Run Keras 3 JAX Production Model E2E tests (ResNet-50, MobileNetV3, ConvNeXt, DenseNet, EfficientNet)
+pytest tests/e2e/test_keras_models.py -v
+
+# Run KerasHub & Flax ViT E2E tests (BERT, DistilBERT, GPT-2, Flax ViT-B/16)
+pytest tests/e2e/test_kerashub_models.py -v
+
+# Run Vision Transformer (ViT) tests
+pytest tests/e2e/test_vit_models.py -v
+
+# Run Audio Seq2Seq (Whisper) tests
+pytest tests/e2e/test_audio_models.py -v
+```
+
+### Multi-Framework Ingestion with Keras 3
+Keras 3 provides a unified API whose models can be executed and traced across multiple backends:
+- **JAX Backend (`KERAS_BACKEND=jax`)**: Traced directly via `jax.make_jaxpr` to standard `ClosedJaxpr` expressions and ingested by `ggmlc.frontend.jax`.
+- **PyTorch Backend (`KERAS_BACKEND=torch`)**: Pure PyTorch modules exported via `torch.export` to Canonical IR.
+- **Cross-Framework Verification**: Compile identical architectures from both backends to verify bit-level IR canonicalization and numerical parity.
+
+### Continuous Benchmarking
+```powershell
+# Run benchmark suite on CPU
+python examples/benchmarks/benchmark_suite.py --backend cpu --runs 3 --warmup 1 --output-md benchmark_cpu_report.md
+
+# Run benchmark suite on NVIDIA CUDA GPU
+python examples/benchmarks/benchmark_suite.py --backend cuda --runs 3 --warmup 1 --output-md benchmark_cuda_report.md
+```
+
+### Native Runtime Compilation
+
+#### Windows Native CUDA Build (MSVC 2022 + CUDA 11.3 + Ninja)
+```powershell
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3"
+$env:NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+
+cmake -B build-win-cuda -G Ninja -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win-cuda -j8
+```
+
+#### Windows Native CPU Build (MSVC Visual Studio)
+```powershell
+cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DGGMLC_ENABLE_CUDA=OFF -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win --config Release -j8
+```
+
+#### Linux / WSL 2 Build (CPU & CUDA GPU)
 ```bash
-# Run entire test suite
-pytest -v
+wsl cmake -B build -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+wsl cmake --build build -j8
+```
 
-# Run only quantization tests
-pytest tests/quantization/ -v
-
-# Run only optimization pass tests
-pytest tests/transforms/ -v
-
-# Run CUDA differential parity tests
-pytest tests/numerical/test_cuda_parity.py -v
-
-# Format and lint code
-ruff check python/ tests/
+### Code Quality & Linting
+```powershell
 ruff format python/ tests/
-
-# Build C++ CPU runtime (Windows MSVC)
-cmake -B build-win
-cmake --build build-win --target _runtime --config Release
-
-# Build C++ CUDA GPU runtime (Linux / WSL 2)
-cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
-cmake --build build-wsl --target _runtime -j$(nproc)
+ruff check --fix python/ tests/
 ```

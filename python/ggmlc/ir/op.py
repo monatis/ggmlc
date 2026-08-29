@@ -33,6 +33,9 @@ class OpCode(Enum):
     BIAS_GELU = "bias_gelu"
     SILU = "silu"
     SIGMOID = "sigmoid"
+    HARDSWISH = "hardswish"
+    HARDSIGMOID = "hardsigmoid"
+    CLAMP = "clamp"
     SOFTMAX = "softmax"
     RMS_NORM = "rms_norm"
     LAYER_NORM = "layer_norm"
@@ -63,6 +66,7 @@ class OpCode(Enum):
     SQUEEZE = "squeeze"
     UNSQUEEZE = "unsqueeze"
     ARANGE = "arange"
+    PAD = "pad"
 
     # Custom/Special
     SWIGLU = "swiglu"

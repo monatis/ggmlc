@@ -20,9 +20,9 @@ def dtype_to_ggml_type(dtype: DType) -> GGMLType:
         DType.F16: GGMLType.GGML_TYPE_F16,
         DType.BF16: GGMLType.GGML_TYPE_BF16,
         DType.I32: GGMLType.GGML_TYPE_I32,
-        DType.I64: GGMLType.GGML_TYPE_I64,
-        DType.I8: GGMLType.GGML_TYPE_I8,
-        DType.BOOL: GGMLType.GGML_TYPE_I8,
+        DType.I64: GGMLType.GGML_TYPE_I32,
+        DType.I8: GGMLType.GGML_TYPE_F32,
+        DType.BOOL: GGMLType.GGML_TYPE_F32,
         DType.Q4_0: GGMLType.GGML_TYPE_Q4_0,
         DType.Q4_K: GGMLType.GGML_TYPE_Q4_K,
         DType.Q8_0: GGMLType.GGML_TYPE_Q8_0,
@@ -34,13 +34,27 @@ def canonical_shape_to_ggml_ne(shape: Shape) -> tuple[Dim, Dim, Dim, Dim]:
     """Converts a Canonical N-D shape [d0, d1, ..., d_k] (row-major) to GGML 4D ne[0..3].
 
     GGML ne[0] is the innermost dimension (contiguous, stride 1), so we reverse the dimensions.
-    Unused dimensions are set to StaticDim(1).
+    For N > 4, outer dimensions are folded into ne[3]. Unused dimensions are set to StaticDim(1).
     """
     dims = list(shape.dims)
-    rev_dims = dims[::-1]
-    while len(rev_dims) < 4:
-        rev_dims.append(StaticDim(1))
-    return (rev_dims[0], rev_dims[1], rev_dims[2], rev_dims[3])
+    if len(dims) == 0:
+        return (StaticDim(1), StaticDim(1), StaticDim(1), StaticDim(1))
+    elif len(dims) == 1:
+        return (dims[0], StaticDim(1), StaticDim(1), StaticDim(1))
+    elif len(dims) == 2:
+        return (dims[1], dims[0], StaticDim(1), StaticDim(1))
+    elif len(dims) == 3:
+        return (dims[2], dims[1], dims[0], StaticDim(1))
+    elif len(dims) == 4:
+        return (dims[3], dims[2], dims[1], dims[0])
+    else:
+        outer_val = 1
+        for d in dims[:-3]:
+            if isinstance(d, StaticDim):
+                outer_val *= d.value
+            else:
+                outer_val *= int(d)
+        return (dims[-1], dims[-2], dims[-3], StaticDim(outer_val))
 
 
 @dataclass
@@ -106,6 +120,30 @@ def lower_to_ggml(
     if enable_fusion:
         fuse_operations(canonical_graph, fusion_options)
 
+    # 1.0 Ensure integer indices for EMBEDDING are I32
+    for op in canonical_graph.nodes:
+        if op.opcode == OpCode.EMBEDDING and len(op.inputs) > 1:
+            idx_id = op.inputs[1]
+            idx_t = canonical_graph.get_tensor(idx_id)
+            if idx_t and idx_t.dtype in (DType.I32, DType.I64):
+                idx_t.dtype = DType.I32
+                if idx_t.data is not None:
+                    idx_t.data = np.ascontiguousarray(idx_t.data.astype(np.int32))
+
+        # Promote mixed int/float operands in binary arithmetic to F32
+        if op.opcode in (OpCode.ADD, OpCode.SUB, OpCode.MUL, OpCode.DIV) and len(op.inputs) >= 2:
+            t0 = canonical_graph.get_tensor(op.inputs[0])
+            t1 = canonical_graph.get_tensor(op.inputs[1])
+            if t0 and t1:
+                if t0.dtype == DType.F32 and t1.dtype in (DType.I32, DType.I64, DType.BOOL):
+                    t1.dtype = DType.F32
+                    if t1.data is not None:
+                        t1.data = np.ascontiguousarray(t1.data.astype(np.float32))
+                elif t1.dtype == DType.F32 and t0.dtype in (DType.I32, DType.I64, DType.BOOL):
+                    t0.dtype = DType.F32
+                    if t0.data is not None:
+                        t0.data = np.ascontiguousarray(t0.data.astype(np.float32))
+
     ggml_graph = GGMLExecutionGraph(
         name=canonical_graph.name,
         inputs=list(canonical_graph.inputs),
@@ -120,14 +158,30 @@ def lower_to_ggml(
         for d in ne:
             symbols |= d.free_symbols()
 
+        t_data = t.data
+        if t_data is not None and not isinstance(t_data, np.ndarray):
+            t_data = np.asarray(t_data)
+        t_type = dtype_to_ggml_type(t.dtype)
+        if t_data is not None:
+            if t_type == GGMLType.GGML_TYPE_I32 and t_data.dtype == np.int64:
+                t_data = np.ascontiguousarray(t_data.astype(np.int32))
+            elif t_type == GGMLType.GGML_TYPE_F32 and t_data.dtype in (
+                np.bool_,
+                np.int8,
+                np.uint8,
+                np.int32,
+                np.int64,
+            ):
+                t_data = np.ascontiguousarray(t_data.astype(np.float32))
+
         ggml_tensor = GGMLTensorDef(
             id=t.id,
             name=t.name,
-            ggml_type=dtype_to_ggml_type(t.dtype),
+            ggml_type=t_type,
             ne=ne,
             storage=t.storage,
             producer_id=t.producer_id,
-            data=t.data,
+            data=t_data,
             role=t.role,
             original_rank=len(t.shape.dims),
         )
@@ -226,7 +280,7 @@ def _lower_op(
         ggml_dim = R - 1 - dim
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MEAN, in_ids, out_ids, attrs, op.name)
-    elif opcode == OpCode.SUM:
+    elif opcode in (OpCode.SUM, OpCode.AMAX, OpCode.AMIN):
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
         axes = attrs.get("axes", None) or attrs.get("dim", -1)
@@ -243,6 +297,8 @@ def _lower_op(
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LOG:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_LOG, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SOFTMAX:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SOFT_MAX, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RELU, OpCode.MAXIMUM):
         return GGMLOpDef(
             op.id,
@@ -268,6 +324,42 @@ def _lower_op(
             in_ids,
             out_ids,
             {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SILU)},
+            op.name,
+        )
+    elif opcode == OpCode.SIGMOID:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SIGMOID)},
+            op.name,
+        )
+    elif opcode == OpCode.HARDSWISH:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_HARDSWISH)},
+            op.name,
+        )
+    elif opcode == OpCode.HARDSIGMOID:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_HARDSIGMOID)},
+            op.name,
+        )
+    elif opcode == OpCode.CLAMP:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_CLAMP,
+            in_ids,
+            out_ids,
+            attrs,
             op.name,
         )
     elif opcode == OpCode.TANH:
@@ -344,18 +436,12 @@ def _lower_op(
                 op.id, GGMLOpCode.GGML_OP_MUL_MAT, [w_id, x_id], out_ids, attrs, op.name
             )
     elif opcode == OpCode.MATMUL:
-        x_t = c_graph.get_tensor(in_ids[0])
-        w_t = c_graph.get_tensor(in_ids[1])
-        if "transpose_in0" in op.attributes:
+        if "transpose_in1" in op.attributes:
+            # In Canonical IR: lhs @ rhs.T (transpose_in1=1) -> GGML mul_mat(rhs, lhs) = lhs @ rhs.T (transpose_in0=0)
+            # In Canonical IR: lhs @ rhs (transpose_in1=0) -> GGML mul_mat(rhs.T, lhs) = lhs @ rhs (transpose_in0=1)
+            attrs["transpose_in0"] = 0 if op.attributes["transpose_in1"] != 0 else 1
+        elif "transpose_in0" in op.attributes:
             attrs["transpose_in0"] = int(op.attributes["transpose_in0"])
-        elif len(w_t.shape.dims) >= 2 and len(x_t.shape.dims) >= 2:
-            contracting_dim = x_t.shape.dims[-1]
-            if w_t.shape.dims[-1] != contracting_dim and w_t.shape.dims[-2] == contracting_dim:
-                attrs["transpose_in0"] = 1
-            else:
-                attrs["transpose_in0"] = 0
-        else:
-            attrs["transpose_in0"] = 0
 
         mapped_inputs = [in_ids[1], in_ids[0]]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
@@ -367,26 +453,118 @@ def _lower_op(
         mapped_inputs = [w_id, x_id]
         if len(in_ids) > 2:
             mapped_inputs.append(in_ids[2])
+        if "stride" in attrs:
+            stride = attrs["stride"]
+            if isinstance(stride, (list, tuple)):
+                attrs["stride_h"] = int(stride[0])
+                attrs["stride_w"] = int(stride[1]) if len(stride) > 1 else int(stride[0])
+            else:
+                attrs["stride_h"] = int(stride)
+                attrs["stride_w"] = int(stride)
+        if "padding" in attrs:
+            padding = attrs["padding"]
+            if isinstance(padding, (list, tuple)):
+                attrs["pad_h"] = int(padding[0])
+                attrs["pad_w"] = int(padding[1]) if len(padding) > 1 else int(padding[0])
+            else:
+                attrs["pad_h"] = int(padding)
+                attrs["pad_w"] = int(padding)
+        if "dilation" in attrs:
+            dilation = attrs["dilation"]
+            if isinstance(dilation, (list, tuple)):
+                attrs["dilation_h"] = int(dilation[0])
+                attrs["dilation_w"] = int(dilation[1]) if len(dilation) > 1 else int(dilation[0])
+            else:
+                attrs["dilation_h"] = int(dilation)
+                attrs["dilation_w"] = int(dilation)
+        groups = attrs.get("groups")
+        groups = int(groups) if groups is not None else 1
+        w_t = c_graph.get_tensor(w_id)
+        x_t = c_graph.get_tensor(x_id)
+        is_dw = False
+        if (
+            len(w_t.shape.dims) == 4
+            and len(x_t.shape.dims) == 4
+            and w_t.shape.dims[1].is_static()
+            and x_t.shape.dims[1].is_static()
+        ):
+            w_ic = w_t.shape.dims[1].evaluate({})
+            x_ic = x_t.shape.dims[1].evaluate({})
+            if w_ic == 1 and (groups > 1 or x_ic > 1):
+                is_dw = True
+        elif groups > 1:
+            is_dw = True
+
+        if is_dw:
+            return GGMLOpDef(
+                op.id, GGMLOpCode.GGML_OP_CONV_2D_DW, mapped_inputs, out_ids, attrs, op.name
+            )
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONV_2D, mapped_inputs, out_ids, attrs, op.name)
     elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
+        attrs["is_max"] = 1 if opcode == OpCode.MAX_POOL2D else 0
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ADAPTIVE_AVG_POOL2D:
         attrs["is_adaptive"] = 1
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_POOL_2D, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.PAD:
+        attrs["pad_w"] = int(attrs.get("pad_w", 0))
+        attrs["pad_h"] = int(attrs.get("pad_h", 0))
+        attrs["pad_c"] = int(attrs.get("pad_c", 0))
+        attrs["pad_n"] = int(attrs.get("pad_n", 0))
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_PAD, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.CONCAT:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", attrs.get("axis", attrs.get("dimension", 0)))
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim if R > 0 else 0
+        attrs["ggml_dim"] = int(ggml_dim)
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONCAT, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.SLICE:
+        in_t = c_graph.get_tensor(in_ids[0])
+        R = len(in_t.shape.dims)
+        dim = attrs.get("dim", attrs.get("axis", 0))
+        start = attrs.get("start", 0)
+        if "start_indices" in attrs:
+            s_indices = attrs["start_indices"]
+            l_indices = attrs.get("limit_indices", [])
+            in_shape = [d.value if isinstance(d, StaticDim) else 1 for d in in_t.shape.dims]
+            for i in range(len(s_indices)):
+                if s_indices[i] > 0 or (
+                    i < len(l_indices) and i < len(in_shape) and l_indices[i] < in_shape[i]
+                ):
+                    dim = i
+                    start = s_indices[i]
+                    break
+        if dim < 0:
+            dim += R
+        ggml_dim = R - 1 - dim if R > 0 else 0
+        attrs["ggml_dim"] = int(ggml_dim)
+        attrs["start"] = int(start)
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_VIEW, in_ids, out_ids, attrs, op.name)
     elif opcode in (OpCode.RESHAPE, OpCode.VIEW, OpCode.SQUEEZE, OpCode.UNSQUEEZE):
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.PERMUTE:
         in_t = c_graph.get_tensor(in_ids[0])
         R = len(in_t.shape.dims)
-        p = attrs.get("dims") or attrs.get("permutation") or list(range(R))
+        p = attrs.get("axes") or attrs.get("dims") or attrs.get("permutation") or list(range(R))
         if isinstance(p, tuple):
             p = list(p)
         axes = [0, 1, 2, 3]
-        for i in range(4):
-            if i < R:
-                axes[i] = R - 1 - p.index(R - 1 - i)
-            else:
-                axes[i] = i
+        if R == 5 and p[0] == 0:
+            # 5D tensor with batch=1: fold leading batch dimension into 4D permute
+            q = [x - 1 for x in p[1:]]
+            for i in range(4):
+                axes[i] = 3 - q.index(3 - i)
+        else:
+            for i in range(4):
+                if i < R:
+                    axes[i] = R - 1 - p.index(R - 1 - i)
+                else:
+                    axes[i] = i
+        if any(ax >= 4 for ax in axes):
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
         attrs["axis0"] = axes[0]
         attrs["axis1"] = axes[1]
         attrs["axis2"] = axes[2]
@@ -407,9 +585,11 @@ def _lower_op(
         axes = [0, 1, 2, 3]
         for i in range(4):
             if i < R:
-                axes[i] = R - 1 - p.index(R - 1 - i)
+                axes[i] = R - 1 - p[R - 1 - i]
             else:
                 axes[i] = i
+        if R > 4 or any(ax >= 4 for ax in axes):
+            return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_RESHAPE, in_ids, out_ids, attrs, op.name)
         attrs["axis0"] = axes[0]
         attrs["axis1"] = axes[1]
         attrs["axis2"] = axes[2]

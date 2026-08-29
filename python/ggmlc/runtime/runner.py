@@ -111,6 +111,9 @@ class ModelRunner:
         Returns:
             Computed output numpy array (if single output) or dict of outputs.
         """
+        if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
+            kwargs = args[0]
+            args = ()
         threads = n_threads if n_threads is not None else self.n_threads
         symbol_env: dict[str, int] = {}
         if symbols:
@@ -148,7 +151,10 @@ class ModelRunner:
                     f"Too many positional arguments: model expects {len(self.inputs)} inputs, got {len(args)}"
                 )
             tid = self.inputs[idx]
+            t = self.tensor_info.get(tid)
             arr_c = np.ascontiguousarray(arr)
+            if t and t.type == int(GGMLType.GGML_TYPE_I32) and arr_c.dtype == np.int64:
+                arr_c = arr_c.astype(np.int32)
             self.executor.set_input_by_id(tid, arr_c)
 
         # 3. Bind keyword inputs
@@ -156,9 +162,15 @@ class ModelRunner:
             arr_c = np.ascontiguousarray(arr)
             if name in self.input_name_to_id:
                 tid = self.input_name_to_id[name]
+                t = self.tensor_info.get(tid)
+                if t and t.type == int(GGMLType.GGML_TYPE_I32) and arr_c.dtype == np.int64:
+                    arr_c = arr_c.astype(np.int32)
                 self.executor.set_input_by_id(tid, arr_c)
             elif len(self.inputs) == 1 and len(kwargs) == 1:
                 tid = self.inputs[0]
+                t = self.tensor_info.get(tid)
+                if t and t.type == int(GGMLType.GGML_TYPE_I32) and arr_c.dtype == np.int64:
+                    arr_c = arr_c.astype(np.int32)
                 self.executor.set_input_by_id(tid, arr_c)
             else:
                 self.executor.set_input_by_name(name, arr_c)

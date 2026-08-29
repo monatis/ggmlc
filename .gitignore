@@ -1,6 +1,8 @@
 .venv
 build
 build-win
+build-win-cuda
+build_win
 build-wsl
 _build
 .pytest_cache
@@ -16,3 +18,6 @@ scratch/
 *.dist-info
 dist
 .ruff_cache
+benchmark*.md
+benchmark*.json
+project.md

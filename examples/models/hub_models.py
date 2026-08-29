@@ -218,3 +218,195 @@ def load_bge_m3_distill_model(
             return out.last_hidden_state
 
     return BGEM3Wrapper(model), example_input, input_names
+
+
+def load_mobilenet_v3_model(
+    variant: str = "small",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision MobileNetV3 checkpoint (small or large)."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "large":
+        model = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT).eval()
+    else:
+        model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_ssdlite320_mobilenet_v3_model() -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision SSDLite320-MobileNetV3 object detection backbone + head checkpoint."""
+    from torchvision import models
+
+    model = models.detection.ssdlite320_mobilenet_v3_large(
+        weights=models.detection.SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+    ).eval()
+    example_input = (torch.randn(1, 3, 320, 320, dtype=torch.float32),)
+    input_names = ["images"]
+
+    class SSDLitePredictor(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.backbone = base.backbone
+            self.head = base.head
+
+        def forward(self, images):
+            features = self.backbone(images)
+            feature_list = list(features.values())
+            head_outputs = self.head(feature_list)
+            return head_outputs["bbox_regression"], head_outputs["cls_logits"]
+
+    return SSDLitePredictor(model), example_input, input_names
+
+
+def load_vit_model(
+    variant: str = "b_16",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision Vision Transformer (ViT-B/16 or ViT-L/16) checkpoint."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "l_16":
+        model = models.vit_l_16(weights=models.ViT_L_16_Weights.DEFAULT).eval()
+    else:
+        model = models.vit_b_16(weights=models.ViT_B_16_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_whisper_model(
+    component: str = "encoder",
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads OpenAI Whisper model (tiny variant) encoder or decoder."""
+    from transformers import WhisperForConditionalGeneration
+
+    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny").eval()
+
+    if component == "encoder":
+        enc = model.model.encoder
+        example_input = (torch.randn(1, 80, 3000, dtype=torch.float32),)
+        input_names = ["input_features"]
+        return enc, example_input, input_names
+    elif component == "decoder":
+        dec = model.model.decoder
+
+        class WhisperDecoderPredictor(nn.Module):
+            def __init__(self, dec):
+                super().__init__()
+                self.dec = dec
+
+            def forward(self, input_ids, encoder_hidden_states):
+                h = self.dec.embed_tokens(input_ids) + self.dec.embed_positions(input_ids)
+                h = self.dec.layers[0](h, encoder_hidden_states=encoder_hidden_states)[0]
+                return self.dec.layer_norm(h)
+
+        example_input = (
+            torch.tensor([[50258, 50259, 50359]], dtype=torch.long),
+            torch.randn(1, 1500, 384, dtype=torch.float32),
+        )
+        input_names = ["input_ids", "encoder_hidden_states"]
+        return WhisperDecoderPredictor(dec), example_input, input_names
+    else:
+        raise ValueError(f"Unknown Whisper component: {component}")
+
+
+def load_convnext_model(
+    variant: str = "tiny",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision ConvNeXt (tiny or small) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "small":
+        model = models.convnext_small(weights=models.ConvNeXt_Small_Weights.DEFAULT).eval()
+    else:
+        model = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_efficientnet_model(
+    variant: str = "b0",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision EfficientNet (b0 or v2_s) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "v2_s":
+        model = models.efficientnet_v2_s(weights=models.EfficientNet_V2_S_Weights.DEFAULT).eval()
+    else:
+        model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_densenet_model(
+    variant: str = "densenet121",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision DenseNet (densenet121) model."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "densenet161":
+        model = models.densenet161(weights=models.DenseNet161_Weights.DEFAULT).eval()
+    else:
+        model = models.densenet121(weights=models.DenseNet121_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_regnet_model(
+    variant: str = "regnet_y_400mf",
+    resolution: int = 224,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads torchvision RegNet (regnet_y_400mf) model with group convolutions."""
+    from torchvision import models
+
+    variant = variant.lower()
+    if variant == "regnet_y_800mf":
+        model = models.regnet_y_800mf(weights=models.RegNet_Y_800MF_Weights.DEFAULT).eval()
+    else:
+        model = models.regnet_y_400mf(weights=models.RegNet_Y_400MF_Weights.DEFAULT).eval()
+
+    example_input = (torch.randn(1, 3, resolution, resolution, dtype=torch.float32),)
+    input_names = ["x"]
+    return model, example_input, input_names
+
+
+def load_bert_model(
+    seq_len: int = 16,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Hugging Face BERT-base-uncased checkpoint."""
+    from transformers import BertModel
+
+    model = BertModel.from_pretrained("bert-base-uncased").eval()
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
+    example_input = (input_ids,)
+    input_names = ["input_ids"]
+
+    class BertWrapper(nn.Module):
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def forward(self, input_ids):
+            out = self.base(input_ids=input_ids)
+            return out.last_hidden_state
+
+    return BertWrapper(model), example_input, input_names

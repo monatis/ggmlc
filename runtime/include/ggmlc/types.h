@@ -93,6 +93,7 @@ struct SerializedOp {
     std::vector<uint32_t> inputs;
     std::vector<uint32_t> outputs;
     std::unordered_map<std::string, int64_t> attributes;
+    std::unordered_map<std::string, double> float_attributes;
 };
 
 struct SerializedModelGraph {

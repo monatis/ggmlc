@@ -61,6 +61,12 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
     if options is None:
         options = FusionOptions()
 
+    if options.enable_layer_norm:
+        _fuse_layer_norm_patterns(graph)
+
+    if options.enable_rms_norm:
+        _fuse_rms_norm_patterns(graph)
+
     if options.enable_softmax:
         _fuse_softmax_patterns(graph)
 
@@ -74,6 +80,288 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
         _fuse_bias_gelu_patterns(graph)
 
     return graph
+
+
+def _fuse_layer_norm_patterns(graph: Graph) -> None:
+    """Matches decomposed LayerNorm subgraphs (e.g. from JAX/XLA) and fuses into LAYER_NORM."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.ADD and len(op.inputs) == 2:
+            in0, in1 = op.inputs[0], op.inputs[1]
+            prod0 = producer_map.get(in0)
+            prod1 = producer_map.get(in1)
+
+            mul_x_op = None
+            bias_term_op = None
+            if prod0 and prod0.opcode == OpCode.MUL:
+                mul_x_op = prod0
+                bias_term_op = prod1
+            elif prod1 and prod1.opcode == OpCode.MUL:
+                mul_x_op = prod1
+                bias_term_op = prod0
+
+            if mul_x_op is not None and len(mul_x_op.inputs) == 2:
+                cand_x_0, cand_rstd_gamma_0 = mul_x_op.inputs[0], mul_x_op.inputs[1]
+                prod_rg = producer_map.get(cand_rstd_gamma_0)
+                x_id = cand_x_0
+                if prod_rg is None or prod_rg.opcode != OpCode.MUL:
+                    prod_rg = producer_map.get(cand_x_0)
+                    x_id = cand_rstd_gamma_0
+
+                # If x_id is SUB(x, mean), extract true input x
+                prod_x = producer_map.get(x_id)
+                if prod_x and prod_x.opcode == OpCode.SUB and len(prod_x.inputs) == 2:
+                    x_id = prod_x.inputs[0]
+                    prod_x = producer_map.get(x_id)
+
+                # Ensure x_id is valid and rank <= 3
+                x_t = graph.get_tensor(x_id) if x_id in graph.tensors else None
+                is_valid_x = prod_x is None or prod_x.opcode not in (
+                    OpCode.NEG,
+                    OpCode.DIV,
+                    OpCode.SUM,
+                    OpCode.RSQRT,
+                )
+                is_valid_rank = x_t is not None and len(x_t.shape.dims) <= 3
+
+                if (
+                    is_valid_x
+                    and is_valid_rank
+                    and prod_rg is not None
+                    and prod_rg.opcode == OpCode.MUL
+                ):
+                    rg_in0, rg_in1 = prod_rg.inputs[0], prod_rg.inputs[1]
+                    rsqrt_op = producer_map.get(rg_in0)
+                    gamma_id = rg_in1
+                    if rsqrt_op is None or rsqrt_op.opcode != OpCode.RSQRT:
+                        rsqrt_op = producer_map.get(rg_in1)
+                        gamma_id = rg_in0
+
+                    if rsqrt_op is not None and rsqrt_op.opcode == OpCode.RSQRT:
+                        var_add_op = producer_map.get(rsqrt_op.inputs[0])
+                        eps = 1e-5
+                        if var_add_op and var_add_op.opcode == OpCode.ADD:
+                            for inp_t_id in var_add_op.inputs:
+                                t = graph.get_tensor(inp_t_id)
+                                if (
+                                    t
+                                    and t.storage in (StorageClass.CONSTANT, StorageClass.PARAMETER)
+                                    and t.data is not None
+                                    and float(t.data) > 0.0
+                                ):
+                                    eps = float(t.data)
+
+                        # Verify that var_add_op is a direct reduction of x_id (not across conv/matmul layers)
+                        is_direct_norm = False
+                        curr = rsqrt_op.inputs[0] if rsqrt_op.inputs else None
+                        for _ in range(6):
+                            if curr == x_id:
+                                is_direct_norm = True
+                                break
+                            p = producer_map.get(curr)
+                            if not p or p.opcode in (OpCode.CONV2D, OpCode.MATMUL, OpCode.LINEAR):
+                                break
+                            if x_id in p.inputs:
+                                is_direct_norm = True
+                                break
+                            curr = p.inputs[0] if p.inputs else None
+
+                        if is_direct_norm:
+                            beta_id = None
+                            if bias_term_op and bias_term_op.opcode == OpCode.ADD:
+                                b_in0, b_in1 = bias_term_op.inputs[0], bias_term_op.inputs[1]
+                                t0 = graph.get_tensor(b_in0)
+                                t1 = graph.get_tensor(b_in1)
+                                if t1 and t1.storage in (
+                                    StorageClass.PARAMETER,
+                                    StorageClass.CONSTANT,
+                                ):
+                                    beta_id = b_in1
+                                elif t0 and t0.storage in (
+                                    StorageClass.PARAMETER,
+                                    StorageClass.CONSTANT,
+                                ):
+                                    beta_id = b_in0
+                            elif bias_term_op is None:
+                                # Direct beta parameter (e.g. in Flax)
+                                other_in = in1 if mul_x_op == prod0 else in0
+                                t_other = graph.get_tensor(other_in)
+                                if t_other and t_other.storage in (
+                                    StorageClass.PARAMETER,
+                                    StorageClass.CONSTANT,
+                                ):
+                                    beta_id = other_in
+
+                            # Squeeze/match gamma and beta shapes to 1D if needed
+                            for param_cand_id in (gamma_id, beta_id):
+                                if param_cand_id is not None:
+                                    p_t = graph.get_tensor(param_cand_id)
+                                    if p_t and len(p_t.shape.dims) > 1:
+                                        # Reshape to 1D
+                                        from ggmlc.ir.shape import Shape
+
+                                        last_d = p_t.shape.dims[-1]
+                                        p_t.shape = Shape([last_d])
+                                        if p_t.data is not None:
+                                            p_t.data = p_t.data.reshape(-1)
+
+                            ops_to_remove.add(op.id)
+
+                            ln_inputs = [x_id]
+                            if gamma_id is not None:
+                                ln_inputs.append(gamma_id)
+                            if beta_id is not None:
+                                ln_inputs.append(beta_id)
+
+                            fused_id = graph.new_op_id()
+                            fused_op = Operation(
+                                id=fused_id,
+                                opcode=OpCode.LAYER_NORM,
+                                inputs=ln_inputs,
+                                outputs=list(op.outputs),
+                                attributes={"eps": eps},
+                                name=f"{op.name or 'layer_norm'}_fused",
+                            )
+                            new_nodes.append(fused_op)
+                            continue
+
+        new_nodes.append(op)
+
+    graph.nodes = [n for n in new_nodes if n.id not in ops_to_remove]
+
+
+def _fuse_rms_norm_patterns(graph: Graph) -> None:
+    """Matches decomposed RMSNorm subgraphs (e.g. from JAX/XLA) and fuses into RMS_NORM."""
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.MUL and len(op.inputs) == 2:
+            in0, in1 = op.inputs[0], op.inputs[1]
+            prod0 = producer_map.get(in0)
+            prod1 = producer_map.get(in1)
+
+            # RMSNorm output is MUL(MUL(x, rstd), gamma) or MUL(x, MUL(rstd, gamma))
+            rstd_op = None
+            x_id = None
+            gamma_id = None
+
+            if prod0 and prod0.opcode == OpCode.MUL:
+                # in0 is MUL(x, rstd) or MUL(rstd, gamma)
+                gamma_cand = graph.get_tensor(in1)
+                if gamma_cand and gamma_cand.storage in (
+                    StorageClass.PARAMETER,
+                    StorageClass.CONSTANT,
+                ):
+                    gamma_id = in1
+                    sub_prod0 = producer_map.get(prod0.inputs[0])
+                    sub_prod1 = producer_map.get(prod0.inputs[1])
+                    if sub_prod0 and sub_prod0.opcode == OpCode.RSQRT:
+                        rstd_op = sub_prod0
+                        x_id = prod0.inputs[1]
+                    elif sub_prod1 and sub_prod1.opcode == OpCode.RSQRT:
+                        rstd_op = sub_prod1
+                        x_id = prod0.inputs[0]
+            elif prod1 and prod1.opcode == OpCode.MUL:
+                gamma_cand = graph.get_tensor(in0)
+                if gamma_cand and gamma_cand.storage in (
+                    StorageClass.PARAMETER,
+                    StorageClass.CONSTANT,
+                ):
+                    gamma_id = in0
+                    sub_prod0 = producer_map.get(prod1.inputs[0])
+                    sub_prod1 = producer_map.get(prod1.inputs[1])
+                    if sub_prod0 and sub_prod0.opcode == OpCode.RSQRT:
+                        rstd_op = sub_prod0
+                        x_id = prod1.inputs[1]
+                    elif sub_prod1 and sub_prod1.opcode == OpCode.RSQRT:
+                        rstd_op = sub_prod1
+                        x_id = prod1.inputs[0]
+
+            if rstd_op is not None and x_id is not None and gamma_id is not None:
+                # Ensure tensor is 1D, 2D, or 3D where innermost dimension is ne0
+                x_t = graph.get_tensor(x_id)
+                if x_t and len(x_t.shape.dims) <= 3:
+                    var_add_op = producer_map.get(rstd_op.inputs[0])
+                    eps = 1e-5
+                    if var_add_op and var_add_op.opcode == OpCode.ADD:
+                        for inp_t_id in var_add_op.inputs:
+                            t = graph.get_tensor(inp_t_id)
+                            if (
+                                t
+                                and t.storage in (StorageClass.CONSTANT, StorageClass.PARAMETER)
+                                and t.data is not None
+                                and float(t.data) > 0.0
+                            ):
+                                eps = float(t.data)
+
+                    # Verify that var_add_op is a direct reduction of x_id
+                    is_direct_norm = False
+                    curr = rstd_op.inputs[0] if rstd_op.inputs else None
+                    for _ in range(6):
+                        if curr == x_id:
+                            is_direct_norm = True
+                            break
+                        p = producer_map.get(curr)
+                        if not p or p.opcode in (OpCode.CONV2D, OpCode.MATMUL, OpCode.LINEAR):
+                            break
+                        if x_id in p.inputs:
+                            is_direct_norm = True
+                            break
+                        curr = p.inputs[0] if p.inputs else None
+
+                    if is_direct_norm:
+                        # Reshape gamma to 1D if needed
+                        p_t = graph.get_tensor(gamma_id)
+                        if p_t and len(p_t.shape.dims) > 1:
+                            from ggmlc.ir.shape import Shape
+
+                            last_d = p_t.shape.dims[-1]
+                            p_t.shape = Shape([last_d])
+                            if p_t.data is not None:
+                                p_t.data = p_t.data.reshape(-1)
+
+                        ops_to_remove.add(op.id)
+
+                        fused_id = graph.new_op_id()
+                        fused_op = Operation(
+                            id=fused_id,
+                            opcode=OpCode.RMS_NORM,
+                            inputs=[x_id, gamma_id],
+                            outputs=list(op.outputs),
+                            attributes={"eps": eps},
+                            name=f"{op.name or 'rms_norm'}_fused",
+                        )
+                        new_nodes.append(fused_op)
+                        continue
+
+        new_nodes.append(op)
+
+    graph.nodes = [n for n in new_nodes if n.id not in ops_to_remove]
 
 
 def _fuse_conv2d_relu_patterns(graph: Graph) -> None:
@@ -143,20 +431,30 @@ def _fuse_swiglu_patterns(graph: Graph) -> None:
                 up_id = in0_id
 
             if silu_op is not None and gate_id is not None and up_id is not None:
-                # If the intermediate silu output is only consumed by this mul, we can prune it
-                if consumer_counts.get(silu_op.outputs[0], 0) <= 1:
-                    ops_to_remove.add(silu_op.id)
+                gate_t = graph.get_tensor(gate_id)
+                up_t = graph.get_tensor(up_id)
+                # SwiGLU is only valid for identical shape MLP projections (not Squeeze-and-Excitation or broadcasted gates)
+                if (
+                    gate_t is not None
+                    and up_t is not None
+                    and gate_t.shape == up_t.shape
+                    and (prod0 is None or prod0.opcode != OpCode.SIGMOID)
+                    and (prod1 is None or prod1.opcode != OpCode.SIGMOID)
+                ):
+                    # If the intermediate silu output is only consumed by this mul, we can prune it
+                    if consumer_counts.get(silu_op.outputs[0], 0) <= 1:
+                        ops_to_remove.add(silu_op.id)
 
-                fused_op = Operation(
-                    id=op.id,
-                    opcode=OpCode.SWIGLU,
-                    inputs=[gate_id, up_id],
-                    outputs=list(op.outputs),
-                    attributes=dict(op.attributes),
-                    name=f"{op.name or 'swiglu'}_fused",
-                )
-                new_nodes.append(fused_op)
-                continue
+                    fused_op = Operation(
+                        id=op.id,
+                        opcode=OpCode.SWIGLU,
+                        inputs=[gate_id, up_id],
+                        outputs=list(op.outputs),
+                        attributes=dict(op.attributes),
+                        name=f"{op.name or 'swiglu'}_fused",
+                    )
+                    new_nodes.append(fused_op)
+                    continue
 
         new_nodes.append(op)
 

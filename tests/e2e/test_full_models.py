@@ -8,10 +8,15 @@ from torch import nn
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 from examples.models.hub_models import (
+    load_bert_model,
     load_bge_m3_distill_model,
+    load_convnext_model,
+    load_densenet_model,
+    load_efficientnet_model,
     load_gpt2_model,
     load_minilm_model,
     load_qwen_model,
+    load_regnet_model,
     load_resnet_model,
 )
 
@@ -110,3 +115,33 @@ def test_gpt2_autoregressive_generation_parity():
         max_new_tokens=6,
     )
     assert passed, f"Generation mismatch!\nPyTorch: '{ref_text}'\nggmlc:   '{actual_text}'"
+
+
+def test_convnext_hub_compilation_and_execution():
+    torch.manual_seed(42)
+    model, inputs, names = load_convnext_model("tiny")
+    _verify_full_model_e2e(model, inputs, names, "convnext_tiny", atol=2e-2)
+
+
+def test_efficientnet_hub_compilation_and_execution():
+    torch.manual_seed(42)
+    model, inputs, names = load_efficientnet_model("b0")
+    _verify_full_model_e2e(model, inputs, names, "efficientnet_b0", atol=1e-3)
+
+
+def test_densenet_hub_compilation_and_execution():
+    torch.manual_seed(42)
+    model, inputs, names = load_densenet_model("densenet121")
+    _verify_full_model_e2e(model, inputs, names, "densenet121", atol=1e-3)
+
+
+def test_regnet_hub_compilation_and_execution():
+    torch.manual_seed(42)
+    model, inputs, names = load_regnet_model("regnet_y_400mf")
+    _verify_full_model_e2e(model, inputs, names, "regnet_y_400mf", atol=1e-3)
+
+
+def test_bert_hub_compilation_and_execution():
+    torch.manual_seed(42)
+    model, inputs, names = load_bert_model(seq_len=16)
+    _verify_full_model_e2e(model, inputs, names, "bert_base_uncased", atol=0.05)

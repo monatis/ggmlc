@@ -6,6 +6,7 @@
 #include <cctype>
 #include <stdexcept>
 #include "ggml.h"
+#include "ggml-impl.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 #if defined(GGML_USE_CUDA)
@@ -157,6 +158,21 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             if (!a || !b) return {a, b};
             if (ggml_are_same_shape(a, b)) return {a, b};
 
+            // If a or b is a 1D channel vector matching the other's channel dim (GGML dim 2), reshape to [1, 1, C, 1]
+            if (a->ne[1] == 1 && a->ne[2] == 1 && a->ne[3] == 1 && a->ne[0] == b->ne[2]) {
+                a = ggml_reshape_4d(ctx_, a, 1, 1, a->ne[0], 1);
+            }
+            if (b->ne[1] == 1 && b->ne[2] == 1 && b->ne[3] == 1 && b->ne[0] == a->ne[2]) {
+                b = ggml_reshape_4d(ctx_, b, 1, 1, b->ne[0], 1);
+            }
+
+            if (ggml_can_repeat(b, a)) return {a, b};
+            if (ggml_can_repeat(a, b)) {
+                if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
+                a = ggml_repeat(ctx_, a, b);
+                return {a, b};
+            }
+
             int64_t target_ne[4];
             bool need_repeat_a = false;
             bool need_repeat_b = false;
@@ -168,15 +184,35 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             if (need_repeat_a) {
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
                 struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                a = ggml_repeat(ctx_, a, target_a);
+                if (ggml_can_repeat(a, target_a)) {
+                    a = ggml_repeat(ctx_, a, target_a);
+                }
             }
             if (need_repeat_b) {
                 if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
                 struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, b->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                b = ggml_repeat(ctx_, b, target_b);
+                if (ggml_can_repeat(b, target_b)) {
+                    b = ggml_repeat(ctx_, b, target_b);
+                }
+            }
+            if (a->type != b->type) {
+                if (a->type == GGML_TYPE_I32 && b->type == GGML_TYPE_F32) {
+                    if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
+                    struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, a->ne[0], a->ne[1], a->ne[2], a->ne[3]);
+                    a = ggml_cpy(ctx_, a, target_a);
+                } else if (b->type == GGML_TYPE_I32 && a->type == GGML_TYPE_F32) {
+                    if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
+                    struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, b->ne[0], b->ne[1], b->ne[2], b->ne[3]);
+                    b = ggml_cpy(ctx_, b, target_b);
+                }
             }
             return {a, b};
         };
+
+        if (getenv("GGMLC_DEBUG_OPS")) {
+            fprintf(stderr, "[PREPARING OP %d/%zu: %s (opcode=%d)]\n",
+                op.id, model_graph_.ops.size(), op.name.c_str(), (int)op.opcode);
+        }
 
         switch (op.opcode) {
             case GGML_OP_REPEAT: {
@@ -195,7 +231,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             case GGML_OP_CPY: {
                 const auto& out_ne = concrete_shapes_[out_id];
                 if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
-                struct ggml_tensor* dst = ggml_new_tensor_4d(ctx_, in0->type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                auto out_type = model_graph_.tensors.at(out_id).type;
+                struct ggml_tensor* dst = ggml_new_tensor_4d(ctx_, out_type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 result = ggml_cpy(ctx_, in0, dst);
                 break;
             }
@@ -264,28 +301,42 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_MEAN: {
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                const auto& out_ne = concrete_shapes_[out_id];
                 if (g_dim == 1) {
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    t = ggml_mean(ctx_, t);
+                    result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
+                } else if (g_dim >= 2) {
+                    // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
+                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    flat_hw = ggml_cont(ctx_, flat_hw);
+                    struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_mean(ctx_, t);
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else {
                     result = ggml_mean(ctx_, in0);
                 }
-                const auto& out_ne = concrete_shapes_[out_id];
                 result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_SUM:
             case GGML_OP_SUM_ROWS: {
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
+                const auto& out_ne = concrete_shapes_[out_id];
                 if (g_dim == 1) {
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                    t = ggml_sum_rows(ctx_, t);
+                    result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
+                } else if (g_dim >= 2) {
+                    // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
+                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    flat_hw = ggml_cont(ctx_, flat_hw);
+                    struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_sum_rows(ctx_, t);
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else {
                     result = ggml_sum_rows(ctx_, in0);
                 }
-                const auto& out_ne = concrete_shapes_[out_id];
                 result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
@@ -303,21 +354,43 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             case GGML_OP_UNARY: {
                 struct ggml_tensor* act_in = in0;
-                if (act_in && ggml_nelements(act_in) == 1 && in1 && ggml_nelements(in1) > 1) {
-                    act_in = in1;
+                if (op.inputs.size() > 1) {
+                    uint32_t in0_id = op.inputs[0];
+                    uint32_t in1_id = op.inputs[1];
+                    auto t0_it = model_graph_.tensors.find(in0_id);
+                    auto t1_it = model_graph_.tensors.find(in1_id);
+                    if (t0_it != model_graph_.tensors.end() && t1_it != model_graph_.tensors.end()) {
+                        if (t0_it->second.storage == StorageClass::CONSTANT && t1_it->second.storage != StorageClass::CONSTANT) {
+                            act_in = in1;
+                        } else if (t1_it->second.storage == StorageClass::CONSTANT && t0_it->second.storage != StorageClass::CONSTANT) {
+                            act_in = in0;
+                        } else if (ggml_nelements(in0) == 1 && ggml_nelements(in1) > 1) {
+                            act_in = in1;
+                        }
+                    }
                 }
                 auto it = op.attributes.find("unary_op");
                 int u = (it != op.attributes.end()) ? static_cast<int>(it->second) : 6; // default RELU
                 if (u == 6) { // RELU
                     result = ggml_relu(ctx_, act_in);
+                } else if (u == 7) { // SIGMOID
+                    result = ggml_sigmoid(ctx_, act_in);
                 } else if (u == 8) { // GELU
                     result = ggml_gelu(ctx_, act_in);
                 } else if (u == 10) { // SILU
                     result = ggml_silu(ctx_, act_in);
+                } else if (u == 11) { // HARDSWISH
+                    result = ggml_hardswish(ctx_, act_in);
+                } else if (u == 12) { // HARDSIGMOID
+                    result = ggml_hardsigmoid(ctx_, act_in);
                 } else if (u == 4) { // TANH
                     result = ggml_tanh(ctx_, act_in);
                 } else if (u == 2) { // NEG
                     result = ggml_neg(ctx_, act_in);
+                } else if (u == 0) { // ABS
+                    result = ggml_abs(ctx_, act_in);
+                } else if (u == 13) { // EXP
+                    result = ggml_exp(ctx_, act_in);
                 } else {
                     result = ggml_relu(ctx_, act_in);
                 }
@@ -361,12 +434,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_GET_ROWS: {
+                bool cast_in0_back = false;
+                if (in0 && in0->type == GGML_TYPE_I64) {
+                    in0 = ggml_cast(ctx_, in0, GGML_TYPE_I32);
+                    cast_in0_back = true;
+                }
                 if (in1 && in1->type != GGML_TYPE_I32) {
                     in1 = ggml_cast(ctx_, in1, GGML_TYPE_I32);
                 }
                 int64_t total_indices = in1->ne[0] * in1->ne[1] * in1->ne[2] * in1->ne[3];
                 struct ggml_tensor* in1_flat = ggml_reshape_1d(ctx_, in1, total_indices);
                 struct ggml_tensor* raw_rows = ggml_get_rows(ctx_, in0, in1_flat);
+                if (cast_in0_back) {
+                    raw_rows = ggml_cast(ctx_, raw_rows, GGML_TYPE_I64);
+                }
                 const auto& out_ne = concrete_shapes_[out_id];
                 result = ggml_reshape_4d(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
@@ -388,10 +469,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (mask && !ggml_is_contiguous(mask)) mask = ggml_cont(ctx_, mask);
 
                 float scale = 1.0f / sqrtf((float)q->ne[0]);
+                if (op.float_attributes.count("scale")) {
+                    scale = static_cast<float>(op.float_attributes.at("scale"));
+                } else if (op.attributes.count("scale")) {
+                    scale = static_cast<float>(op.attributes.at("scale"));
+                }
                 bool is_causal = op.attributes.count("is_causal") && op.attributes.at("is_causal") != 0;
 
                 // 1. Q_scaled = Q * scale
-                struct ggml_tensor* q_scaled = ggml_scale(ctx_, q, scale);
+                struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
                 // 2. scores = mul_mat(K, Q_scaled) -> ne = [S_k, S_q, H, B]
                 struct ggml_tensor* scores = ggml_mul_mat(ctx_, k, q_scaled);
                 // 3. causal mask or explicit mask
@@ -408,10 +494,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 // 5. context = mul_mat(transpose(V), probs) -> ne = [D, S_q, H, B]
                 struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
                 result = ggml_mul_mat(ctx_, v_t, probs);
-
-                // Print graph node names for SDPA
-                std::fprintf(stderr, "[SDPA PREPARE] q: %p, k: %p, v: %p, scores: %p, probs: %p, v_t: %p, result: %p\n",
-                    (void*)q, (void*)k, (void*)v, (void*)scores, (void*)probs, (void*)v_t, (void*)result);
                 break;
             }
             case GGML_OP_GLU:
@@ -423,15 +505,22 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             case GGML_OP_MUL_MAT: {
                 bool is_q = (in0->type != GGML_TYPE_F32 && in0->type != GGML_TYPE_F16);
-                bool transpose_in0 = op.attributes.count("transpose_in0") && op.attributes.at("transpose_in0") != 0;
+                bool explicit_transpose = op.attributes.count("transpose_in0") > 0;
+                bool transpose_in0 = explicit_transpose ? (op.attributes.at("transpose_in0") != 0) : (!is_q && in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]);
                 if (!is_q && in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
                 if (in1 && !ggml_is_contiguous(in1)) {
                     in1 = ggml_cont(ctx_, in1);
                 }
-                if (!is_q && in0 && (transpose_in0 || (in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]))) {
+                if (!is_q && in0 && transpose_in0) {
                     in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
+                }
+                if (in0->ne[0] != in1->ne[0]) {
+                    fprintf(stderr, "[MUL_MAT CANNOT COMPUTE!] op=%s explicit_trans=%d trans_in0=%d\n  in0 name=%s ne=[%lld,%lld,%lld,%lld]\n  in1 name=%s ne=[%lld,%lld,%lld,%lld]\n",
+                        op.name.c_str(), (int)explicit_transpose, (int)transpose_in0,
+                        in0->name, (long long)in0->ne[0], (long long)in0->ne[1], (long long)in0->ne[2], (long long)in0->ne[3],
+                        in1->name, (long long)in1->ne[0], (long long)in1->ne[1], (long long)in1->ne[2], (long long)in1->ne[3]);
                 }
                 result = ggml_mul_mat(ctx_, in0, in1);
                 if (op.inputs.size() > 2) {
@@ -476,7 +565,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
                 int64_t start = op.attributes.count("start") ? op.attributes.at("start") : 0;
                 int64_t step = op.attributes.count("step") ? op.attributes.at("step") : 1;
-                if (!ggml_is_contiguous(in0)) {
+                if (in0 && (!ggml_is_contiguous(in0) || in0->view_src != nullptr)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
                 size_t offset = start * in0->nb[g_dim];
@@ -508,6 +597,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_CONV_2D: {
                 // in0: weight [KW, KH, IC, OC], in1: x [W, H, C, N]
+                bool is_1d = op.attributes.count("is_1d") && op.attributes.at("is_1d") != 0;
+                if (is_1d) {
+                    if (in0->ne[3] == 1) {
+                        in0 = ggml_reshape_4d(ctx_, in0, in0->ne[0], 1, in0->ne[1], in0->ne[2]);
+                    }
+                    if (in1->ne[3] == 1) {
+                        in1 = ggml_reshape_4d(ctx_, in1, in1->ne[0], 1, in1->ne[1], in1->ne[2]);
+                    }
+                }
                 int s0 = op.attributes.count("stride_w") ? static_cast<int>(op.attributes.at("stride_w")) : 1;
                 int s1 = op.attributes.count("stride_h") ? static_cast<int>(op.attributes.at("stride_h")) : 1;
                 int p0 = op.attributes.count("pad_w") ? static_cast<int>(op.attributes.at("pad_w")) : 0;
@@ -518,12 +616,57 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 2) {
                     struct ggml_tensor* bias = ggml_tensors_[op.inputs[2]];
                     if (bias) {
+                        if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
+                        if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
+                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                        }
                         if (ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
                         }
                         result = ggml_add(ctx_, result, bias);
                     }
                 }
+                if (op.attributes.count("fused_relu") && op.attributes.at("fused_relu") != 0) {
+                    result = ggml_relu(ctx_, result);
+                }
+                if (is_1d && result->ne[1] == 1) {
+                    result = ggml_reshape_4d(ctx_, result, result->ne[0], result->ne[2], result->ne[3], 1);
+                }
+                break;
+            }
+            case GGML_OP_CONV_2D_DW: {
+                // in0: weight [KW, KH, 1, C], in1: x [W, H, C, N]
+                int s0 = op.attributes.count("stride_w") ? static_cast<int>(op.attributes.at("stride_w")) : 1;
+                int s1 = op.attributes.count("stride_h") ? static_cast<int>(op.attributes.at("stride_h")) : 1;
+                int p0 = op.attributes.count("pad_w") ? static_cast<int>(op.attributes.at("pad_w")) : 0;
+                int p1 = op.attributes.count("pad_h") ? static_cast<int>(op.attributes.at("pad_h")) : 0;
+                int d0 = op.attributes.count("dilation_w") ? static_cast<int>(op.attributes.at("dilation_w")) : 1;
+                int d1 = op.attributes.count("dilation_h") ? static_cast<int>(op.attributes.at("dilation_h")) : 1;
+                result = ggml_conv_2d_dw(ctx_, in0, in1, s0, s1, p0, p1, d0, d1);
+                if (op.inputs.size() > 2) {
+                    struct ggml_tensor* bias = ggml_tensors_[op.inputs[2]];
+                    if (bias) {
+                        if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
+                        if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
+                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                        }
+                        if (ggml_can_repeat(bias, result)) {
+                            bias = ggml_repeat(ctx_, bias, result);
+                        }
+                        result = ggml_add(ctx_, result, bias);
+                    }
+                }
+                if (op.attributes.count("fused_relu") && op.attributes.at("fused_relu") != 0) {
+                    result = ggml_relu(ctx_, result);
+                }
+                break;
+            }
+            case GGML_OP_CLAMP: {
+                float min_val = op.float_attributes.count("min") ? static_cast<float>(op.float_attributes.at("min"))
+                              : op.attributes.count("min") ? static_cast<float>(op.attributes.at("min")) : 0.0f;
+                float max_val = op.float_attributes.count("max") ? static_cast<float>(op.float_attributes.at("max"))
+                              : op.attributes.count("max") ? static_cast<float>(op.attributes.at("max")) : 6.0f;
+                result = ggml_clamp(ctx_, in0, min_val, max_val);
                 break;
             }
             case GGML_OP_POOL_2D: {
@@ -549,6 +692,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_pool_2d(ctx_, in0, pool_type, k0, k1, s0, s1, static_cast<float>(p0), static_cast<float>(p1));
                 break;
             }
+            case GGML_OP_PAD: {
+                int p0 = op.attributes.count("pad_w") ? static_cast<int>(op.attributes.at("pad_w")) : 0;
+                int p1 = op.attributes.count("pad_h") ? static_cast<int>(op.attributes.at("pad_h")) : 0;
+                int p2 = op.attributes.count("pad_c") ? static_cast<int>(op.attributes.at("pad_c")) : 0;
+                int p3 = op.attributes.count("pad_n") ? static_cast<int>(op.attributes.at("pad_n")) : 0;
+                result = ggml_pad(ctx_, in0, p0, p1, p2, p3);
+                break;
+            }
             case 200: { // GGML_OP_CUSTOM_BIAS_GELU: in0=x, in1=bias
                 if (!in0 || !in1) {
                     throw std::runtime_error("GGML_OP_CUSTOM_BIAS_GELU requires 2 inputs");
@@ -567,18 +718,26 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             case 201: { // GGML_OP_CUSTOM_LAYER_NORM: in0=x, in1=weight, in2=bias (optional)
                 struct ggml_tensor* w = in1;
                 struct ggml_tensor* b = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
-                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+                float eps = op.float_attributes.count("eps") ? static_cast<float>(op.float_attributes.at("eps"))
+                          : op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
                 if (is_cuda_) {
                     result = ggml_norm(ctx_, in0, eps);
                     if (w) {
-                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
                         result = ggml_mul(ctx_, result, w);
                     }
                     if (b) {
-                        if (ggml_can_repeat(b, result)) b = ggml_repeat(ctx_, b, result);
                         result = ggml_add(ctx_, result, b);
                     }
+                } else if (!w && !b) {
+                    result = ggml_norm(ctx_, in0, eps);
+                } else if (!b) {
+                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
+                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
+                    params->eps = eps;
+                    result = ggml_map_custom2(ctx_, in0, w, [](struct ggml_tensor* dst, const struct ggml_tensor* a, const struct ggml_tensor* wt, int ith, int nth, void* userdata) {
+                        ggmlc_compute_forward_layer_norm(dst, a, wt, nullptr, ith, nth, userdata);
+                    }, GGML_N_TASKS_MAX, params);
                 } else {
                     custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
                     struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
@@ -589,12 +748,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case 202: { // GGML_OP_CUSTOM_RMS_NORM: in0=x, in1=weight
                 struct ggml_tensor* w = in1;
-                float eps = op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
+                float eps = op.float_attributes.count("eps") ? static_cast<float>(op.float_attributes.at("eps"))
+                          : op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
                 if (is_cuda_) {
                     result = ggml_rms_norm(ctx_, in0, eps);
                     if (w) {
-                        if (ggml_can_repeat(w, result)) w = ggml_repeat(ctx_, w, result);
                         result = ggml_mul(ctx_, result, w);
                     }
                 } else {
@@ -699,6 +858,8 @@ void ModelExecutor::run(int n_threads) {
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("GGML backend graph compute failed with status: " + std::to_string(status));
     }
+
+    // Execution completed successfully
 
     // Save persistent states from backend
     for (const auto& pair : model_graph_.tensors) {

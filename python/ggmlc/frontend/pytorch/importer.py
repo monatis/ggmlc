@@ -264,6 +264,100 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name_to_tensor[node.name] = node_to_tensor[parent]
                 continue
 
+        if "pad" in target_str:
+            parent = node.args[0]
+            pad_spec = node.args[1] if len(node.args) > 1 else []
+            if (
+                isinstance(parent, Node)
+                and parent in node_to_tensor
+                and isinstance(pad_spec, (list, tuple))
+                and all(p == 0 for p in pad_spec)
+            ):
+                node_to_tensor[node] = node_to_tensor[parent]
+                name_to_tensor[node.name] = node_to_tensor[parent]
+                continue
+
+        if "roll" in target_str:
+            curr_tensor = node_to_tensor[node.args[0]]
+            shifts = node.args[1]
+            dims = node.args[2] if len(node.args) > 2 else [0]
+            if not isinstance(shifts, (list, tuple)):
+                shifts = [shifts]
+            if not isinstance(dims, (list, tuple)):
+                dims = [dims]
+            for s, d in zip(shifts, dims):
+                s = int(s)
+                d = int(d)
+                curr_shape = list(curr_tensor.shape.dims)
+                dim_len = (
+                    int(curr_shape[d].value)
+                    if hasattr(curr_shape[d], "value")
+                    else int(curr_shape[d])
+                )
+                k = (-s) % dim_len
+                if k == 0:
+                    continue
+                # slice 1: [k:dim_len]
+                s1_shape = [
+                    d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                    for d_elem in curr_shape
+                ]
+                s1_shape[d] = dim_len - k
+                t1 = g.add_tensor(
+                    name=f"{node.name}_roll_s1",
+                    shape=Shape.from_tuple(tuple(s1_shape)),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.SLICE,
+                    inputs=[curr_tensor.id],
+                    outputs=[t1.id],
+                    attributes={"dim": d, "start": k, "end": dim_len, "step": 1},
+                )
+                # slice 2: [0:k]
+                s2_shape = [
+                    d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                    for d_elem in curr_shape
+                ]
+                s2_shape[d] = k
+                t2 = g.add_tensor(
+                    name=f"{node.name}_roll_s2",
+                    shape=Shape.from_tuple(tuple(s2_shape)),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.SLICE,
+                    inputs=[curr_tensor.id],
+                    outputs=[t2.id],
+                    attributes={"dim": d, "start": 0, "end": k, "step": 1},
+                )
+                # concat [t1, t2] along dim d
+                out_rolled = g.add_tensor(
+                    name=f"{node.name}_rolled",
+                    shape=Shape.from_tuple(
+                        tuple(
+                            [
+                                d_elem.value if hasattr(d_elem, "value") else int(d_elem)
+                                for d_elem in curr_shape
+                            ]
+                        )
+                    ),
+                    dtype=curr_tensor.dtype,
+                    storage=StorageClass.ACTIVATION,
+                )
+                g.add_node(
+                    opcode=OpCode.CONCAT,
+                    inputs=[t1.id, t2.id],
+                    outputs=[out_rolled.id],
+                    attributes={"dim": d},
+                )
+                curr_tensor = out_rolled
+            node_to_tensor[node] = curr_tensor
+            name_to_tensor[node.name] = curr_tensor
+            continue
+
         if any(
             target_str.endswith(f".{op}.{sfx}")
             for op in (
@@ -421,7 +515,9 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode in (OpCode.RESHAPE, OpCode.VIEW):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             dims = []
-            if len(node.args) > 1:
+            if "unflatten" in target_str:
+                dims = list(shape.dims)
+            elif len(node.args) > 1:
                 shape_arg = node.args[1]
                 if isinstance(shape_arg, (list, tuple)):
                     for d in shape_arg:
@@ -431,10 +527,16 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                             dims.append(_symint_to_dim(d))
                 else:
                     dims.append(_symint_to_dim(shape_arg))
+            if not dims and shape:
+                dims = list(shape.dims)
             attributes["shape"] = tuple(dims)
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
+        elif opcode == OpCode.MATMUL:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            attributes["transpose_in0"] = 1
         elif opcode == OpCode.LINEAR:
             if "addmm" in target_str:
                 # aten.addmm.default(bias, input, weight)
@@ -453,9 +555,15 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 if len(node.args) > 2 and node.args[2] is not None:
                     input_tensor_ids.append(node_to_tensor[node.args[2]].id)
         elif opcode == OpCode.EMBEDDING:
-            # aten.embedding.default(weight, indices)
+            # aten.embedding.default(weight, indices) or aten.index.Tensor(weight, [indices])
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+            indices_arg = node.args[1]
+            if isinstance(indices_arg, (list, tuple)):
+                for idx_node in indices_arg:
+                    if isinstance(idx_node, Node) and idx_node in node_to_tensor:
+                        input_tensor_ids.append(node_to_tensor[idx_node].id)
+            elif isinstance(indices_arg, Node) and indices_arg in node_to_tensor:
+                input_tensor_ids.append(node_to_tensor[indices_arg].id)
         elif opcode == OpCode.RMS_NORM:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             if len(node.args) > 2 and isinstance(node.args[2], Node):
@@ -510,45 +618,275 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[1]].id)
             if "n_dims" in node.kwargs:
                 attributes["n_dims"] = int(node.kwargs["n_dims"])
-        elif opcode == OpCode.CAST:
+        elif opcode in (OpCode.HARDSWISH, OpCode.HARDSIGMOID):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
-            if len(node.args) > 1 and isinstance(node.args[1], Node):
-                input_tensor_ids.append(node_to_tensor[node.args[1]].id)
+        elif opcode == OpCode.CLAMP:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            target_str = str(node.target)
+            if "relu6" in target_str:
+                attributes["min"] = 0.0
+                attributes["max"] = 6.0
+            elif "hardtanh" in target_str:
+                min_v = node.args[1] if len(node.args) > 1 and node.args[1] is not None else -1.0
+                max_v = node.args[2] if len(node.args) > 2 and node.args[2] is not None else 1.0
+                attributes["min"] = float(min_v)
+                attributes["max"] = float(max_v)
+            else:
+                min_v = node.kwargs.get("min", node.args[1] if len(node.args) > 1 else None)
+                max_v = node.kwargs.get("max", node.args[2] if len(node.args) > 2 else None)
+                if min_v is not None and isinstance(min_v, (int, float)):
+                    attributes["min"] = float(min_v)
+                if max_v is not None and isinstance(max_v, (int, float)):
+                    attributes["max"] = float(max_v)
         elif opcode == OpCode.CONV2D:
             # aten.convolution.default(input, weight, bias, stride, padding, dilation, transposed, output_padding, groups)
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             input_tensor_ids.append(node_to_tensor[node.args[1]].id)
-            if len(node.args) > 2 and isinstance(node.args[2], Node):
+            if (
+                len(node.args) > 2
+                and isinstance(node.args[2], Node)
+                and node.args[2] in node_to_tensor
+            ):
                 input_tensor_ids.append(node_to_tensor[node.args[2]].id)
             stride = node.args[3] if len(node.args) > 3 and node.args[3] else [1, 1]
             padding = node.args[4] if len(node.args) > 4 and node.args[4] else [0, 0]
             dilation = node.args[5] if len(node.args) > 5 and node.args[5] else [1, 1]
-            groups = int(node.args[8]) if len(node.args) > 8 and node.args[8] else 1
-            attributes["stride_h"] = (
-                int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
-            )
-            attributes["stride_w"] = (
-                int(stride[1])
-                if isinstance(stride, (list, tuple)) and len(stride) > 1
-                else attributes["stride_h"]
-            )
-            attributes["pad_h"] = (
-                int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
-            )
-            attributes["pad_w"] = (
-                int(padding[1])
-                if isinstance(padding, (list, tuple)) and len(padding) > 1
-                else attributes["pad_h"]
-            )
-            attributes["dilation_h"] = (
-                int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
-            )
-            attributes["dilation_w"] = (
-                int(dilation[1])
-                if isinstance(dilation, (list, tuple)) and len(dilation) > 1
-                else attributes["dilation_h"]
-            )
+            groups = node.kwargs.get("groups")
+            if groups is None:
+                if len(node.args) >= 9:
+                    groups = node.args[8]
+                elif len(node.args) >= 7:
+                    groups = node.args[6]
+            if groups is None:
+                in_t = node_to_tensor[node.args[0]]
+                w_t = node_to_tensor[node.args[1]]
+                if (
+                    len(in_t.shape.dims) == 4
+                    and len(w_t.shape.dims) == 4
+                    and in_t.shape.dims[1].is_static()
+                    and w_t.shape.dims[1].is_static()
+                ):
+                    ic_val = in_t.shape.dims[1].evaluate({})
+                    w_ic_val = w_t.shape.dims[1].evaluate({})
+                    if ic_val > 1 and w_ic_val == 1:
+                        groups = int(ic_val)
+            if "conv1d" in target_str:
+                attributes["stride_w"] = (
+                    int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+                )
+                attributes["stride_h"] = 1
+                attributes["pad_w"] = (
+                    int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+                )
+                attributes["pad_h"] = 0
+                attributes["dilation_w"] = (
+                    int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
+                )
+                attributes["dilation_h"] = 1
+                attributes["is_1d"] = 1
+            else:
+                attributes["stride_h"] = (
+                    int(stride[0]) if isinstance(stride, (list, tuple)) else int(stride)
+                )
+                attributes["stride_w"] = (
+                    int(stride[1])
+                    if isinstance(stride, (list, tuple)) and len(stride) > 1
+                    else attributes["stride_h"]
+                )
+                attributes["pad_h"] = (
+                    int(padding[0]) if isinstance(padding, (list, tuple)) else int(padding)
+                )
+                attributes["pad_w"] = (
+                    int(padding[1])
+                    if isinstance(padding, (list, tuple)) and len(padding) > 1
+                    else attributes["pad_h"]
+                )
+                attributes["dilation_h"] = (
+                    int(dilation[0]) if isinstance(dilation, (list, tuple)) else int(dilation)
+                )
+                attributes["dilation_w"] = (
+                    int(dilation[1])
+                    if isinstance(dilation, (list, tuple)) and len(dilation) > 1
+                    else attributes["dilation_h"]
+                )
             attributes["groups"] = groups
+            # Check if this is a grouped convolution that needs decomposition (1 < groups < in_channels)
+            in_t_candidate = node_to_tensor[node.args[0]]
+            w_t_candidate = node_to_tensor[node.args[1]]
+            bias_t_candidate = (
+                node_to_tensor.get(node.args[2])
+                if len(node.args) > 2
+                and isinstance(node.args[2], Node)
+                and node.args[2] in node_to_tensor
+                else None
+            )
+            if (
+                groups is not None
+                and int(groups) > 1
+                and len(in_t_candidate.shape.dims) == 4
+                and len(w_t_candidate.shape.dims) == 4
+                and in_t_candidate.shape.dims[1].is_static()
+                and w_t_candidate.shape.dims[0].is_static()
+            ):
+                cin_val = int(in_t_candidate.shape.dims[1].evaluate({}))
+                cout_val = int(w_t_candidate.shape.dims[0].evaluate({}))
+                g_val = int(groups)
+                if 1 < g_val < cin_val:
+                    cin_per_group = cin_val // g_val
+                    cout_per_group = cout_val // g_val
+                    out_group_tensors = []
+                    for g_idx in range(g_val):
+                        # Slice input channels
+                        x_g_out = g.add_tensor(
+                            name=f"{node.name}_x_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    in_t_candidate.shape.dims[0],
+                                    StaticDim(cin_per_group),
+                                    in_t_candidate.shape.dims[2],
+                                    in_t_candidate.shape.dims[3],
+                                ]
+                            ),
+                            dtype=in_t_candidate.dtype,
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.SLICE,
+                            inputs=[in_t_candidate.id],
+                            outputs=[x_g_out.id],
+                            attributes={
+                                "dim": 1,
+                                "start": g_idx * cin_per_group,
+                                "end": (g_idx + 1) * cin_per_group,
+                                "step": 1,
+                            },
+                            name=f"{node.name}_x_slice_g{g_idx}",
+                        )
+                        # Slice weight filters
+                        w_g_data = (
+                            w_t_candidate.data[
+                                g_idx * cout_per_group : (g_idx + 1) * cout_per_group
+                            ]
+                            if w_t_candidate.data is not None
+                            else None
+                        )
+                        w_g_out = g.add_tensor(
+                            name=f"{w_t_candidate.name}_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    StaticDim(cout_per_group),
+                                    w_t_candidate.shape.dims[1],
+                                    w_t_candidate.shape.dims[2],
+                                    w_t_candidate.shape.dims[3],
+                                ]
+                            ),
+                            dtype=w_t_candidate.dtype,
+                            storage=StorageClass.CONSTANT
+                            if w_t_candidate.storage == StorageClass.CONSTANT
+                            else StorageClass.ACTIVATION,
+                            data=w_g_data,
+                            role="parameter",
+                        )
+                        if (
+                            w_t_candidate.storage == StorageClass.CONSTANT
+                            and w_t_candidate.data is not None
+                        ):
+                            g.parameters.append(w_g_out.id)
+                            w_slice_id = w_g_out.id
+                        else:
+                            g.add_op(
+                                opcode=OpCode.SLICE,
+                                inputs=[w_t_candidate.id],
+                                outputs=[w_g_out.id],
+                                attributes={
+                                    "dim": 0,
+                                    "start": g_idx * cout_per_group,
+                                    "end": (g_idx + 1) * cout_per_group,
+                                    "step": 1,
+                                },
+                                name=f"{node.name}_w_slice_g{g_idx}",
+                            )
+                            w_slice_id = w_g_out.id
+
+                        conv_g_inputs = [x_g_out.id, w_slice_id]
+                        if bias_t_candidate is not None:
+                            if (
+                                bias_t_candidate.storage == StorageClass.CONSTANT
+                                and bias_t_candidate.data is not None
+                            ):
+                                bias_g_t = g.add_tensor(
+                                    name=f"{bias_t_candidate.name}_g{g_idx}",
+                                    shape=Shape([StaticDim(cout_per_group)]),
+                                    dtype=bias_t_candidate.dtype,
+                                    storage=StorageClass.CONSTANT,
+                                    data=bias_t_candidate.data[
+                                        g_idx * cout_per_group : (g_idx + 1) * cout_per_group
+                                    ],
+                                    role="parameter",
+                                )
+                                g.parameters.append(bias_g_t.id)
+                                conv_g_inputs.append(bias_g_t.id)
+                            else:
+                                bias_g_t = g.add_tensor(
+                                    name=f"{bias_t_candidate.name}_g{g_idx}",
+                                    shape=Shape([StaticDim(cout_per_group)]),
+                                    dtype=bias_t_candidate.dtype,
+                                    storage=StorageClass.ACTIVATION,
+                                )
+                                g.add_op(
+                                    opcode=OpCode.SLICE,
+                                    inputs=[bias_t_candidate.id],
+                                    outputs=[bias_g_t.id],
+                                    attributes={
+                                        "dim": 0,
+                                        "start": g_idx * cout_per_group,
+                                        "end": (g_idx + 1) * cout_per_group,
+                                        "step": 1,
+                                    },
+                                    name=f"{node.name}_bias_slice_g{g_idx}",
+                                )
+                                conv_g_inputs.append(bias_g_t.id)
+
+                        group_conv_attrs = dict(attributes)
+                        group_conv_attrs["groups"] = 1
+                        out_g_t = g.add_tensor(
+                            name=f"{node.name}_conv_g{g_idx}",
+                            shape=Shape(
+                                [
+                                    shape.dims[0],
+                                    StaticDim(cout_per_group),
+                                    shape.dims[2],
+                                    shape.dims[3],
+                                ]
+                            ),
+                            dtype=dtype,
+                            storage=StorageClass.ACTIVATION,
+                        )
+                        g.add_op(
+                            opcode=OpCode.CONV2D,
+                            inputs=conv_g_inputs,
+                            outputs=[out_g_t.id],
+                            attributes=group_conv_attrs,
+                            name=f"{node.name}_conv_g{g_idx}",
+                        )
+                        out_group_tensors.append(out_g_t.id)
+
+                    out_t = g.add_tensor(
+                        name=node.name,
+                        shape=shape,
+                        dtype=dtype,
+                        storage=StorageClass.ACTIVATION,
+                    )
+                    node_to_tensor[node] = out_t
+                    name_to_tensor[node.name] = out_t
+                    g.add_op(
+                        opcode=OpCode.CONCAT,
+                        inputs=out_group_tensors,
+                        outputs=[out_t.id],
+                        attributes={"dim": 1},
+                        name=node.name,
+                    )
+                    continue
         elif opcode in (OpCode.MAX_POOL2D, OpCode.AVG_POOL2D):
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             ksize = node.args[1] if len(node.args) > 1 else [2, 2]
@@ -639,7 +977,11 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         elif opcode == OpCode.REPEAT:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             if len(node.args) > 1:
-                attributes["repeats"] = int(node.args[1])
+                rep_arg = node.args[1]
+                if isinstance(rep_arg, (list, tuple)):
+                    attributes["repeats"] = str([int(r) for r in rep_arg])
+                elif rep_arg is not None:
+                    attributes["repeats"] = str(int(rep_arg))
             if len(node.args) > 2 and node.args[2] is not None:
                 attributes["dim"] = int(node.args[2])
         elif opcode == OpCode.BATCH_NORM:
@@ -764,6 +1106,32 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name=node.name,
             )
             continue
+        elif opcode == OpCode.SUB and "rsub" in target_str:
+            # rsub(self, other) computes (other - self)
+            rsub_args = [node.args[1], node.args[0]]
+            for arg_idx, arg in enumerate(rsub_args):
+                if isinstance(arg, Node):
+                    if arg in node_to_tensor:
+                        input_tensor_ids.append(node_to_tensor[arg].id)
+                    else:
+                        raise RuntimeError(f"Referenced node {arg.name} was not imported.")
+                elif isinstance(arg, (int, float, bool)):
+                    c_name = f"const_{node.name}_arg{arg_idx}"
+                    dt = (
+                        DType.F32
+                        if isinstance(arg, float)
+                        else (DType.I64 if isinstance(arg, int) else DType.BOOL)
+                    )
+                    np_val = np.array(arg, dtype=np.float32 if dt == DType.F32 else np.int64)
+                    c_t = g.add_tensor(
+                        name=c_name,
+                        shape=Shape([]),
+                        dtype=dt,
+                        storage=StorageClass.CONSTANT,
+                        data=np_val,
+                    )
+                    g.parameters.append(c_t.id)
+                    input_tensor_ids.append(c_t.id)
         else:
             # Default generic arg parsing
             for arg_idx, arg in enumerate(node.args):

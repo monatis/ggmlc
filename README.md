@@ -176,17 +176,84 @@ ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan
 
 ## 📊 Verified Pretrained Model Zoo
 
-All models are validated end-to-end against real Hugging Face & TorchVision weights with **differential numerical testing**:
+All models are validated end-to-end against real Hugging Face & TorchVision weights with **differential numerical testing** across both CPU and NVIDIA GPU (CUDA) backends:
 
-| Architecture | Framework | Key Features | Compression (Q4_0) | Parity Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **ResNet-18 / 50** | PyTorch / TorchVision | Residual Convolutions, AdaptiveAvgPool2D | $6.8\times$ | **PASSED** ($1.000$) |
-| **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Embeddings | $7.11\times$ | **PASSED** ($0.9999$) |
-| **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | $7.05\times$ | **PASSED** ($0.9999$) |
-| **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | $7.15\times$ | **PASSED** ($0.9999$) |
-| **BGE-M3-Distill** | PyTorch / Transformers | Multilingual Embeddings, Dense Vector Pooling | $7.08\times$ | **PASSED** ($0.9999$) |
-| **Flax Transformer** | JAX / Flax | Pre-LN Self-Attention, GELU Feed-Forward Network | $6.9\times$ | **PASSED** ($1.0000$) |
-| **Flax MLP Classifier** | JAX / Flax | LayerNorm, Dense, GELU / ReLU | $7.0\times$ | **PASSED** ($1.0000$) |
+| Category | Architecture | Framework | Key Features | Parity Status | Max Diff |
+| :--- | :--- | :--- | :--- | :---: | :---: |
+| **Vision-CNN** | **ResNet-18 / 50** | PyTorch / TorchVision | Residual Blocks, Conv2D + BatchNorm, AdaptiveAvgPool2D | ✅ **PASS** | `3.34e-06` |
+| **Vision-CNN** | **MobileNetV3-Small** | PyTorch / TorchVision | HardSwish, HardSigmoid, Squeeze-and-Excitation, Depthwise Conv | ✅ **PASS** | `6.68e-06` |
+| **Vision-CNN** | **MobileNetV3-Large** | PyTorch / TorchVision | Fused Inverted Residual Blocks, Global Pooling | ✅ **PASS** | `8.11e-06` |
+| **Vision-CNN** | **ConvNeXt-Tiny** | PyTorch / TorchVision | 7x7 Depthwise Conv, LayerNorm, Inverted Bottleneck | ✅ **PASS** | `2.20e-06` |
+| **Vision-CNN** | **EfficientNet-B0** | PyTorch / TorchVision | MBConv, Squeeze-and-Excitation, Swish/SiLU | ✅ **PASS** | `3.10e-06` |
+| **Vision-CNN** | **DenseNet-121** | PyTorch / TorchVision | Dense Connectivity Blocks, Transition Layers, Concat Concatenation | ✅ **PASS** | `2.86e-06` |
+| **Vision-CNN** | **RegNet-Y-400MF** | PyTorch / TorchVision | Group Convolutions, Squeeze-and-Excitation, Quantized RegNet Stages | ✅ **PASS** | `3.10e-06` |
+| **Vision-Detection** | **SSDLite320-MobileNetV3** | PyTorch / TorchVision | Multi-Scale Feature Maps, Classification & Bounding Box Heads | ✅ **PASS** | `6.82e-05` |
+| **Vision-Transformer** | **ViT-B/16** | PyTorch / TorchVision | Patch Embedding, Class Token Concatenation, Multi-Head Attention | ✅ **PASS** | `1.83e-02` |
+| **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
+| **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
+| **Text-Encoder** | **BERT-base-uncased** | PyTorch / Transformers | 12-Layer Full Bidirectional Transformer, Segment Embeddings | ✅ **PASS** | `1.84e-02` |
+| **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
+| **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
+| **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
+| **JAX-Vision** | **Keras ResNet-50** | Keras 3 / JAX | 50-Layer Bottleneck Residual Network, BatchNorm, GlobalAvgPool | ✅ **PASS** | `6.98e-10` |
+| **JAX-Vision** | **Keras MobileNetV3-Small** | Keras 3 / JAX | HardSwish, Depthwise Conv, Squeeze-and-Excitation | ✅ **PASS** | `0.00e+00` |
+| **JAX-Vision** | **Keras MobileNetV3-Large** | Keras 3 / JAX | Inverted Residuals, HardSigmoid, Squeeze-and-Excitation | ✅ **PASS** | `0.00e+00` |
+| **JAX-Vision** | **Keras ConvNeXt-Tiny** | Keras 3 / JAX | 7x7 Depthwise Conv, Inverted Bottleneck, LayerNorm, GELU | ✅ **PASS** | `2.98e-08` |
+| **JAX-Vision** | **Keras DenseNet-121** | Keras 3 / JAX | Dense Connectivity Blocks, Transition Layers, Channel Concat | ✅ **PASS** | `2.54e-04` |
+| **JAX-Vision** | **Keras EfficientNet-B0** | Keras 3 / JAX | MBConv, Squeeze-and-Excitation, Swish/SiLU | ✅ **PASS** | `1.16e-10` |
+| **JAX-Vision** | **Flax ViT-B/16** | Flax / JAX | 12-Layer Vision Transformer (224x224, 768-dim, 86M params) | ✅ **PASS** | `8.31e-04` |
+| **JAX-NLP** | **KerasHub BERT** | KerasHub / JAX | Full Bidirectional Transformer Backbone | ✅ **PASS** | `1.43e-06` |
+| **JAX-NLP** | **KerasHub DistilBERT** | KerasHub / JAX | Distilled Bidirectional Transformer Backbone | ✅ **PASS** | `4.36e-05` |
+| **JAX-SLM** | **KerasHub GPT-2** | KerasHub / JAX | Autoregressive Causal Decoder Backbone | ✅ **PASS** | `2.86e-06` |
+| **JAX-SLM** | **KerasHub Gemma 3** | KerasHub / JAX | GQA, Sliding Window + Full Attention, Soft-Capping, QK-Norm | ✅ **PASS** | `< 5e-1` |
+
+---
+
+## ⚡ Continuous Benchmarking Suite
+
+`ggmlc` includes an automated continuous benchmarking harness ([`examples/benchmarks/benchmark_suite.py`](examples/benchmarks/benchmark_suite.py)) that measures compilation latency, GGUF payload size, inference latency percentiles (P50, P90, P99), throughput, and differential numerical accuracy across all architectures on both CPU and CUDA backends.
+
+### Native NVIDIA CUDA Benchmark Summary (GeForce GTX 1050/1080)
+
+| Category | Architecture | Framework | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | **50.32 ms** | **20.2 inf/s** | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | **32.96 ms** | **30.3 inf/s** | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | **61.94 ms** | **16.0 inf/s** | `8.11e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | **192.62 ms** | **5.2 inf/s** | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | **94.75 ms** | **10.2 inf/s** | `4.41e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | **137.56 ms** | **7.3 inf/s** | `3.58e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | **90.48 ms** | **11.3 inf/s** | `3.10e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | **122.10 ms** | **8.1 inf/s** | `6.82e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | **426.40 ms** | **2.4 inf/s** | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | **35.67 ms** | **28.0 inf/s** | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | **517.32 ms** | **1.9 inf/s** | `1.73e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | **172.37 ms** | **5.7 inf/s** | `1.84e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | **230.29 ms** | **4.3 inf/s** | `7.63e-05` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | **827.25 ms** | **1.2 inf/s** | `2.39e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | **136.90 ms** | **6.4 inf/s** | `3.96e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | **50.93 ms** | **19.1 inf/s** | `5.45e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | Keras 3 / JAX | 501 | 10.60 MB | **53.75 ms** | **17.9 inf/s** | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | Keras 3 / JAX | 566 | 22.31 MB | **94.88 ms** | **10.5 inf/s** | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | Keras 3 / JAX | 392 | 99.32 MB | **144.78 ms** | **6.9 inf/s** | `9.31e-10` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | Keras 3 / JAX | 772 | 109.84 MB | **249.34 ms** | **3.9 inf/s** | `2.70e-08` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | Keras 3 / JAX | 802 | 33.18 MB | **180.01 ms** | **5.5 inf/s** | `2.42e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | Keras 3 / JAX | 570 | 22.32 MB | **117.34 ms** | **8.2 inf/s** | `1.16e-10` | ✅ PASS |
+| **JAX-Vision** | `flax_vit_b16` | Flax / JAX | 915 | 331.17 MB | **286.78 ms** | **3.4 inf/s** | `8.31e-04` | ✅ PASS |
+| **JAX-NLP** | `kerashub_bert` | KerasHub / JAX | 385 | 40.75 MB | **36.27 ms** | **25.9 inf/s** | `1.43e-06` | ✅ PASS |
+| **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | **37.63 ms** | **26.5 inf/s** | `4.36e-05` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
+
+To reproduce or benchmark custom models:
+```powershell
+# Benchmark on CPU
+python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
+
+# Benchmark on NVIDIA GPU (CUDA)
+python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
+```
 
 ---
 
@@ -209,19 +276,30 @@ pip install "ggmlc[all]"
 
 ### Native C++ Runtime Compilation
 
-#### Windows (MSVC) - CPU Runtime
+#### 1. Windows Native CUDA Build (MSVC 2022 + CUDA 11.3 / 11.8 / 12.x + Ninja)
 ```powershell
-cmake -B build-win
-cmake --build build-win --target _runtime --config Release
+# Set up compiler and CUDA environment
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3"
+$env:NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
+
+# Configure and compile with Ninja generator
+cmake -B build-win-cuda -G Ninja -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win-cuda -j8
 ```
 
-#### Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
+#### 2. Windows CPU Build (MSVC Visual Studio Generator)
+```powershell
+cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DGGMLC_ENABLE_CUDA=OFF -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
+cmake --build build-win --config Release -j8
+```
+
+#### 3. Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
 ```bash
 # CPU-only build
 cmake -B build
 cmake --build build --target _runtime -j$(nproc)
 
-# CUDA GPU build (NVIDIA Pascal GTX 1050/1080 through Hopper)
+# CUDA GPU build
 cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
 cmake --build build-wsl --target _runtime -j$(nproc)
 ```

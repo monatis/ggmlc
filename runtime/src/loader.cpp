@@ -54,6 +54,12 @@ struct JsonValue {
 
     int64_t get_int(int64_t def = 0) const {
         if (type == JsonType::NUMBER) return static_cast<int64_t>(num_val);
+        if (type == JsonType::BOOL) return bool_val ? 1 : 0;
+        return def;
+    }
+
+    double get_double(double def = 0.0) const {
+        if (type == JsonType::NUMBER) return num_val;
         return def;
     }
 
@@ -386,6 +392,7 @@ SerializedModelGraph ModelLoader::load_from_memory(const uint8_t* data, size_t s
         if (nj.contains("attributes")) {
             for (const auto& attr_pair : nj["attributes"].obj_val) {
                 op.attributes[attr_pair.first] = attr_pair.second.get_int();
+                op.float_attributes[attr_pair.first] = attr_pair.second.get_double();
             }
         }
 
