@@ -29,16 +29,30 @@ jobs:
         with:
           platforms: all
 
+      - name: Set up CUDA Toolkit (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
       - name: Build Wheels with cibuildwheel
         uses: pypa/cibuildwheel@v2.22.0
         env:
-          CIBW_BUILD: "cp311-* cp312-* cp313-*"
+          CIBW_BUILD: "cp311-*"
           CIBW_SKIP: "*-musllinux* pp*"
           CIBW_ARCHS_LINUX: "x86_64 aarch64"
           CIBW_ARCHS_WINDOWS: "AMD64"
           CIBW_ARCHS_MACOS: "arm64"
           CIBW_BEFORE_BUILD: "pip install nanobind scikit-build-core"
-          CIBW_ENVIRONMENT: 'CMAKE_BUILD_TYPE="Release"'
+          CIBW_BEFORE_ALL_LINUX: >
+            if [ $(uname -m) = "x86_64" ]; then
+              dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
+              dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcurand-devel-12-4 libcublas-devel-12-4
+            fi
+          CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90;100"'
+          CIBW_ENVIRONMENT_WINDOWS: 'CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90;100"'
+          CIBW_ENVIRONMENT_MACOS: 'CMAKE_BUILD_TYPE="Release"'
 
       - name: Upload Wheels Artifact
         uses: actions/upload-artifact@v4
