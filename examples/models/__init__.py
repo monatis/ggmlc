@@ -34,11 +34,14 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
 )
-from examples.models.kerashub_models import (
-    load_kerashub_bert,
-    load_kerashub_distilbert,
-    load_kerashub_gpt2,
-)
+try:
+    from examples.models.kerashub_models import (
+        load_kerashub_bert,
+        load_kerashub_distilbert,
+        load_kerashub_gpt2,
+    )
+except (ImportError, ModuleNotFoundError):
+    pass
 
 __all__ = [
     "FlaxCausalLM",

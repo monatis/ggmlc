@@ -13,8 +13,6 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include
 )
 
@@ -24,7 +22,7 @@ if (GGMLC_ENABLE_CUDA)
     set(GGML_BUILD_TESTS OFF CACHE BOOL "Disable GGML tests" FORCE)
     set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "Disable GGML examples" FORCE)
     if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "61;70;75;80;86" CACHE STRING "CUDA architectures" FORCE)
+        set(CMAKE_CUDA_ARCHITECTURES "61;70;75;80;86;89;90" CACHE STRING "CUDA architectures" FORCE)
     endif()
 
     include_directories(
@@ -52,12 +50,30 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/binary-ops.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/vec.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/repack.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/quants.c
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/repack.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile/sgemm.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/gguf.cpp
     )
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+        list(APPEND GGML_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/arm/quants.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/arm/repack.cpp
+        )
+        include_directories(
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/arm
+        )
+    else()
+        list(APPEND GGML_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/quants.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/repack.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile/sgemm.cpp
+        )
+        include_directories(
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile
+        )
+    endif()
 
     add_library(ggml_lib STATIC ${GGML_SOURCES})
     target_compile_definitions(ggml_lib PUBLIC
@@ -68,6 +84,13 @@ else()
     )
     find_package(Threads REQUIRED)
     target_link_libraries(ggml_lib PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+
+    if (APPLE)
+        find_library(ACCELERATE_FRAMEWORK Accelerate)
+        if (ACCELERATE_FRAMEWORK)
+            target_link_libraries(ggml_lib PUBLIC ${ACCELERATE_FRAMEWORK})
+        endif()
+    endif()
 endif()
 
 add_subdirectory(runtime)

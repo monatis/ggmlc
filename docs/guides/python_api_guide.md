@@ -114,6 +114,11 @@ out = runner(input_ids=ids_numpy)
 
 # Dynamic shape symbol override
 out = runner(x_numpy, symbols={"seq": 64})
+
+# Persistent state management (for KV-cache and recurrent states)
+runner.set_state("state_tensor", state_numpy)
+current_state = runner.get_state("state_tensor")
+runner.reset_state()
 ```
 
 ---

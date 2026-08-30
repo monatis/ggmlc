@@ -64,7 +64,7 @@ def test_stateful_accumulator_persistence():
         states_out=["state"],
     )
 
-    out1 = results[out_t.id]
+    out1 = results[out_t.id].reshape(16)
     np.testing.assert_allclose(out1, np.ones(16, dtype=np.float32), atol=1e-5)
 
     # Step 2: Next step: pass updated state (now set state = out1). x = [2, 2, ..., 2]. Expected out = 2 + 1 = 3.
@@ -77,7 +77,7 @@ def test_stateful_accumulator_persistence():
         states_out=["state"],
     )
 
-    out2 = results[out_t.id]
+    out2 = results[out_t.id].reshape(16)
     np.testing.assert_allclose(out2, np.full(16, 3.0, dtype=np.float32), atol=1e-5)
 
     # Step 3: Pass state = out2. x = [5, 5, ..., 5]. Expected out = 5 + 3 = 8.
@@ -90,7 +90,7 @@ def test_stateful_accumulator_persistence():
         states_out=["state"],
     )
 
-    out3 = results[out_t.id]
+    out3 = results[out_t.id].reshape(16)
     np.testing.assert_allclose(out3, np.full(16, 8.0, dtype=np.float32), atol=1e-5)
 
 

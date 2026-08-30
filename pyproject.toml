@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.9.0", "nanobind>=2.0.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "ggmlc"
 version = "0.1.0"
 description = "A Neural-Network Compiler Targeting GGML"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.24.0",
 ]
@@ -51,6 +51,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
     "nanobind>=2.0.0",
+    "scikit-build-core>=0.9.0",
     "torch>=2.2.0",
     "jax>=0.4.20",
     "jaxlib>=0.4.20",
@@ -73,8 +74,10 @@ dev = [
 [project.scripts]
 ggmlc = "ggmlc.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["python"]
+[tool.scikit-build]
+cmake.version = ">=3.18"
+wheel.packages = ["python/ggmlc"]
+cmake.build-type = "Release"
 
 [tool.ruff]
 line-length = 100
@@ -83,3 +86,7 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python", "."]
+markers = [
+    "cuda: tests requiring native NVIDIA CUDA GPU hardware and CUDA runtime",
+    "slow: slow-running full model or dataset benchmarks",
+]

@@ -5,7 +5,7 @@
 ### Next-Generation Semantic Tensor Program Compiler to GGML & Standalone C++
 
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Format](https://img.shields.io/badge/binary-GGUF%20v3-orange.svg)](https://github.com/ggerganov/ggml)
 [![Backends](https://img.shields.io/badge/backends-CPU%20%7C%20NVIDIA%20CUDA-purple.svg)](https://github.com/ggerganov/ggml)
@@ -212,9 +212,21 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 ## ⚡ Continuous Benchmarking Suite
 
-`ggmlc` includes an automated continuous benchmarking harness ([`examples/benchmarks/benchmark_suite.py`](examples/benchmarks/benchmark_suite.py)) that measures compilation latency, GGUF payload size, inference latency percentiles (P50, P90, P99), throughput, and differential numerical accuracy across all architectures on both CPU and CUDA backends.
+I'm continuously verifying numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite. I will soon publish more benchmarking results from a variety of GPUs, but this is just for a sanity check.
 
-### Native NVIDIA CUDA Benchmark Summary (GeForce GTX 1050/1080)
+You can also run the benchmarking suite on your own machine:
+```powershell
+# Benchmark full model suite on CPU
+python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
+
+# Benchmark full model suite on NVIDIA GPU (CUDA)
+python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
+```
+
+<details>
+<summary><b>Click to expand GeForce GTX 1080 Benchmark Results (Sanity Check)</b></summary>
+
+<br/>
 
 | Category | Architecture | Framework | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -246,22 +258,17 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
 
-To reproduce or benchmark custom models:
-```powershell
-# Benchmark on CPU
-python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
-
-# Benchmark on NVIDIA GPU (CUDA)
-python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
-```
+</details>
 
 ---
 
 ## 🛠️ Installation & Building
 
-### Python Package Installation
+### 1. Python Package Installation
+
+Install directly with `pip` or `uv`:
 ```bash
-# High-performance lightweight runtime (Inference only)
+# Lightweight runtime (Inference only)
 pip install ggmlc
 
 # With PyTorch compiler frontend
@@ -270,38 +277,70 @@ pip install "ggmlc[torch]"
 # With JAX/Flax compiler frontend
 pip install "ggmlc[jax]"
 
-# Complete development suite
+# Complete development suite (PyTorch, JAX, HuggingFace, test runners)
 pip install "ggmlc[all]"
 ```
 
-### Native C++ Runtime Compilation
-
-#### 1. Windows Native CUDA Build (MSVC 2022 + CUDA 11.3 / 11.8 / 12.x + Ninja)
-```powershell
-# Set up compiler and CUDA environment
-$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3"
-$env:NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
-
-# Configure and compile with Ninja generator
-cmake -B build-win-cuda -G Ninja -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
-cmake --build build-win-cuda -j8
-```
-
-#### 2. Windows CPU Build (MSVC Visual Studio Generator)
-```powershell
-cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DGGMLC_ENABLE_CUDA=OFF -DPython_EXECUTABLE="C:\Users\ailabs\ggmlc\.venv\Scripts\python.exe"
-cmake --build build-win --config Release -j8
-```
-
-#### 3. Linux / WSL (GCC / Clang) - CPU & CUDA GPU Runtime
+Or install locally from source in editable mode:
 ```bash
-# CPU-only build
-cmake -B build
-cmake --build build --target _runtime -j$(nproc)
+git clone https://github.com/monatis/ggmlc.git
+cd ggmlc
+pip install -e ".[all]"
+```
 
-# CUDA GPU build
-cmake -B build-wsl -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
-cmake --build build-wsl --target _runtime -j$(nproc)
+---
+
+### 2. Native C++ Runtime Compilation (CMake)
+
+`ggmlc` compiles with any standard C++17 compiler (MSVC, GCC, Clang) and CMake 3.18+.
+
+#### Linux & WSL
+
+```bash
+git clone https://github.com/monatis/ggmlc.git
+cd ggmlc
+
+# Build CPU runtime
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+
+# Build with NVIDIA CUDA GPU acceleration
+cmake -B build-cuda -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="all" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cuda -j$(nproc)
+```
+
+#### Windows (MSVC 2022 / Ninja)
+
+```powershell
+git clone https://github.com/monatis/ggmlc.git
+cd ggmlc
+
+# Option A: Windows CPU Build (Visual Studio Solution)
+cmake -B build-win -G "Visual Studio 17 2022" -A x64 -DGGMLC_ENABLE_CUDA=OFF
+cmake --build build-win --config Release -j
+
+# Option B: Windows CUDA Build (Ninja Generator)
+cmake -B build-win-cuda -G Ninja -DGGMLC_ENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win-cuda -j
+```
+
+#### macOS (CPU / Apple Silicon)
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(sysctl -n hw.logicalcpu)
+```
+
+---
+
+### 3. Running the Test Suite
+
+```powershell
+# Run standard CPU test suite (CI mode)
+pytest -v -m "not cuda and not slow"
+
+# Run full test suite including CUDA GPU numerical parity (requires NVIDIA GPU)
+pytest -v
 ```
 
 ---

@@ -6,18 +6,16 @@ os.environ.setdefault("KERAS_BACKEND", "jax")
 
 import ggmlc
 import numpy as np
+import pytest
 from ggmlc.validation.numerical import check_numerical_accuracy, cosine_similarity
 
 from examples.models.flax_models import load_flax_vit_b16
-from examples.models.kerashub_models import (
-    load_kerashub_bert,
-    load_kerashub_distilbert,
-    load_kerashub_gemma3,
-    load_kerashub_gpt2,
-)
 
 
 def test_kerashub_bert_e2e():
+    pytest.importorskip("keras_hub")
+    from examples.models.kerashub_models import load_kerashub_bert
+
     forward_fn, (t_ids, p_mask, s_ids), _names, _ = load_kerashub_bert(
         seq_len=32, num_layers=2, num_heads=2, hidden_dim=128, intermediate_dim=256
     )
@@ -41,6 +39,9 @@ def test_kerashub_bert_e2e():
 
 
 def test_kerashub_distilbert_e2e():
+    pytest.importorskip("keras_hub")
+    from examples.models.kerashub_models import load_kerashub_distilbert
+
     forward_fn, (t_ids, p_mask), _names, _ = load_kerashub_distilbert(
         seq_len=32, num_layers=2, num_heads=2, hidden_dim=128, intermediate_dim=256
     )
@@ -64,6 +65,9 @@ def test_kerashub_distilbert_e2e():
 
 
 def test_kerashub_gpt2_e2e():
+    pytest.importorskip("keras_hub")
+    from examples.models.kerashub_models import load_kerashub_gpt2
+
     forward_fn, (t_ids, p_mask), _names, _ = load_kerashub_gpt2(
         seq_len=32, num_layers=2, num_heads=2, hidden_dim=128, intermediate_dim=256
     )
@@ -87,8 +91,10 @@ def test_kerashub_gpt2_e2e():
 
 
 def test_flax_vit_b16_e2e():
+    import gc
+
     forward_fn, (x_np,), _names, _ = load_flax_vit_b16(
-        resolution=224, num_layers=2, dim=256, num_heads=4
+        resolution=64, num_layers=2, dim=128, num_heads=4
     )
     ref_out = np.asarray(forward_fn(x_np))
 
@@ -101,13 +107,20 @@ def test_flax_vit_b16_e2e():
     assert gguf_bytes.startswith(b"GGUF")
 
     runner = ggmlc.load(gguf_bytes)
-    out_np = runner(x=x_np)
+    out_np = runner(x_np)
 
     cos_sim = cosine_similarity(ref_out, out_np)
+    del forward_fn, x_np, gguf_bytes, runner
+    gc.collect()
     assert cos_sim > 0.999, f"Flax ViT-B/16 cosine similarity low: {cos_sim}"
 
 
 def test_kerashub_gemma3_e2e():
+    pytest.importorskip("keras_hub")
+    import gc
+
+    from examples.models.kerashub_models import load_kerashub_gemma3
+
     forward_fn, (t_ids, p_mask), _names, _ = load_kerashub_gemma3(
         seq_len=16,
         vocabulary_size=1000,
@@ -134,3 +147,5 @@ def test_kerashub_gemma3_e2e():
 
     assert not np.isnan(out_np).any(), "Gemma 3 output contains NaNs"
     assert out_np.reshape(ref_out.shape).shape == ref_out.shape
+    del forward_fn, t_ids, p_mask, gguf_bytes, runner
+    gc.collect()

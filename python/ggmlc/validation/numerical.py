@@ -39,29 +39,85 @@ def run_compiled_model_wsl(
     n_threads: int = 1,
     extra_flags: list[str] | None = None,
 ) -> dict[int, np.ndarray] | tuple[dict[int, np.ndarray], dict[str, np.ndarray]]:
-    """Executes a serialized model via the generic C++ ggmlc-run binary in WSL."""
+    """Executes a serialized model via the generic C++ ggmlc-run binary (native or WSL)."""
+    import platform
+
+    repo_root = Path(__file__).resolve().parents[3]
+
     if executable_path is None:
-        # Check build first, then build-wsl
-        for candidate in (
-            "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run",
-            "/mnt/c/Users/ailabs/ggmlc/build-wsl/runtime/ggmlc-run",
-        ):
-            win_p = Path(candidate.replace("/mnt/c/", "C:/").replace("/mnt/C/", "C:/"))
-            if win_p.exists():
-                executable_path = candidate
+        candidates = [
+            repo_root / "build" / "runtime" / "Release" / "ggmlc-run.exe",
+            repo_root / "build" / "runtime" / "ggmlc-run.exe",
+            repo_root / "build" / "runtime" / "ggmlc-run",
+            repo_root / "build-win" / "runtime" / "Release" / "ggmlc-run.exe",
+            repo_root / "build-win-cuda" / "runtime" / "ggmlc-run.exe",
+            repo_root / "build-win-cuda" / "runtime" / "Release" / "ggmlc-run.exe",
+            repo_root / "build-wsl" / "runtime" / "ggmlc-run",
+            repo_root / "build-cuda" / "runtime" / "ggmlc-run",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                executable_path = str(candidate)
                 break
-        if executable_path is None:
-            executable_path = "/mnt/c/Users/ailabs/ggmlc/build/runtime/ggmlc-run"
 
     symbols = symbols or {}
     states_in = states_in or {}
     states_out = states_out or []
     extra_flags = extra_flags or []
 
+    # Fallback to in-memory ModelRunner if no standalone CLI binary exists
+    if executable_path is None or not Path(executable_path).exists():
+        try:
+            from ggmlc.runtime.runner import ModelRunner
+
+            runner = ModelRunner(serialized_bytes, n_threads=n_threads)
+            if states_in:
+                for s_name, s_arr in states_in.items():
+                    runner.set_state(s_name, s_arr)
+            in_vals = list(inputs.values())
+            res_dict = runner(*in_vals) if in_vals else {}
+            mapped_res = {}
+            if isinstance(res_dict, np.ndarray):
+                mapped_res[output_tensor_ids[0]] = res_dict
+            elif isinstance(res_dict, dict):
+                for i, oid in enumerate(output_tensor_ids):
+                    if oid in res_dict:
+                        mapped_res[oid] = res_dict[oid]
+                    elif str(oid) in res_dict:
+                        mapped_res[oid] = res_dict[str(oid)]
+                    elif i < len(res_dict):
+                        mapped_res[oid] = list(res_dict.values())[i]
+            else:
+                mapped_res = {output_tensor_ids[0]: np.array(res_dict)}
+            if states_out:
+                st_dict = {}
+                for s_name in states_out:
+                    st_dict[s_name] = runner.get_state(s_name)
+                return mapped_res, st_dict
+            return mapped_res
+        except Exception as e:
+            raise RuntimeError(
+                f"ggmlc-run executable not found and ModelRunner fallback failed: {e}"
+            ) from e
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         model_file = tmp_path / "model.gguf"
         model_file.write_bytes(serialized_bytes)
+
+        # Check whether we run natively or through WSL
+        exe_path = Path(executable_path)
+        is_windows = platform.system() == "Windows"
+        use_wsl = is_windows and not exe_path.name.lower().endswith(".exe")
+
+        def to_target_path(p: Path) -> str:
+            if use_wsl:
+                posix = p.as_posix()
+                if len(posix) >= 2 and posix[1] == ":":
+                    drive = posix[0].lower()
+                    return f"/mnt/{drive}{posix[2:]}"
+                return posix
+            return str(p)
 
         # Write inputs
         input_args = []
@@ -69,8 +125,7 @@ def run_compiled_model_wsl(
             in_file = tmp_path / f"in_{name}.bin"
             arr_c = np.ascontiguousarray(arr)
             in_file.write_bytes(arr_c.tobytes())
-            wsl_in = in_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-            input_args.extend(["--input", f"{name}:{wsl_in}"])
+            input_args.extend(["--input", f"{name}:{to_target_path(in_file)}"])
 
         # Write initial states
         state_in_args = []
@@ -78,8 +133,7 @@ def run_compiled_model_wsl(
             s_file = tmp_path / f"state_in_{name}.bin"
             arr_c = np.ascontiguousarray(arr)
             s_file.write_bytes(arr_c.tobytes())
-            wsl_s = s_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-            state_in_args.extend(["--state-in", f"{name}:{wsl_s}"])
+            state_in_args.extend(["--state-in", f"{name}:{to_target_path(s_file)}"])
 
         # Prepare outputs
         output_args = []
@@ -87,8 +141,7 @@ def run_compiled_model_wsl(
         for tid in output_tensor_ids:
             out_file = tmp_path / f"out_{tid}.bin"
             out_files[tid] = out_file
-            wsl_out = out_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-            output_args.extend(["--output", f"{tid}:{wsl_out}"])
+            output_args.extend(["--output", f"{tid}:{to_target_path(out_file)}"])
 
         # Prepare state outputs
         state_out_args = []
@@ -96,8 +149,7 @@ def run_compiled_model_wsl(
         for sname in states_out:
             s_file = tmp_path / f"state_out_{sname}.bin"
             sout_files[sname] = s_file
-            wsl_s = s_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-            state_out_args.extend(["--state-out", f"{sname}:{wsl_s}"])
+            state_out_args.extend(["--state-out", f"{sname}:{to_target_path(s_file)}"])
 
         # Symbol args
         symbol_args = []
@@ -106,8 +158,7 @@ def run_compiled_model_wsl(
 
         thread_args = ["--threads", str(n_threads)]
 
-        wsl_model = model_file.as_posix().replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-
+        target_model = to_target_path(model_file)
         all_args = (
             input_args
             + state_in_args
@@ -117,21 +168,17 @@ def run_compiled_model_wsl(
             + thread_args
             + extra_flags
         )
-        import platform
 
-        if platform.system() == "Windows":
+        if use_wsl:
+            wsl_exe = to_target_path(exe_path)
             cmd = [
                 "wsl",
                 "bash",
                 "-c",
-                f"{executable_path} {wsl_model} {' '.join(all_args)}",
+                f"{wsl_exe} {target_model} {' '.join(all_args)}",
             ]
         else:
-            cmd = [
-                "bash",
-                "-c",
-                f"{executable_path} {wsl_model} {' '.join(all_args)}",
-            ]
+            cmd = [str(exe_path), target_model] + all_args
 
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:

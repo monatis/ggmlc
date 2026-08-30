@@ -1,3 +1,4 @@
+import pytest
 import torch
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
@@ -67,6 +68,10 @@ def _verify_full_model_e2e(
 
     actual_np = results[out_id].reshape(ref_np.shape)
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=atol)
+    import gc
+
+    del model, inputs, exported, ggml_graph, ser_bytes, results
+    gc.collect()
     assert cmp.passed, f"Hub model verification failed for {model_name}: {cmp.message}"
 
 
@@ -88,12 +93,14 @@ def test_gpt2_hub_compilation_and_execution():
     _verify_full_model_e2e(model, inputs, names, "gpt2", atol=1e-3)
 
 
+@pytest.mark.slow
 def test_qwen_hub_compilation_and_execution():
     torch.manual_seed(42)
     model, inputs, names = load_qwen_model("Qwen/Qwen2.5-0.5B")
     _verify_full_model_e2e(model, inputs, names, "qwen2.5_0.5b", atol=1e-3)
 
 
+@pytest.mark.slow
 def test_bge_m3_distill_hub_compilation_and_execution():
     torch.manual_seed(42)
     model, inputs, names = load_bge_m3_distill_model()

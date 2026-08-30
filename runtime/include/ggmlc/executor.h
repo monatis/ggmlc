@@ -11,10 +11,23 @@
 
 namespace ggmlc {
 
+struct CustomOpParams {
+    virtual ~CustomOpParams() = default;
+};
+
+struct LayerNormOpParams : public CustomOpParams {
+    float eps = 1e-5f;
+};
+
 class ModelExecutor {
 public:
     explicit ModelExecutor(const SerializedModelGraph& graph, const std::string& device = "cpu");
     ~ModelExecutor();
+
+    ModelExecutor(const ModelExecutor&) = delete;
+    ModelExecutor& operator=(const ModelExecutor&) = delete;
+    ModelExecutor(ModelExecutor&&) noexcept = default;
+    ModelExecutor& operator=(ModelExecutor&&) noexcept = default;
 
     // Query available hardware execution devices (e.g. ["cpu", "cuda:0"])
     static std::vector<std::string> get_available_devices();
@@ -57,7 +70,7 @@ private:
     std::unordered_map<uint32_t, std::vector<uint8_t>> persistent_states_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> output_host_buffers_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> state_host_buffers_;
-    std::vector<std::vector<uint8_t>> custom_params_storage_;
+    std::vector<std::unique_ptr<CustomOpParams>> custom_params_storage_;
 };
 
 } // namespace ggmlc
