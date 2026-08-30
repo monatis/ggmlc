@@ -40,6 +40,11 @@ jobs:
           cuda: '12.4.1'
           method: 'network'
 
+      - name: Set up CUDA flags for MSVC
+        if: matrix.os == 'windows-latest'
+        run: |
+          echo "NVCC_PREPEND_FLAGS=-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" >> $env:GITHUB_ENV
+
       - name: Build Wheels with cibuildwheel
         uses: pypa/cibuildwheel@v2.22.0
         env:
@@ -57,7 +62,7 @@ jobs:
               dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 cuda-driver-devel-12-4 libcurand-devel-12-4 libcublas-devel-12-4
             fi
           CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90"'
-          CIBW_ENVIRONMENT_WINDOWS: 'CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90"'
+          CIBW_ENVIRONMENT_WINDOWS: 'NVCC_PREPEND_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90 -DCMAKE_CUDA_FLAGS=\"-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH\""'
           CIBW_ENVIRONMENT_MACOS: 'CMAKE_BUILD_TYPE="Release"'
 
       - name: Upload Wheels Artifact
