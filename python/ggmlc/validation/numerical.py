@@ -71,16 +71,30 @@ def run_compiled_model_wsl(
             from ggmlc.runtime.runner import ModelRunner
 
             runner = ModelRunner(serialized_bytes, n_threads=n_threads)
-            # Map input arrays
+            if states_in:
+                for s_name, s_arr in states_in.items():
+                    runner.set_state(s_name, s_arr)
             in_vals = list(inputs.values())
             res_dict = runner(*in_vals) if in_vals else {}
+            mapped_res = {}
             if isinstance(res_dict, np.ndarray):
-                res_dict = {output_tensor_ids[0]: res_dict}
-            elif not isinstance(res_dict, dict):
-                res_dict = {output_tensor_ids[0]: np.array(res_dict)}
+                mapped_res[output_tensor_ids[0]] = res_dict
+            elif isinstance(res_dict, dict):
+                for i, oid in enumerate(output_tensor_ids):
+                    if oid in res_dict:
+                        mapped_res[oid] = res_dict[oid]
+                    elif str(oid) in res_dict:
+                        mapped_res[oid] = res_dict[str(oid)]
+                    elif i < len(res_dict):
+                        mapped_res[oid] = list(res_dict.values())[i]
+            else:
+                mapped_res = {output_tensor_ids[0]: np.array(res_dict)}
             if states_out:
-                return res_dict, {}
-            return res_dict
+                st_dict = {}
+                for s_name in states_out:
+                    st_dict[s_name] = runner.get_state(s_name)
+                return mapped_res, st_dict
+            return mapped_res
         except Exception as e:
             raise RuntimeError(
                 f"ggmlc-run executable not found and ModelRunner fallback failed: {e}"

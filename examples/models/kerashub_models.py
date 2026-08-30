@@ -9,7 +9,6 @@ from typing import Any
 # Ensure JAX backend is configured prior to importing Keras / KerasHub
 os.environ.setdefault("KERAS_BACKEND", "jax")
 
-import keras_hub
 import numpy as np
 
 
@@ -22,6 +21,8 @@ def load_kerashub_bert(
     intermediate_dim: int = 512,
 ) -> tuple[Callable[..., Any], tuple[np.ndarray, ...], list[str], str]:
     """Loads BERT Transformer backbone from KerasHub."""
+    import keras_hub
+
     model = keras_hub.models.BertBackbone(
         vocabulary_size=vocabulary_size,
         num_layers=num_layers,
@@ -57,6 +58,8 @@ def load_kerashub_distilbert(
     intermediate_dim: int = 512,
 ) -> tuple[Callable[..., Any], tuple[np.ndarray, ...], list[str], str]:
     """Loads DistilBERT Transformer backbone from KerasHub."""
+    import keras_hub
+
     model = keras_hub.models.DistilBertBackbone(
         vocabulary_size=vocabulary_size,
         num_layers=num_layers,
@@ -86,6 +89,8 @@ def load_kerashub_gpt2(
     intermediate_dim: int = 512,
 ) -> tuple[Callable[..., Any], tuple[np.ndarray, ...], list[str], str]:
     """Loads GPT-2 Autoregressive Causal Transformer backbone from KerasHub."""
+    import keras_hub
+
     model = keras_hub.models.GPT2Backbone(
         vocabulary_size=vocabulary_size,
         num_layers=num_layers,
@@ -118,6 +123,8 @@ def load_kerashub_gemma3(
     sliding_window_size: int = 32,
 ) -> tuple[Callable[..., Any], tuple[np.ndarray, ...], list[str], str]:
     """Loads Gemma 3 SLM backbone with GQA, sliding window + full attention, soft-capping, and QK-norm."""
+    import keras_hub
+
     model = keras_hub.models.Gemma3Backbone(
         vocabulary_size=vocabulary_size,
         image_size=None,

@@ -212,6 +212,7 @@ class ModelRunner:
 
             out_name = t.name if t else str(out_tid)
             results[out_name] = arr
+            results[out_tid] = arr
 
         if len(self.outputs) == 1:
             return next(iter(results.values()))
