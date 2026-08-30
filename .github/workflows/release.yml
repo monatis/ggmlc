@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-2022, macos-latest]
 
     steps:
       - name: Checkout repository
@@ -30,18 +30,18 @@ jobs:
           platforms: all
 
       - name: Set up MSVC (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Set up CUDA Toolkit (Windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         uses: Jimver/cuda-toolkit@v0.2.21
         with:
           cuda: '12.4.1'
           method: 'network'
 
       - name: Set up CUDA flags for MSVC
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         run: |
           echo "NVCC_PREPEND_FLAGS=-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" >> $env:GITHUB_ENV
 
