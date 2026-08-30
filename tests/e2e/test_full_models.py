@@ -69,6 +69,7 @@ def _verify_full_model_e2e(
     actual_np = results[out_id].reshape(ref_np.shape)
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=atol)
     import gc
+
     del model, inputs, exported, ggml_graph, ser_bytes, results
     gc.collect()
     assert cmp.passed, f"Hub model verification failed for {model_name}: {cmp.message}"
