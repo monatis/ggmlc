@@ -77,7 +77,6 @@ ggmlc = "ggmlc.cli:main"
 [tool.scikit-build]
 cmake.version = ">=3.18"
 wheel.packages = ["python/ggmlc"]
-wheel.py-api = "cp311"
 cmake.build-type = "Release"
 
 [tool.ruff]

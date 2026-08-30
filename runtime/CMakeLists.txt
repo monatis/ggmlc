@@ -51,7 +51,6 @@ if (Python_FOUND)
     find_package(nanobind CONFIG QUIET)
     if (nanobind_FOUND)
         nanobind_add_module(_runtime
-            STABLE_ABI
             bindings/python_bindings.cpp
             src/loader.cpp
             src/executor.cpp
