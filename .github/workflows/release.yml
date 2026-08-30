@@ -36,7 +36,7 @@ jobs:
           CIBW_SKIP: "*-musllinux* pp*"
           CIBW_ARCHS_LINUX: "x86_64 aarch64"
           CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_ARCHS_MACOS: "arm64"
           CIBW_BEFORE_BUILD: "pip install nanobind scikit-build-core"
           CIBW_ENVIRONMENT: 'CMAKE_BUILD_TYPE="Release"'
 
