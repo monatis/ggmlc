@@ -721,28 +721,18 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 float eps = op.float_attributes.count("eps") ? static_cast<float>(op.float_attributes.at("eps"))
                           : op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
-                if (is_cuda_) {
-                    result = ggml_norm(ctx_, in0, eps);
-                    if (w) {
-                        result = ggml_mul(ctx_, result, w);
+                result = ggml_norm(ctx_, in0, eps);
+                if (w) {
+                    if (ggml_can_repeat(w, result)) {
+                        w = ggml_repeat(ctx_, w, result);
                     }
-                    if (b) {
-                        result = ggml_add(ctx_, result, b);
+                    result = ggml_mul(ctx_, result, w);
+                }
+                if (b) {
+                    if (ggml_can_repeat(b, result)) {
+                        b = ggml_repeat(ctx_, b, result);
                     }
-                } else if (!w && !b) {
-                    result = ggml_norm(ctx_, in0, eps);
-                } else if (!b) {
-                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
-                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
-                    params->eps = eps;
-                    result = ggml_map_custom2(ctx_, in0, w, [](struct ggml_tensor* dst, const struct ggml_tensor* a, const struct ggml_tensor* wt, int ith, int nth, void* userdata) {
-                        ggmlc_compute_forward_layer_norm(dst, a, wt, nullptr, ith, nth, userdata);
-                    }, GGML_N_TASKS_MAX, params);
-                } else {
-                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
-                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
-                    params->eps = eps;
-                    result = ggml_map_custom3(ctx_, in0, w, b, ggmlc_compute_forward_layer_norm, GGML_N_TASKS_MAX, params);
+                    result = ggml_add(ctx_, result, b);
                 }
                 break;
             }
@@ -751,16 +741,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 float eps = op.float_attributes.count("eps") ? static_cast<float>(op.float_attributes.at("eps"))
                           : op.attributes.count("eps") ? static_cast<float>(op.attributes.at("eps")) : 1e-5f;
 
-                if (is_cuda_) {
-                    result = ggml_rms_norm(ctx_, in0, eps);
-                    if (w) {
-                        result = ggml_mul(ctx_, result, w);
+                result = ggml_rms_norm(ctx_, in0, eps);
+                if (w) {
+                    if (ggml_can_repeat(w, result)) {
+                        w = ggml_repeat(ctx_, w, result);
                     }
-                } else {
-                    custom_params_storage_.emplace_back(sizeof(struct ggmlc_norm_params));
-                    struct ggmlc_norm_params* params = reinterpret_cast<struct ggmlc_norm_params*>(custom_params_storage_.back().data());
-                    params->eps = eps;
-                    result = ggml_map_custom2(ctx_, in0, w, ggmlc_compute_forward_rms_norm, GGML_N_TASKS_MAX, params);
+                    result = ggml_mul(ctx_, result, w);
                 }
                 break;
             }

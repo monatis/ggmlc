@@ -87,6 +87,8 @@ def test_kerashub_gpt2_e2e():
 
 
 def test_flax_vit_b16_e2e():
+    import gc
+
     forward_fn, (x_np,), _names, _ = load_flax_vit_b16(
         resolution=224, num_layers=2, dim=256, num_heads=4
     )
@@ -101,13 +103,17 @@ def test_flax_vit_b16_e2e():
     assert gguf_bytes.startswith(b"GGUF")
 
     runner = ggmlc.load(gguf_bytes)
-    out_np = runner(x=x_np)
+    out_np = runner(x_np)
 
     cos_sim = cosine_similarity(ref_out, out_np)
+    del forward_fn, x_np, gguf_bytes, runner
+    gc.collect()
     assert cos_sim > 0.999, f"Flax ViT-B/16 cosine similarity low: {cos_sim}"
 
 
 def test_kerashub_gemma3_e2e():
+    import gc
+
     forward_fn, (t_ids, p_mask), _names, _ = load_kerashub_gemma3(
         seq_len=16,
         vocabulary_size=1000,
@@ -134,3 +140,5 @@ def test_kerashub_gemma3_e2e():
 
     assert not np.isnan(out_np).any(), "Gemma 3 output contains NaNs"
     assert out_np.reshape(ref_out.shape).shape == ref_out.shape
+    del forward_fn, t_ids, p_mask, gguf_bytes, runner
+    gc.collect()

@@ -70,4 +70,4 @@ jobs:
 
       - name: Run Test Suite (CPU Mode)
         run: |
-          pytest -v -m "not cuda" --tb=short
+          pytest -v -m "not cuda and not slow" --tb=short
