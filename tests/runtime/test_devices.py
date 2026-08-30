@@ -57,6 +57,7 @@ def test_auto_device_execution():
         assert out.squeeze().shape == (4,)
 
 
+@pytest.mark.cuda
 def test_cuda_device_execution_if_available():
     devices = ggmlc.get_available_devices()
     cuda_available = any(d.startswith("cuda") for d in devices)

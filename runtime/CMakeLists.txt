@@ -67,5 +67,7 @@ if (Python_FOUND)
             LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_SOURCE_DIR}/python/ggmlc"
             RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_SOURCE_DIR}/python/ggmlc"
         )
+
+        install(TARGETS _runtime DESTINATION ggmlc)
     endif()
 endif()

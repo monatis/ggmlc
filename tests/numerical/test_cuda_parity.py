@@ -12,7 +12,14 @@ def is_cuda_available() -> bool:
     return any(d.startswith("cuda") for d in ggmlc.get_available_devices())
 
 
-@pytest.mark.skipif(not is_cuda_available(), reason="CUDA device required for CUDA parity tests")
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(
+        not is_cuda_available(), reason="CUDA device required for CUDA parity tests"
+    ),
+]
+
+
 def test_cuda_mlp_parity():
     class MLP(nn.Module):
         def __init__(self):
@@ -43,7 +50,6 @@ def test_cuda_mlp_parity():
         assert np.max(np.abs(cpu_out - cuda_out)) < 1e-5
 
 
-@pytest.mark.skipif(not is_cuda_available(), reason="CUDA device required for CUDA parity tests")
 def test_cuda_fused_transformer_layer_parity():
     class TransformerBlock(nn.Module):
         def __init__(self, d_model=32, n_heads=2):
@@ -90,7 +96,6 @@ def test_cuda_fused_transformer_layer_parity():
         assert np.max(np.abs(cpu_out - cuda_out)) < 1e-4
 
 
-@pytest.mark.skipif(not is_cuda_available(), reason="CUDA device required for CUDA parity tests")
 def test_cuda_quantized_parity():
     class BigLinear(nn.Module):
         def __init__(self):

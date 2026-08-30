@@ -15,7 +15,10 @@ from examples.models.hub_models import (
 )
 
 cuda_available = "cuda" in get_available_devices() or "cuda:0" in get_available_devices()
-pytestmark = pytest.mark.skipif(not cuda_available, reason="Native CUDA device not available")
+pytestmark = [
+    pytest.mark.cuda,
+    pytest.mark.skipif(not cuda_available, reason="Native CUDA device not available"),
+]
 
 
 def _verify_model_cuda(
