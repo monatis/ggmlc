@@ -13,6 +13,7 @@ __pycache__
 scratch/
 *.pyd
 *.so
+*.dll
 *.whl
 *.egg-info
 *.dist-info
