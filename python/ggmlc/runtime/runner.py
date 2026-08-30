@@ -218,6 +218,35 @@ class ModelRunner:
             return next(iter(results.values()))
         return results
 
+    def set_state(self, state_name_or_id: str | int, array: np.ndarray) -> None:
+        """Sets data for a persistent state tensor by name or ID."""
+        arr_c = np.ascontiguousarray(array)
+        if isinstance(state_name_or_id, int):
+            self.executor.set_state_by_id(state_name_or_id, arr_c)
+        else:
+            self.executor.set_state_by_name(state_name_or_id, arr_c)
+
+    def get_state(self, state_name_or_id: str | int) -> np.ndarray:
+        """Retrieves data for a persistent state tensor by name or ID."""
+        if isinstance(state_name_or_id, int):
+            raw_bytes = self.executor.get_state_bytes(state_name_or_id)
+            t = self.tensor_info.get(state_name_or_id)
+        else:
+            tid = None
+            for k, v in self.tensor_info.items():
+                if v.name == state_name_or_id:
+                    tid = k
+                    break
+            if tid is not None:
+                raw_bytes = self.executor.get_state_bytes(tid)
+                t = self.tensor_info.get(tid)
+            else:
+                raw_bytes = self.executor.get_state_bytes_by_name(state_name_or_id)
+                t = None
+        dtype_val = t.type if t else 0
+        np_dtype = GGML_TYPE_TO_NUMPY.get(dtype_val, np.dtype(np.float32))
+        return np.frombuffer(raw_bytes, dtype=np_dtype)
+
     def reset_state(self) -> None:
         """Resets all persistent state buffers in the executor."""
         self.executor.reset_state()

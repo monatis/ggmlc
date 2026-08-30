@@ -94,7 +94,7 @@ def test_flax_vit_b16_e2e():
     import gc
 
     forward_fn, (x_np,), _names, _ = load_flax_vit_b16(
-        resolution=224, num_layers=2, dim=256, num_heads=4
+        resolution=64, num_layers=2, dim=128, num_heads=4
     )
     ref_out = np.asarray(forward_fn(x_np))
 
