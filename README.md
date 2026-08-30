@@ -5,7 +5,7 @@
 ### Next-Generation Semantic Tensor Program Compiler to GGML & Standalone C++
 
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Format](https://img.shields.io/badge/binary-GGUF%20v3-orange.svg)](https://github.com/ggerganov/ggml)
 [![Backends](https://img.shields.io/badge/backends-CPU%20%7C%20NVIDIA%20CUDA-purple.svg)](https://github.com/ggerganov/ggml)
@@ -283,7 +283,7 @@ pip install "ggmlc[all]"
 
 Or install locally from source in editable mode:
 ```bash
-git clone --recursive https://github.com/monatis/ggmlc.git
+git clone https://github.com/monatis/ggmlc.git
 cd ggmlc
 pip install -e ".[all]"
 ```
@@ -297,8 +297,7 @@ pip install -e ".[all]"
 #### Linux & WSL
 
 ```bash
-# Clone with third_party submodules
-git clone --recursive https://github.com/monatis/ggmlc.git
+git clone https://github.com/monatis/ggmlc.git
 cd ggmlc
 
 # Build CPU runtime
@@ -313,8 +312,7 @@ cmake --build build-cuda -j$(nproc)
 #### Windows (MSVC 2022 / Ninja)
 
 ```powershell
-# Clone with third_party submodules
-git clone --recursive https://github.com/monatis/ggmlc.git
+git clone https://github.com/monatis/ggmlc.git
 cd ggmlc
 
 # Option A: Windows CPU Build (Visual Studio Solution)
@@ -338,8 +336,8 @@ cmake --build build -j$(sysctl -n hw.logicalcpu)
 ### 3. Running the Test Suite
 
 ```powershell
-# Run all unit tests, IR passes, codegen, and CPU numerical tests (CI mode)
-pytest -v -m "not cuda"
+# Run standard CPU test suite (CI mode)
+pytest -v -m "not cuda and not slow"
 
 # Run full test suite including CUDA GPU numerical parity (requires NVIDIA GPU)
 pytest -v
