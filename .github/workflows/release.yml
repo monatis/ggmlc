@@ -29,6 +29,10 @@ jobs:
         with:
           platforms: all
 
+      - name: Set up MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Set up CUDA Toolkit (Windows)
         if: matrix.os == 'windows-latest'
         uses: Jimver/cuda-toolkit@v0.2.21
@@ -50,7 +54,7 @@ jobs:
           CIBW_BEFORE_ALL_LINUX: >
             if [ $(uname -m) = "x86_64" ]; then
               dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
-              dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 libcurand-devel-12-4 libcublas-devel-12-4
+              dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 cuda-driver-devel-12-4 libcurand-devel-12-4 libcublas-devel-12-4
             fi
           CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90"'
           CIBW_ENVIRONMENT_WINDOWS: 'CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61;70;75;80;86;89;90"'
