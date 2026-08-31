@@ -4,10 +4,27 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ggmlc"
-version = "0.1.0"
-description = "A Neural-Network Compiler Targeting GGML"
+version = "0.1.1"
+description = "A multi-framework neural network compiler lowering PyTorch, JAX, Flax, and Keras models to portable, high-performance GGML execution"
+authors = [
+    { name = "M. Yusuf Sarıgöz", email = "yusufsarigoz@gmail.com" },
+]
+license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["compiler", "deep-learning", "ggml", "pytorch", "jax", "flax", "keras", "inference", "cuda"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "numpy>=1.24.0",
 ]
