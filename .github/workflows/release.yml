@@ -61,8 +61,9 @@ jobs:
               dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo &&
               dnf install -y cuda-nvcc-12-4 cuda-cudart-devel-12-4 cuda-driver-devel-12-4 libcurand-devel-12-4 libcublas-devel-12-4
             fi
-          CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90"'
-          CIBW_ENVIRONMENT_WINDOWS: 'NVCC_PREPEND_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90 -DCMAKE_CUDA_FLAGS=\"-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH\""'
+          CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80 -DGGML_CUDA_NO_VMM=ON"'
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libcuda.so.1 --exclude libcuda.so -w {dest_dir} {wheel}"
+          CIBW_ENVIRONMENT_WINDOWS: 'NVCC_PREPEND_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80 -DCMAKE_CUDA_FLAGS=\"-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH\""'
           CIBW_ENVIRONMENT_MACOS: 'CMAKE_BUILD_TYPE="Release"'
 
       - name: Upload Wheels Artifact
