@@ -1187,14 +1187,15 @@ def _import_equations(
             in_t = g.get_tensor(in_tids[0])
             axes = eqn.params.get("axes", (0,))
             dim = int(axes[0]) if isinstance(axes, (tuple, list)) and len(axes) > 0 else int(axes)
-            in_dims = [_dim_val(d) for d in in_t.shape.dims]
+            in_dims = [d.value if hasattr(d, "value") else int(d) for d in in_t.shape]
             if dim < 0:
                 dim += len(in_dims)
             N = in_dims[dim]
+            keepdims_shape = tuple([in_dims[i] if i != dim else 1 for i in range(len(in_dims))])
 
             sum_t = g.add_tensor(
                 name=f"sum_{out_var}",
-                shape=out_t.shape,
+                shape=Shape.from_tuple(keepdims_shape),
                 dtype=DType.F32,
                 storage=StorageClass.ACTIVATION,
             )
@@ -1216,7 +1217,7 @@ def _import_equations(
                 g.parameters.append(n_const.id)
                 diff_n = g.add_tensor(
                     name=f"diff_n_{out_var}",
-                    shape=out_t.shape,
+                    shape=Shape.from_tuple(keepdims_shape),
                     dtype=DType.F32,
                     storage=StorageClass.ACTIVATION,
                 )
@@ -1228,7 +1229,7 @@ def _import_equations(
                 )
                 abs_n = g.add_tensor(
                     name=f"abs_n_{out_var}",
-                    shape=out_t.shape,
+                    shape=Shape.from_tuple(keepdims_shape),
                     dtype=DType.F32,
                     storage=StorageClass.ACTIVATION,
                 )
@@ -1240,7 +1241,7 @@ def _import_equations(
                 )
                 clamp_n = g.add_tensor(
                     name=f"clamp_n_{out_var}",
-                    shape=out_t.shape,
+                    shape=Shape.from_tuple(keepdims_shape),
                     dtype=DType.F32,
                     storage=StorageClass.ACTIVATION,
                 )
@@ -1259,20 +1260,56 @@ def _import_equations(
                     data=np.array(1.0, dtype=np.float32),
                 )
                 g.parameters.append(one_t.id)
+                res_keep = g.add_tensor(
+                    name=f"res_keep_{out_var}",
+                    shape=Shape.from_tuple(keepdims_shape),
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
                 g.add_op(
                     opcode=OpCode.SUB,
                     inputs=[one_t.id, clamp_n.id],
-                    outputs=[out_t.id],
+                    outputs=[res_keep.id],
                     name=f"reduce_and_{out_var}",
                 )
+                out_shape_tuple = tuple(
+                    [d.value if hasattr(d, "value") else int(d) for d in out_t.shape]
+                )
+                if out_shape_tuple != keepdims_shape:
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[res_keep.id],
+                        outputs=[out_t.id],
+                        name=f"reshape_{out_var}",
+                    )
+                else:
+                    var_to_tensor[out_var] = res_keep
             else:
+                clamp_or = g.add_tensor(
+                    name=f"clamp_or_{out_var}",
+                    shape=Shape.from_tuple(keepdims_shape),
+                    dtype=DType.F32,
+                    storage=StorageClass.ACTIVATION,
+                )
                 g.add_op(
                     opcode=OpCode.CLAMP,
                     inputs=[sum_t.id],
-                    outputs=[out_t.id],
+                    outputs=[clamp_or.id],
                     attributes={"min": 0.0, "max": 1.0},
                     name=f"reduce_or_{out_var}",
                 )
+                out_shape_tuple = tuple(
+                    [d.value if hasattr(d, "value") else int(d) for d in out_t.shape]
+                )
+                if out_shape_tuple != keepdims_shape:
+                    g.add_op(
+                        opcode=OpCode.RESHAPE,
+                        inputs=[clamp_or.id],
+                        outputs=[out_t.id],
+                        name=f"reshape_{out_var}",
+                    )
+                else:
+                    var_to_tensor[out_var] = clamp_or
             continue
 
         if prim_name == "select_n":

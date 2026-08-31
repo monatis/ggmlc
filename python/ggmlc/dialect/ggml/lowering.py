@@ -127,7 +127,7 @@ def lower_to_ggml(
             idx_t = canonical_graph.get_tensor(idx_id)
             if idx_t and idx_t.dtype in (DType.I32, DType.I64):
                 idx_t.dtype = DType.I32
-                if idx_t.data is not None:
+                if idx_t.data is not None and hasattr(idx_t.data, "astype"):
                     idx_t.data = np.ascontiguousarray(idx_t.data.astype(np.int32))
 
         # Promote mixed int/float operands in binary arithmetic to F32
@@ -137,11 +137,11 @@ def lower_to_ggml(
             if t0 and t1:
                 if t0.dtype == DType.F32 and t1.dtype in (DType.I32, DType.I64, DType.BOOL):
                     t1.dtype = DType.F32
-                    if t1.data is not None:
+                    if t1.data is not None and hasattr(t1.data, "astype"):
                         t1.data = np.ascontiguousarray(t1.data.astype(np.float32))
                 elif t1.dtype == DType.F32 and t0.dtype in (DType.I32, DType.I64, DType.BOOL):
                     t0.dtype = DType.F32
-                    if t0.data is not None:
+                    if t0.data is not None and hasattr(t0.data, "astype"):
                         t0.data = np.ascontiguousarray(t0.data.astype(np.float32))
 
     ggml_graph = GGMLExecutionGraph(
@@ -378,6 +378,15 @@ def _lower_op(
             in_ids,
             out_ids,
             {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_NEG)},
+            op.name,
+        )
+    elif opcode == OpCode.ABS:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_ABS)},
             op.name,
         )
     elif opcode == OpCode.SIN:

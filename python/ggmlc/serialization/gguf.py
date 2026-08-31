@@ -168,7 +168,11 @@ def _graph_to_json_spec(graph: GGMLExecutionGraph) -> str:
         "tensors": tensors_spec,
         "nodes": nodes_spec,
     }
-    return json.dumps(spec, separators=(",", ":"))
+    return json.dumps(
+        spec,
+        separators=(",", ":"),
+        default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o),
+    )
 
 
 def _json_spec_to_graph(spec_str: str) -> GGMLExecutionGraph:

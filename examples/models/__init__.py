@@ -34,6 +34,7 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
 )
+
 try:
     from examples.models.kerashub_models import (
         load_kerashub_bert,

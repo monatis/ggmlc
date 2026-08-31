@@ -5,8 +5,19 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-import flax.linen as nn
 import jax
+
+try:
+    if (
+        hasattr(jax, "extend")
+        and hasattr(jax.extend, "core")
+        and not hasattr(jax.core, "get_opaque_trace_state")
+    ):
+        jax.core.get_opaque_trace_state = getattr(jax.extend.core, "get_opaque_trace_state", None)
+except (AttributeError, ImportError):
+    pass
+
+import flax.linen as nn
 import jax.numpy as jnp
 import numpy as np
 
