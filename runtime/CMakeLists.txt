@@ -35,8 +35,8 @@ target_link_libraries(ggmlc_runtime_shared PUBLIC
     ${GGML_BACKEND_LIBS}
 )
 
-# Optional Python Bindings with nanobind
-find_package(Python 3.10 COMPONENTS Interpreter Development.Module QUIET)
+# Optional Python Bindings with nanobind (targeting Python Limited API / abi3)
+find_package(Python 3.11 COMPONENTS Interpreter Development.Module QUIET)
 if (Python_FOUND)
     execute_process(
         COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
