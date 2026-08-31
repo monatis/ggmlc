@@ -169,7 +169,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             if (ggml_can_repeat(b, a)) return {a, b};
             if (ggml_can_repeat(a, b)) {
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
-                a = ggml_repeat(ctx_, a, b);
+                struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, b->ne[0], b->ne[1], b->ne[2], b->ne[3]);
+                struct ggml_tensor* rep_a = ggml_repeat(ctx_, a, target_a);
+                a = ggml_cpy(ctx_, rep_a, target_a);
                 return {a, b};
             }
 
@@ -185,7 +187,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
                 struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
                 if (ggml_can_repeat(a, target_a)) {
-                    a = ggml_repeat(ctx_, a, target_a);
+                    struct ggml_tensor* rep_a = ggml_repeat(ctx_, a, target_a);
+                    a = ggml_cpy(ctx_, rep_a, target_a);
                 }
             }
             if (need_repeat_b) {

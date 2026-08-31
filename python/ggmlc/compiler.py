@@ -194,17 +194,61 @@ def codegen(
     Returns:
         Path to the generated project directory.
     """
-    from ggmlc.frontend.pytorch import export_torch_model
+    from ggmlc.dialect.ggml.lowering import FusionOptions, lower_to_ggml
+    from ggmlc.ir.graph import Graph
 
     inputs_tuple = tuple(sample_inputs) if isinstance(sample_inputs, list) else sample_inputs
-    exported = export_torch_model(
-        model, inputs_tuple, dynamic_shapes=dynamic_shapes, model_name=model_name
+
+    if isinstance(model, Graph):
+        canonical_graph = model
+    elif hasattr(model, "eval") or (
+        isinstance(model, type) or (callable(model) and hasattr(model, "state_dict"))
+    ):
+        try:
+            from ggmlc.frontend.pytorch import export_torch_model
+
+            exported = export_torch_model(
+                model, inputs_tuple, dynamic_shapes=dynamic_shapes, model_name=model_name
+            )
+            canonical_graph = exported.main_graph
+        except (AttributeError, TypeError, ImportError, RuntimeError):
+            from ggmlc.frontend.jax.exporter import export_jax_fn
+
+            exported = export_jax_fn(model, inputs_tuple, model_name=model_name)
+            canonical_graph = exported.main_graph
+    elif hasattr(model, "eqns"):  # JAX ClosedJaxpr
+        from ggmlc.frontend.jax.importer import import_jaxpr
+
+        canonical_graph = import_jaxpr(model, graph_name=model_name)
+    elif callable(model):
+        from ggmlc.frontend.jax.exporter import export_jax_fn
+
+        exported = export_jax_fn(model, inputs_tuple, model_name=model_name)
+        canonical_graph = exported.main_graph
+    else:
+        raise TypeError(f"Unsupported model type for codegen: {type(model)}")
+
+    f_opts = FusionOptions()
+    if fusion_options:
+        for k, v in fusion_options.items():
+            if hasattr(f_opts, k):
+                setattr(f_opts, k, v)
+
+    if enable_optimizations:
+        from ggmlc.transforms import create_standard_optimization_pipeline
+
+        pipeline = create_standard_optimization_pipeline()
+        canonical_graph = pipeline(canonical_graph)
+
+    ggml_graph = lower_to_ggml(
+        canonical_graph,
+        enable_fusion=enable_fusion,
+        fusion_options=f_opts,
     )
 
-    return generate_cpp_project(
-        exported_program=exported,
+    generate_cpp_project(
+        graph=ggml_graph,
         output_dir=output_dir,
         model_name=model_name,
-        enable_fusion=enable_fusion,
-        fusion_options=fusion_options,
     )
+    return Path(output_dir)
