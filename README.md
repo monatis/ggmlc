@@ -224,7 +224,7 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 ```
 
 <details>
-<summary><b>Click to expand GeForce GTX 1080 Benchmark Results (Sanity Check)</b></summary>
+<summary><b>Click to expand GeForce GTX 1050 Benchmark Results (Sanity Check)</b></summary>
 
 <br/>
 
