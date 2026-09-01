@@ -39,7 +39,7 @@ graph TD
 
 ### Supported Execution Devices
 - `cpu`: Evaluates the forward graph on multi-core CPU using OpenMP / pthread thread pools.
-- `cuda` / `cuda:0` / `cuda:N`: Evaluates the computation graph entirely on the specified NVIDIA GPU (Pascal GTX 1050/1080 through Hopper architectures).
+- `cuda` / `cuda:0` / `cuda:N`: Evaluates the computation graph entirely on the specified NVIDIA GPU (Pascal GTX 1050 through Hopper architectures).
 - `auto`: Automatically detects available GPUs via `ggml_backend_cuda_get_device_count()`, selecting `cuda:0` if available and falling back to `cpu`.
 
 ---

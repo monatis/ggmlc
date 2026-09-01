@@ -10,8 +10,13 @@
 [![Format](https://img.shields.io/badge/binary-GGUF%20v3-orange.svg)](https://github.com/ggerganov/ggml)
 [![Backends](https://img.shields.io/badge/backends-CPU%20%7C%20NVIDIA%20CUDA-purple.svg)](https://github.com/ggerganov/ggml)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20WSL-lightgrey.svg)]()
+[![Roadmap](https://img.shields.io/badge/roadmap-view%20plans-blueviolet.svg)](docs/architecture/future_roadmap.md)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1jD5Pr4ObD9CGoRoC7_LQmAGvh0AZZ6KW?usp=sharing)
 
 *Compile neural network graphs from PyTorch and JAX into ultra-fast, portable GGUF binaries and human-readable C++ projects with CPU & GPU (CUDA) execution.*
+
+> 🚀 **Interactive Google Colab Demo**: Try `ggmlc` directly in your browser with benchmarking, PyTorch/JAX model compilation, graph visualization, and standalone C++ export:  
+> [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1jD5Pr4ObD9CGoRoC7_LQmAGvh0AZZ6KW?usp=sharing)
 
 ---
 
@@ -212,7 +217,39 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 ## ⚡ Continuous Benchmarking Suite
 
-I'm continuously verifying numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite. I will soon publish more benchmarking results from a variety of GPUs, but this is just for a sanity check.
+We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 27 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
+
+### NVIDIA T4 GPU Benchmark Results (Google Colab)
+
+| Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **23.08** | 23.94 | 42.8 | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **12.46** | 12.58 | 80.3 | `9.54e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **29.30** | 30.20 | 34.0 | `6.94e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **72.48** | 82.31 | 13.9 | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **25.92** | 26.25 | 38.6 | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | 552 | 31.12 MB | **51.90** | 75.87 | 16.9 | `2.86e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | 1900 | 18.68 MB | **40.35** | 46.24 | 24.1 | `3.34e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **40.68** | 52.73 | 22.9 | `5.67e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **186.90** | 189.80 | 5.3 | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **28.13** | 28.25 | 35.5 | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **354.67** | 367.95 | 2.8 | `1.72e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | 251 | 417.79 MB | **121.02** | 131.27 | 8.2 | `1.84e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **172.44** | 196.95 | 5.7 | `1.68e-04` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 1187 | 2404.34 MB | **666.57** | 730.46 | 1.5 | `1.19e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **60.50** | 66.97 | 16.8 | `3.97e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **32.53** | 32.73 | 30.8 | `5.45e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | 501 | 10.6 MB | **17.60** | 17.74 | 56.8 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | 566 | 22.31 MB | **33.73** | 36.36 | 29.3 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | 392 | 99.32 MB | **69.66** | 69.99 | 15.5 | `3.49e-10` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | 772 | 109.84 MB | **103.35** | 119.95 | 9.5 | `5.59e-09` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | 802 | 33.19 MB | **70.94** | 79.95 | 15.0 | `2.08e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | 570 | 22.33 MB | **48.58** | 48.86 | 20.9 | `1.16e-10` | ✅ PASS |
+| **JAX-Vision** | `flax_vit_b16` | 915 | 331.17 MB | **163.98** | 178.91 | 6.0 | `8.28e-04` | ✅ PASS |
+| **JAX-NLP** | `kerashub_bert` | 373 | 39.74 MB | **21.49** | 26.96 | 44.2 | `1.43e-06` | ✅ PASS |
+| **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **28.61** | 29.61 | 35.4 | `4.42e-05` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **26.86** | 29.07 | 36.6 | `1.55e-06` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **22.84** | 23.33 | 43.6 | `3.81e-06` | ✅ PASS |
 
 You can also run the benchmarking suite on your own machine:
 ```powershell
@@ -224,7 +261,7 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 ```
 
 <details>
-<summary><b>Click to expand GeForce GTX 1050 Benchmark Results (Sanity Check)</b></summary>
+<summary><b>Click to expand GeForce GTX 1050 Benchmark Results (Local Sanity Check)</b></summary>
 
 <br/>
 
@@ -255,8 +292,8 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 | **JAX-Vision** | `flax_vit_b16` | Flax / JAX | 915 | 331.17 MB | **286.78 ms** | **3.4 inf/s** | `8.31e-04` | ✅ PASS |
 | **JAX-NLP** | `kerashub_bert` | KerasHub / JAX | 385 | 40.75 MB | **36.27 ms** | **25.9 inf/s** | `1.43e-06` | ✅ PASS |
 | **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | **37.63 ms** | **26.5 inf/s** | `4.36e-05` | ✅ PASS |
-| **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
 
 </details>
 
@@ -266,19 +303,20 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 
 ### 1. Python Package Installation
 
-Install directly with `pip` or `uv`:
+Pre-built binary wheels (~130 MB each due to bundled CUDA runtime and C++ libraries) are hosted on our custom PyPI index via GitHub Pages:
+
 ```bash
 # Lightweight runtime (Inference only)
-pip install ggmlc
+pip install ggmlc --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # With PyTorch compiler frontend
-pip install "ggmlc[torch]"
+pip install "ggmlc[torch]" --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # With JAX/Flax compiler frontend
-pip install "ggmlc[jax]"
+pip install "ggmlc[jax]" --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # Complete development suite (PyTorch, JAX, HuggingFace, test runners)
-pip install "ggmlc[all]"
+pip install "ggmlc[all]" --extra-index-url https://monatis.github.io/ggmlc-index/
 ```
 
 Or install locally from source in editable mode:
