@@ -18,6 +18,8 @@
 > 🚀 **Interactive Google Colab Demo**: Try `ggmlc` directly in your browser with benchmarking, PyTorch/JAX model compilation, graph visualization, and standalone C++ export:  
 > [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1jD5Pr4ObD9CGoRoC7_LQmAGvh0AZZ6KW?usp=sharing)
 
+> Some parts of this project were completed with GCP-provided cloud credits. Thank you Google for supporting the open-source.
+ 
 ---
 
 </div>
