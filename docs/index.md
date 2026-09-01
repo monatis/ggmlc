@@ -75,16 +75,25 @@ api/visualization
 
 ## Quick Installation
 
+Pre-built binary wheels (~130 MB each with bundled CUDA and C++ runtimes) are hosted on our custom PyPI index:
+
 ```bash
 # Minimal Runtime (High-performance inference only)
-pip install ggmlc
+pip install ggmlc --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # With PyTorch compiler frontend
-pip install "ggmlc[torch]"
+pip install "ggmlc[torch]" --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # With JAX/Flax compiler frontend
-pip install "ggmlc[jax]"
+pip install "ggmlc[jax]" --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # Complete development environment
-pip install "ggmlc[all]"
+pip install "ggmlc[all]" --extra-index-url https://monatis.github.io/ggmlc-index/
 ```
+
+## Interactive Google Colab Demo
+
+Run the interactive demo notebook covering benchmarking, PyTorch/JAX model compilation, graph visualization, and standalone C++ export directly in your browser:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1jD5Pr4ObD9CGoRoC7_LQmAGvh0AZZ6KW?usp=sharing)
+

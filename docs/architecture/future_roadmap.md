@@ -1,142 +1,117 @@
-# ggmlc Architecture Decisions & Strategic Roadmap
+# ggmlc Architecture & Future Roadmap
 
-This document outlines the architectural foundation, core design decisions, and future technical roadmap for `ggmlc`.
-
----
-
-## 1. Core Architectural Pillars
-
-### A. Intended Use & Target Scenarios
-`ggmlc` bridges the gap between high-level neural network research (PyTorch, JAX) and high-performance, zero-dependency CPU/edge deployment (GGML).
-
-- **Pain Point Addressed**: Eliminates the weeks of manual C++ graph-coding and stride-math currently required to port new or custom neural network architectures to GGML/`llama.cpp`.
-- **Target Persona**: AI researchers, edge ML engineers, and application developers deploying custom architectures across servers, laptops, mobile devices, and WebAssembly.
+This document covers how `ggmlc` is built today, why it was designed this way, and what we're building next.
 
 ---
 
-### B. Strategic Architectural Decisions
+## 1. Core Architecture Decisions
 
-#### Decision 1: GGUF as the Primary Container Format
-- **Decision**: Adopt the standard **GGUF binary format** as the official packaging format rather than an isolated proprietary container.
-- **Implementation**:
-  - `general.architecture = "ggmlc"`
-  - `ggmlc.version = "1.0.0"`
-  - `ggmlc.graph_spec = "{ ... }"` (graph metadata stored in GGUF header)
-  - Tensors stored using standard GGUF memory-aligned buffers (FP32, Q8_0, Q4_0, Q4_K).
-- **Rationale**: Immediate compatibility with Hugging Face Hub, `gguf-py`, existing quantization tooling, and zero-copy memory mapping (`mmap`).
+### GGUF as the Native Container
+Instead of inventing a custom file format, `ggmlc` outputs standard **GGUF v3** files:
+- Header metadata stores the entire execution graph spec (`ggmlc.graph_spec` JSON), tensor descriptors, dynamic shapes, and storage classes.
+- Weight tensors are stored in memory-aligned binary buffers (supporting FP32, Q8_0, Q4_0, and k-quants).
+- **Why this matters**: Immediate compatibility with existing tooling (`gguf-py`, Hugging Face Hub), zero-copy memory mapping (`mmap`), and fast load times.
 
-#### Decision 2: Dual Output Engine (Generic Runtime + Human-Readable C++ Codegen)
-- **Decision**: Provide two compilation targets:
-  1. **Direct GGUF Compilation**: Portable `.gguf` executable by the generic C++ runtime without recompilation.
-  2. **Human-Readable C++ Code Generation**: Clean, structured `model.cpp` source code implementing the model's `build_graph()` function.
-- **Rationale**:
-  - Complete transparency and inspectability for engineers.
-  - Serves as the foundation for **Bring Your Own Kernel (BYOK)** and **Agentic Custom Kernel Optimization**.
-  - Provides a drafting tool for upstreaming model architectures directly to `llama.cpp`.
+### Dual Targets: Generic Runtime + Standalone C++ Project Export
+When you compile a model in `ggmlc`, you can target two modes:
+1. **GGUF Binary**: Streamed to disk and executed by the generic `ggmlc-runtime` / Python runner without any recompilation.
+2. **Standalone C++ Project (`ggmlc.codegen`)**: Generates a self-contained directory containing `<Model>.h`, `ggmlc_main.cpp`, and `CMakeLists.txt`.
+- **Why this matters**:
+  - Full transparency: You can inspect every line of C++ graph construction and stride math.
+  - Zero Python dependencies at deployment: Compile directly with MSVC, GCC, or Clang.
+  - Foundation for **BYOK (Bring Your Own Kernel)** and **Agentic Custom Kernel Optimization**, letting developers (or AI coding agents) swap in hand-tuned or synthesized micro-kernels for hot fused subgraphs.
 
-#### Decision 3: Clean Separation of Compiler and Runtime
-- **Decision**:
-  - **`ggmlc` (Compiler)**: Python-based frontend, IR passes, shape inferencing, quantization, and codegen.
-  - **`ggmlc-runtime` (Engine)**: Pure C++17 library depending exclusively on GGML with **zero Python / PyTorch dependencies**.
-- **Rationale**: Allows packaging a lightweight standalone C++ shared library (`libggmlc_runtime.so` / `.dll`) and creating lightweight bindings across Python, Rust (`ggmlc-rs`), Swift, Android (JNI), and WebAssembly.
+### Clean Separation Between Compiler and Runtime
+- **`ggmlc` (Compiler)**: Python-based frontend, Canonical IR functional DAG, shape inferencing, quantization, optimization passes, and C++ code generator.
+- **`ggmlc-runtime` (Execution Engine)**: Pure C++17 library linking against GGML. Zero dependency on Python, PyTorch, or libtorch.
+- **Why this matters**: Makes it trivial to embed into native desktop apps, server binaries, mobile apps (Android/iOS), or foreign language bindings (Rust, Swift, WASM).
 
-#### Decision 4: Cross-Framework Semantic Convergence via Transformation Passes (Not Ingestion Isomorphism)
-- **Decision**: Target **strict runtime numerical parity and semantic convergence** across disparate ML frontends (PyTorch ATen vs JAX/XLA primitives) rather than forcing 100% graph isomorphism at the raw Canonical IR ingestion boundary. Exploit structural differences to drive robust pattern matching and operator fusion optimization passes.
-- **Rationale**:
-  - `torch.export` captures graphs at the mid-to-coarse ATen operator level (`aten.layer_norm`, `aten._softmax`, `aten.relu`, `aten.scaled_dot_product_attention`).
-  - `jax.make_jaxpr` decomposes graphs into RISC-style mathematical primitives (`lax.reduce_sum`, `lax.max`, `lax.exp`, `lax.div`, `lax.broadcast_in_dim`).
-  - Forcing the frontend importer to synthetically reconstruct all fine-grained math into coarse ATen-like nodes creates brittle, non-composable heuristics.
-  - Instead, Canonical IR natively supports multi-level representations. The **Optimization Pipeline (`transforms/fusion.py`)** pattern-matches decomposed subgraphs (Softmax, LayerNorm, RMSNorm, SwiGLU, BiasGELU, Conv+ReLU) into high-performance fused operators, benefiting both JAX and PyTorch execution paths.
-  - Guarantees exact runtime numerical parity ($\Delta = 0.0$) on the GGML engine while maximizing hardware execution throughput.
+### Semantic Convergence via Passes (Not Brittle Ingestion Hacks)
+Different ML frameworks represent the same computation differently:
+- PyTorch (`torch.export`) emits mid-level ATen ops (`aten.layer_norm`, `aten._softmax`, `aten.scaled_dot_product_attention`).
+- JAX (`jax.make_jaxpr`) decomposes math into RISC-style primitives (`lax.reduce_sum`, `lax.max`, `lax.exp`, `lax.div`).
+
+Rather than trying to force both frontends into identical ASTs at the ingestion boundary, `ggmlc` ingests them cleanly into Canonical IR and relies on the **Optimization Pipeline (`transforms/fusion.py`)** to pattern-match decomposed subgraphs (LayerNorm, RMSNorm, Softmax, SwiGLU, BiasGELU, Conv+ReLU) into fused execution kernels. Both frontends converge to the same high-performance GGML execution graph with exact numerical parity.
 
 ---
 
-## 2. Technical Roadmap & Strategic Priorities
+## 2. Living Baseline: Continuous Model Zoo & Differential Parity
 
-```
-+---------------------------------------------------------------------------------------+
-|                                        ggmlc                                          |
-+---------------------------------------------------------------------------------------+
-       |                               |                               |
-       v                               v                               v
- [ Phase 1: Core & Hardware ]   [ Phase 2: Massive Model Zoo ]   [ Phase 3: Runtime Pipelines ]
- - PyTorch & JAX Frontends      - Extensive PyTorch Zoo          - Pre-Processing Pipeline
- - Canonical IR & Optimizations - Comprehensive JAX/Flax Zoo     - Post-Processing & Sampling
- - GGUF v3 Binary Container     - 25+ Diverse Architectures      - Tokenizer / Audio Mel Frontend
- - Native CPU & CUDA Engine     - Edge-Cases & Dyn Shapes        - Low-Level Nanobind Tensor API
-                                                                        |
-                                                                        v
-                                                         [ Phase 4: Long-Term Ecosystem ]
-                                                         - Deferred Foreign Bindings (Rust)
-                                                         - Speculative Decoding & Paged Attn
-                                                         - BYOK Agentic Custom Kernels
-```
+Expanding model coverage and differential testing is an ongoing effort that runs continuously across every development cycle:
+- **Continuous Benchmarking & Verification**: Every supported architecture is continuously tested on both CPU and GPU (CUDA, and upcoming backends) against reference PyTorch / JAX runs to guarantee mathematical parity ($> 0.99999$ cosine similarity).
+- **Edge-Cases & Symbolic Shapes**: Extending support for complex slicing, dynamic dimension expressions, non-contiguous striding, and multi-branch architectures.
+- **Current Zoo (27 validated models)**: Spans Vision-CNN (ResNet, MobileNetV3, ConvNeXt, EfficientNet, DenseNet, RegNet), Detection (SSDLite), Vision Transformers (ViT-B/16), Text Embeddings (MiniLM, BGE-M3), Encoders (BERT, DistilBERT), SLMs (GPT-2, Qwen-2.5-0.5B, Gemma 3), and Audio Seq2Seq (Whisper-Tiny Encoder & Decoder).
 
 ---
 
-### Phase 1: Core Compiler & Hardware Foundations (Completed ✅)
-- **PyTorch (`torch.export`) & JAX (`jaxpr`) Frontends**: Standardized functional ingestion.
-- **Canonical IR & Dialect Lowering**: Strongly typed graph DAG, symbolic shape engine, operator fusion passes.
-- **GGUF v3 Container**: Streamed serialization with embedded execution graph metadata.
-- **Dual Hardware Execution**: Native Windows & Linux/WSL support for multi-threaded CPU and NVIDIA CUDA GPU.
-- **Continuous Benchmarking Harness**: Automated performance latency and differential accuracy testing.
+## 3. What We're Building Next
+
+### A. End-to-End Pipelines & Pre/Post-Processing
+Today, models accept pre-formatted numerical tensor buffers. We are building built-in preprocessing and postprocessing routines:
+- **Vision**: Image decoding, bicubic/bilinear resizing, aspect-ratio letterboxing, normalization (`(x - mean) / std`), channel permutations (NHWC $\leftrightarrow$ NCHW).
+- **Text**: Integrated BPE, WordPiece, and SentencePiece tokenization and detokenization.
+- **Audio**: Raw waveform loading and log-Mel spectrogram featurization.
+- **Raw Input Ingestion in `ggmlc-run`**:
+  - The CLI executable will directly accept raw images (`.jpg`/`.png`), plain text prompts, or audio files (`.wav`) instead of binary float arrays.
+- **Lightweight Inference Server Mode**:
+  - `ggmlc-run` will support running as a lightweight, low-overhead HTTP/IPC inference server in addition to single-shot CLI runs.
+- **Standalone C++ Project Inclusion**:
+  - Generated C++ projects (`ggmlc.codegen`) will optionally bundle these C++ preprocessing and postprocessing helpers for fully self-contained native apps.
+
+### B. Low-Level Nanobind Tensor Ops API
+In addition to the high-level model runner (`runner(x)`), we will expose granular, direct Python bindings to GGML tensor operations:
+- **Interactive Prototyping & Debugging**: Call individual operators (`ggmlc.ops.matmul(a, b)`, `ggmlc.ops.norm(x, eps)`, `ggmlc.ops.flash_attn(q, k, v)`) directly on NumPy / host / CUDA buffers.
+- **Micro-Benchmarking**: Profile and test standalone kernel efficiency and memory bandwidth on custom hardware without setting up full graphs.
+- **Lightweight Tensor Math**: Fast native CPU/GPU array operations on edge devices without needing heavy frameworks installed.
+
+### C. Bring Your Own Kernel (BYOK) & Agentic Kernel Optimization
+The standalone C++ export creates a direct path for custom hardware acceleration:
+- **Manual BYOK**: Drop custom SIMD (AVX2, AVX-512, NEON) or CUDA kernels directly into the generated C++ project.
+- **Agentic Optimization**: AI coding agents can analyze the exported C++ graph, detect performance bottlenecks in hot fused subgraphs, synthesize optimized micro-kernels, compile, benchmark them in a loop, and integrate the fastest variant back into the project.
+
+### D. Hardware Targets & Ecosystem Integration
+1. **Apple Silicon Metal (MPS)**:
+   - Native `ggml-metal` backend with unified memory zero-copy buffers on macOS and iOS.
+2. **WebAssembly & WebGPU**:
+   - In-browser execution via Emscripten and WebGPU compute shaders for zero-server-cost client inference.
+3. **Rust Bindings (`ggmlc-rs`)**:
+   - Safe, idiomatic Rust crate wrapping the native C++ runtime for systems and backend applications.
+4. **Mobile Platforms (Android NDK & iOS)**:
+   - Packaged static/shared libraries with JNI and Swift wrappers for on-device mobile deployment.
+5. **AMD ROCm (HIP) & Vulkan**:
+   - Broad GPU compatibility across AMD Radeon, Intel Arc, and integrated GPUs.
+
+### E. Advanced Quantization & Graph Optimizations
+1. **Advanced PTQ (AWQ & GPTQ)**:
+   - Activation-aware weight quantization and second-order error compensation integrated directly into Canonical IR passes.
+2. **Mixed-Precision K-Quants**:
+   - Automated per-tensor sensitivity analysis selecting the optimal GGML k-quant mix (`Q4_K_M`, `Q5_K_M`, `Q6_K`) to maximize throughput while minimizing perplexity loss.
+3. **Attention Kernel Specialization**:
+   - FlashAttention v2/v3 kernels for long-context execution ($L > 2048$).
+   - Sliding-window and chunked local attention lowerings (e.g. for Gemma 3 and Mistral architectures).
+4. **Static Arena Planning**:
+   - Interval-graph lifetime analysis to pre-allocate a single static scratchpad buffer, eliminating all runtime memory allocations during forward passes.
+
+### F. High-Throughput Serving & Dynamic KV-Cache
+1. **Paged KV-Cache**:
+   - Block-allocated virtual memory management for autoregressive decoders, eliminating VRAM fragmentation during multi-turn generation.
+2. **Continuous Dynamic Batching**:
+   - Iteration-level scheduling and request preemption for concurrent multi-user serving.
+3. **Speculative Decoding Loops**:
+   - Paired execution of lightweight draft SLMs (e.g. Qwen-2.5-0.5B) with larger target models to accelerate token generation throughput.
+
+### G. Multimodal & Extended Frontends
+1. **ONNX & SafeTensors Ingestion**:
+   - Direct parsing of standard ONNX computational graphs into Canonical IR.
+2. **Vision-Language & Multimodal Models**:
+   - Cross-attention and vision-projection architectures (CLIP, LLaVA, Florence-2).
+3. **Diffusion Architectures**:
+   - Ingestion and optimization of UNet and Diffusion Transformer (DiT) backbones.
 
 ---
 
-### Phase 2: Massive Multi-Model Expansion & Differential Testing (Active Priority 🎯)
+> [!NOTE]
+> The tracks and features outlined above represent our technical priorities and intended design direction. They will not necessarily be implemented in this exact sequential order and will adapt flexibly based on hardware updates, ecosystem shifts, and community contributions.
 
-Our primary value proposition is that **any PyTorch, JAX, or Flax neural network can be automatically compiled into high-performance GGML execution graphs with guaranteed 100% numerical parity**. 11 architectures are a strong foundation, but establishing true industrial confidence requires extensive coverage across all major model families in both PyTorch and JAX/Flax.
 
-#### A. Expanded PyTorch Model Coverage
-1. **Advanced Vision Architectures**:
-   - **ConvNeXt** (`convnext_tiny` / `small`): 7x7 depthwise separable convolutions, inverted bottleneck, LayerNorm in channels-last/first formats.
-   - **EfficientNet** (`efficientnet_b0` / `v2_s`): MBConv blocks, fused squeeze-and-excitation, Swish activations.
-   - **Swin Transformer** (`swin_t`): Shifted window self-attention, cyclic rolling, relative position bias.
-2. **Language & Modern SLMs**:
-   - **Llama 3 / 3.2 (1B)**: GQA, RoPE, SwiGLU, RMSNorm with extended context windows.
-   - **Phi-3 / Phi-3.5 Mini**: Partial RoPE embeddings, fused MLP projections.
-   - **Gemma / Gemma 2 (2B)**: GeGLU, query pre-scaling, sliding window attention.
-3. **Audio, Speech & Multimodal**:
-   - **Wav2Vec 2.0 / HuBERT**: Raw waveform 1D feature extractors, multi-head contextual attention.
-   - **CLIP** (Vision Transformer + Text Transformer): Multi-modal dual embeddings and cosine projection heads.
 
-#### B. Comprehensive JAX / Flax Model Coverage
-1. **Flax ResNet-18 / 50**: Convolutional residual blocks, BatchNorm folding, global average pooling.
-2. **Flax Vision Transformer (ViT)**: Patch tokenization, class token prepend, multi-head self-attention.
-3. **Flax GPT-2 / RoBERTa**: Causal language modeling and bidirectional masked token representations.
-4. **Flax T5 / Dense Multi-Layer Models**: Relative position embeddings, gated MLP blocks.
-
----
-
-### Phase 3: Runtime Pre/Post-Processing Pipeline Subsystem
-
-Enable fully self-contained inference pipelines directly in `ggmlc` without requiring users to maintain heavy external image/audio/token manipulation scripts:
-
-1. **Pre-Processing Pipeline**:
-   - **Vision**: Bilinear/bicubic image resizing, aspect-ratio letterboxing, normalization (`(x - mean) / std`), channel permutations (NHWC $\leftrightarrow$ NCHW).
-   - **Text**: Tokenization (BPE, WordPiece, Byte-level BPE) integrated with model inputs.
-   - **Audio**: Log-Mel spectrogram computation directly from raw waveform audio.
-2. **Post-Processing Pipeline**:
-   - **Generation & Sampling**: Top-K, Top-P (nucleus), temperature scaling, repetition penalties, min-p sampling.
-   - **Vision & Detection**: Softmax probabilities, bounding box regression unflattening, Non-Maximum Suppression (NMS).
-   - **Text Detokenization**: Output token ID stream to UTF-8 decoded text.
-
----
-
-### Phase 4: Low-Level Nanobind Tensor Operations API
-
-In addition to the high-level `ModelRunner` (`runner(x)`), expose granular tensor-level GGML operators and execution contexts via Nanobind:
-
-- **Interactive Experimentation & Debugging**: Call individual operators (`ggmlc.ops.matmul(a, b)`, `ggmlc.ops.norm(x, eps)`, `ggmlc.ops.flash_attn(q, k, v)`) directly on NumPy/CPU/GPU buffers.
-- **Lightweight ML Operations**: Perform high-performance tensor mathematics on edge devices without loading PyTorch or heavy frameworks.
-- **Micro-Benchmarking**: Profile individual operator kernels (e.g. testing different gemm/conv tile sizes on custom hardware).
-
----
-
-### Phase 5: Long-Term Ecosystem Bindings & Advanced Optimizations (Deferred)
-
-Foreign language bindings (Rust `ggmlc-rs`, WebAssembly, Swift) are strictly deferred until the core Python and C++ APIs are fully stabilized:
-
-1. **Foreign Language Bindings**: Rust crate, WebAssembly browser runner, and C-FFI header once core features solidify.
-2. **Advanced Transformer Optimizations**: Paged KV-cache block allocation and speculative decoding draft-target verification loops.
-3. **Agentic Custom Kernel Optimizer (BYOK)**: Automated synthesis and compilation of custom SIMD/AVX2/CUDA micro-kernels for hot fused subgraphs.

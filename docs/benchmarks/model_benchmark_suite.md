@@ -4,11 +4,47 @@ This document reports the continuous performance benchmarking and differential n
 
 ---
 
-## 1. Benchmark Results (CPU vs. Native CUDA GPU)
+## 1. Benchmark Results (NVIDIA T4 GPU & Local Hardware)
 
-Benchmarks were evaluated on an **NVIDIA GeForce GTX 1050/1080 (Pascal Architecture, 4GB VRAM)** using CUDA 11.3 and MSVC 2022 on Windows 10 x64.
+### A. Google Colab Benchmark Results (NVIDIA T4 GPU)
 
-### Performance & Latency Comparison Table
+**Warmup Iterations:** 2 | **Measurement Runs:** 5
+
+| Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **23.08** | 23.94 | 42.8 | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **12.46** | 12.58 | 80.3 | `9.54e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **29.30** | 30.20 | 34.0 | `6.94e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **72.48** | 82.31 | 13.9 | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **25.92** | 26.25 | 38.6 | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | 552 | 31.12 MB | **51.90** | 75.87 | 16.9 | `2.86e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | 1900 | 18.68 MB | **40.35** | 46.24 | 24.1 | `3.34e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **40.68** | 52.73 | 22.9 | `5.67e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **186.90** | 189.80 | 5.3 | `1.83e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **28.13** | 28.25 | 35.5 | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **354.67** | 367.95 | 2.8 | `1.72e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | 251 | 417.79 MB | **121.02** | 131.27 | 8.2 | `1.84e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **172.44** | 196.95 | 5.7 | `1.68e-04` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 1187 | 2404.34 MB | **666.57** | 730.46 | 1.5 | `1.19e-04` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **60.50** | 66.97 | 16.8 | `3.97e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **32.53** | 32.73 | 30.8 | `5.45e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | 501 | 10.6 MB | **17.60** | 17.74 | 56.8 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | 566 | 22.31 MB | **33.73** | 36.36 | 29.3 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | 392 | 99.32 MB | **69.66** | 69.99 | 15.5 | `3.49e-10` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | 772 | 109.84 MB | **103.35** | 119.95 | 9.5 | `5.59e-09` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | 802 | 33.19 MB | **70.94** | 79.95 | 15.0 | `2.08e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | 570 | 22.33 MB | **48.58** | 48.86 | 20.9 | `1.16e-10` | ✅ PASS |
+| **JAX-Vision** | `flax_vit_b16` | 915 | 331.17 MB | **163.98** | 178.91 | 6.0 | `8.28e-04` | ✅ PASS |
+| **JAX-NLP** | `kerashub_bert` | 373 | 39.74 MB | **21.49** | 26.96 | 44.2 | `1.43e-06` | ✅ PASS |
+| **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **28.61** | 29.61 | 35.4 | `4.42e-05` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **26.86** | 29.07 | 36.6 | `1.55e-06` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **22.84** | 23.33 | 43.6 | `3.81e-06` | ✅ PASS |
+
+---
+
+### B. Local CPU vs. CUDA GPU Baseline (GeForce GTX 1050)
+
+Benchmarks evaluated on an **NVIDIA GeForce GTX 1050 (Pascal Architecture, 4GB VRAM)** using CUDA 11.3 and MSVC 2022 on Windows 10 x64.
 
 | Category | Model Architecture | Framework | Nodes | Payload Size | CPU Latency (P50) | CUDA Latency (P50) | CUDA Speedup | Differential Max Diff | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
