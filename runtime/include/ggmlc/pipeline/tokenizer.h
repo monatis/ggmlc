@@ -52,6 +52,9 @@ public:
     // Decode a single token ID (useful for streaming generation)
     std::string decode_token(int32_t id, bool skip_special_tokens = true) const;
 
+    // Check if a token ID is a special or control token
+    bool is_special_token(int32_t id) const;
+
     // Apply chat template formatting for instruction-tuned models
     std::string apply_chat_template(
         const std::string& user_msg,
@@ -95,7 +98,10 @@ private:
     std::string pre_tokenizer_ = "clip";
     std::string chat_template_;
 
+    std::vector<std::string> special_tokens_;
+
     void init_byte_encoder();
+    void encode_normal_text(const std::string& subtext, std::vector<int32_t>& out_tokens) const;
     std::vector<std::string> bpe(const std::string& token) const;
     std::vector<std::string> bpe_clip_word(const std::string& word) const;
 };

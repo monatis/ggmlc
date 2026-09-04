@@ -94,6 +94,27 @@ void BPETokenizer::init(
     }
 
     init_byte_encoder();
+
+    special_tokens_.clear();
+    for (const auto& pair : encoder_) {
+        const std::string& s = pair.first;
+        if (s.size() >= 3 && s.front() == '<' && s.back() == '>') {
+            special_tokens_.push_back(s);
+        } else if (s == "<s>" || s == "</s>") {
+            special_tokens_.push_back(s);
+        }
+    }
+    for (int32_t tid : {bos_id_, eos_id_, pad_id_, unk_id_}) {
+        if (tid >= 0) {
+            auto it = decoder_.find(tid);
+            if (it != decoder_.end() && std::find(special_tokens_.begin(), special_tokens_.end(), it->second) == special_tokens_.end()) {
+                special_tokens_.push_back(it->second);
+            }
+        }
+    }
+    std::sort(special_tokens_.begin(), special_tokens_.end(), [](const std::string& a, const std::string& b) {
+        return a.size() > b.size();
+    });
 }
 
 bool BPETokenizer::init_from_gguf_ctx(const struct gguf_context* ctx) {
@@ -310,20 +331,11 @@ std::vector<std::string> BPETokenizer::bpe(const std::string& token) const {
     return word;
 }
 
-std::vector<int32_t> BPETokenizer::encode(
-    const std::string& text,
-    int max_length,
-    bool add_special_tokens,
-    bool pad_to_max
-) const {
-    std::vector<int32_t> bpe_tokens;
-
-    if (add_special_tokens && bos_id_ >= 0) {
-        bpe_tokens.push_back(bos_id_);
-    }
+void BPETokenizer::encode_normal_text(const std::string& subtext, std::vector<int32_t>& out_tokens) const {
+    if (subtext.empty()) return;
 
     if (pre_tokenizer_ == "clip") {
-        std::string lower_text = text;
+        std::string lower_text = subtext;
         for (char& c : lower_text) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -341,23 +353,21 @@ std::vector<int32_t> BPETokenizer::encode(
             for (const auto& piece : pieces) {
                 auto enc_it = encoder_.find(piece);
                 if (enc_it != encoder_.end()) {
-                    bpe_tokens.push_back(enc_it->second);
+                    out_tokens.push_back(enc_it->second);
                 } else {
-                    bpe_tokens.push_back(unk_id_);
+                    out_tokens.push_back(unk_id_);
                 }
             }
         }
     } else {
         // Standard GPT-2 / Llama byte encoder
-        static const std::regex pattern(R"('s|'t|'re|'ve|'m|'ll|'d| ?[a-zA-Z]+| ?[0-9]+| ?[^\s\a-zA-Z0-9]+|\s+)");
-        auto words_begin = std::sregex_iterator(text.begin(), text.end(), pattern);
+        static const std::regex pattern(R"('s|'t|'re|'ve|'m|'ll|'d| ?[a-zA-Z]+| ?[0-9]+| ?[^\s\a-zA-Z0-9]+|\s+(?!\S)|\s+)");
+        auto words_begin = std::sregex_iterator(subtext.begin(), subtext.end(), pattern);
         auto words_end = std::sregex_iterator();
 
         for (std::sregex_iterator it = words_begin; it != words_end; ++it) {
             std::string token_str = it->str();
-            if (token_str.empty() || std::all_of(token_str.begin(), token_str.end(), ::isspace)) {
-                continue;
-            }
+            if (token_str.empty()) continue;
 
             // Byte encode token string
             std::string byte_encoded;
@@ -375,23 +385,76 @@ std::vector<int32_t> BPETokenizer::encode(
             for (const auto& piece : bpe_pieces) {
                 auto enc_it = encoder_.find(piece);
                 if (enc_it != encoder_.end()) {
-                    bpe_tokens.push_back(enc_it->second);
+                    out_tokens.push_back(enc_it->second);
                 } else {
-                    bpe_tokens.push_back(unk_id_);
+                    out_tokens.push_back(unk_id_);
                 }
             }
         }
     }
+}
 
+std::vector<int32_t> BPETokenizer::encode(
+    const std::string& text,
+    int max_length,
+    bool add_special_tokens,
+    bool pad_to_max
+) const {
+    std::vector<int32_t> bpe_tokens;
+
+    if (add_special_tokens && bos_id_ >= 0) {
+        bpe_tokens.push_back(bos_id_);
+    }
+
+    // Split text by special tokens if any exist
+    if (!special_tokens_.empty()) {
+        size_t pos = 0;
+        size_t n = text.size();
+        std::string normal_buf;
+
+        while (pos < n) {
+            bool matched_special = false;
+            for (const auto& sp : special_tokens_) {
+                if (pos + sp.size() <= n && text.compare(pos, sp.size(), sp) == 0) {
+                    // Flush accumulated normal text
+                    if (!normal_buf.empty()) {
+                        encode_normal_text(normal_buf, bpe_tokens);
+                        normal_buf.clear();
+                    }
+                    // Emit special token
+                    auto it = encoder_.find(sp);
+                    if (it != encoder_.end()) {
+                        bpe_tokens.push_back(it->second);
+                    }
+                    pos += sp.size();
+                    matched_special = true;
+                    break;
+                }
+            }
+            if (!matched_special) {
+                normal_buf.push_back(text[pos]);
+                pos++;
+            }
+        }
+        if (!normal_buf.empty()) {
+            encode_normal_text(normal_buf, bpe_tokens);
+        }
+    } else {
+        encode_normal_text(text, bpe_tokens);
+    }
+
+    // Only append EOS for CLIP or BERT sequence tasks, not for Causal LM continuation
     if (add_special_tokens && eos_id_ >= 0) {
-        bpe_tokens.push_back(eos_id_);
+        if (pre_tokenizer_ == "clip" || pre_tokenizer_ == "bert") {
+            bpe_tokens.push_back(eos_id_);
+        }
     }
 
     // Truncate or pad if max_length is explicitly positive
     if (max_length > 0) {
         if (static_cast<int>(bpe_tokens.size()) > max_length) {
             bpe_tokens.resize(max_length);
-            if (add_special_tokens && eos_id_ >= 0) {
+            if (add_special_tokens && eos_id_ >= 0 && (pre_tokenizer_ == "clip" || pre_tokenizer_ == "bert")) {
                 bpe_tokens[max_length - 1] = eos_id_;
             }
         } else if (pad_to_max) {
@@ -404,14 +467,36 @@ std::vector<int32_t> BPETokenizer::encode(
     return bpe_tokens;
 }
 
+bool BPETokenizer::is_special_token(int32_t id) const {
+    if (id < 0) return true;
+    if (id == bos_id_ || id == eos_id_ || id == pad_id_) return true;
+    auto it = decoder_.find(id);
+    if (it != decoder_.end()) {
+        const std::string& s = it->second;
+        if (s.rfind("<|", 0) == 0 && s.length() >= 4 && s.compare(s.length() - 2, 2, "|>") == 0) {
+            return true;
+        }
+        if (s == "<start_of_turn>" || s == "<end_of_turn>") {
+            return true;
+        }
+        if (s.rfind("<|start_header_id|>", 0) == 0 || s.rfind("<|end_header_id|>", 0) == 0 || s.rfind("<|eot_id|>", 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string BPETokenizer::decode_token(int32_t id, bool skip_special_tokens) const {
+    if (skip_special_tokens && is_special_token(id)) {
+        return "";
+    }
     return decode({id}, skip_special_tokens);
 }
 
 std::string BPETokenizer::decode(const std::vector<int32_t>& ids, bool skip_special_tokens) const {
     std::string text;
     for (int32_t id : ids) {
-        if (skip_special_tokens && (id == bos_id_ || id == eos_id_ || id == pad_id_)) {
+        if (skip_special_tokens && is_special_token(id)) {
             continue;
         }
         auto it = decoder_.find(id);

@@ -25,6 +25,7 @@ def compile(
     quantize: str | DType | None = None,
     return_runner: bool = False,
     pipeline: Any = None,
+    tasks: str | list[str] | None = None,
     extra_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Path | bytes | Any:
@@ -119,13 +120,17 @@ def compile(
         target_dtype = DType.from_str(str(quantize)) if isinstance(quantize, str) else quantize
         ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
 
-    # 5. Extract metadata from pipeline if provided
+    # 5. Extract metadata from pipeline and tasks if provided
     combined_metadata: dict[str, Any] = dict(extra_metadata or {})
     if pipeline is not None:
         if hasattr(pipeline, "to_gguf_metadata"):
             combined_metadata.update(pipeline.to_gguf_metadata())
         elif isinstance(pipeline, dict):
             combined_metadata.update(pipeline)
+
+    if tasks:
+        task_list = [tasks] if isinstance(tasks, str) else [str(t) for t in tasks]
+        combined_metadata["ggmlc.tasks"] = task_list
 
     # 6. Stream directly to file or serialize to memory
     from ggmlc.runtime.runner import load

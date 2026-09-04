@@ -316,6 +316,49 @@ SerializedModelGraph ModelLoader::load_from_memory(const uint8_t* data, size_t s
     SerializedModelGraph g;
     g.name = root["name"].get_str("main");
 
+    // Populate GGUF key-value metadata
+    int64_t n_kv = gguf_get_n_kv(ctx);
+    for (int64_t i = 0; i < n_kv; ++i) {
+        const char* k = gguf_get_key(ctx, i);
+        if (!k) continue;
+        std::string key_str(k);
+        enum gguf_type kv_t = gguf_get_kv_type(ctx, i);
+
+        if (kv_t == GGUF_TYPE_STRING) {
+            g.metadata_str[key_str] = gguf_get_val_str(ctx, i);
+        } else if (kv_t == GGUF_TYPE_INT8) {
+            g.metadata_int[key_str] = gguf_get_val_i8(ctx, i);
+        } else if (kv_t == GGUF_TYPE_UINT8) {
+            g.metadata_int[key_str] = gguf_get_val_u8(ctx, i);
+        } else if (kv_t == GGUF_TYPE_INT16) {
+            g.metadata_int[key_str] = gguf_get_val_i16(ctx, i);
+        } else if (kv_t == GGUF_TYPE_UINT16) {
+            g.metadata_int[key_str] = gguf_get_val_u16(ctx, i);
+        } else if (kv_t == GGUF_TYPE_INT32) {
+            g.metadata_int[key_str] = gguf_get_val_i32(ctx, i);
+        } else if (kv_t == GGUF_TYPE_UINT32) {
+            g.metadata_int[key_str] = gguf_get_val_u32(ctx, i);
+        } else if (kv_t == GGUF_TYPE_INT64) {
+            g.metadata_int[key_str] = gguf_get_val_i64(ctx, i);
+        } else if (kv_t == GGUF_TYPE_UINT64) {
+            g.metadata_int[key_str] = static_cast<int64_t>(gguf_get_val_u64(ctx, i));
+        } else if (kv_t == GGUF_TYPE_BOOL) {
+            g.metadata_int[key_str] = gguf_get_val_bool(ctx, i) ? 1 : 0;
+        } else if (kv_t == GGUF_TYPE_FLOAT32) {
+            g.metadata_float[key_str] = gguf_get_val_f32(ctx, i);
+        } else if (kv_t == GGUF_TYPE_FLOAT64) {
+            g.metadata_float[key_str] = gguf_get_val_f64(ctx, i);
+        } else if (kv_t == GGUF_TYPE_ARRAY && gguf_get_arr_type(ctx, i) == GGUF_TYPE_STRING) {
+            size_t arr_n = gguf_get_arr_n(ctx, i);
+            std::vector<std::string> s_arr;
+            s_arr.reserve(arr_n);
+            for (size_t j = 0; j < arr_n; ++j) {
+                s_arr.push_back(gguf_get_arr_str(ctx, i, j));
+            }
+            g.metadata_str_arr[key_str] = std::move(s_arr);
+        }
+    }
+
     // Symbol Table
     std::unordered_map<std::string, int64_t> symbol_map;
     const auto& sym_arr = root["symbol_table"].arr_val;

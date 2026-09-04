@@ -8,36 +8,136 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <iomanip>
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
 #include "ggmlc/pipeline/image.h"
 #include "ggmlc/pipeline/tokenizer.h"
 
+static void print_help(const char* prog_name) {
+    std::cout << "================================================================================\n"
+              << " ggmlc-run : High-Performance Standalone Neural Program Runner & Text Generator\n"
+              << "================================================================================\n"
+              << "Usage: " << prog_name << " <model.gguf> [options]\n\n"
+              << "Inspection Options:\n"
+              << "  -h, --help                  Show this comprehensive help message and exit\n"
+              << "  --info                      Inspect GGUF metadata, tensor graph, and capabilities\n\n"
+              << "Text Generation & Chat Options (SLMs):\n"
+              << "  --chat <message>            Instruction chat generation with automatic template\n"
+              << "  --prompt <string>           Autoregressive text completion from raw prompt\n"
+              << "  --system <message>          System instruction prompt for chat template\n"
+              << "  --generate                  Enable autoregressive token generation\n"
+              << "  --max-tokens <N>            Maximum new tokens to generate (default: 32)\n"
+              << "  --temperature <T>           Sampling temperature (0.0 = greedy argmax, default: 0.0)\n"
+              << "  --top-p <P>                 Nucleus sampling probability (default: 0.9)\n"
+              << "  --echo-prompt               Echo prompt before streaming response (for debugging)\n"
+              << "  --show-special              Print special control tokens (e.g. <|im_end|>)\n\n"
+              << "Preprocessing Options:\n"
+              << "  --image <name:file.jpg>     Preprocess and set image tensor (bicubic + normalize)\n"
+              << "  --text <name:string>        Tokenize and set text input tensor (BPE/WordPiece)\n\n"
+              << "Execution & Hardware Options:\n"
+              << "  --device <cpu|cuda>         Execution device (default: cpu)\n"
+              << "  --threads <N>               Number of CPU execution threads (default: 1)\n"
+              << "  --unplanned                 Disable memory arena reuse planning (for debugging)\n"
+              << "  --symbol <key=value>        Bind dynamic symbol (e.g. s=128)\n\n"
+              << "Raw Tensor I/O Options:\n"
+              << "  --input <name:file.bin>     Load raw input tensor from binary file\n"
+              << "  --output <id:file.bin>      Save computed output tensor ID to binary file\n"
+              << "  --state-in <name:file.bin>  Load recurrent initial state from binary file\n"
+              << "  --state-out <name:file.bin> Save recurrent final state to binary file\n\n"
+              << "Examples:\n"
+              << "  1. Instruction Chat with SmolLM2 / Llama:\n"
+              << "     " << prog_name << " smollm2.gguf --chat \"What is gravity?\" --threads 4\n\n"
+              << "  2. Chat with System Prompt on NVIDIA GPU:\n"
+              << "     " << prog_name << " model.gguf --system \"You are concise.\" --chat \"Hello!\" --device cuda\n\n"
+              << "  3. Text Completion:\n"
+              << "     " << prog_name << " gpt2.gguf --prompt \"Once upon a time\" --max-tokens 24\n\n"
+              << "  4. Inspect Model Capabilities & Tasks:\n"
+              << "     " << prog_name << " model.gguf --info\n\n"
+              << "  5. Image Classification / Vision Inference:\n"
+              << "     " << prog_name << " resnet50.gguf --image x:cat.jpg --threads 4\n"
+              << "================================================================================\n";
+}
+
+static void print_model_info(const std::string& model_path, const ggmlc::SerializedModelGraph& g) {
+    std::cout << "================================================================================\n"
+              << " Model Information: " << model_path << "\n"
+              << "================================================================================\n"
+              << " Name:            " << g.name << "\n";
+
+    auto it_arch = g.metadata_str.find("general.architecture");
+    if (it_arch != g.metadata_str.end()) {
+        std::cout << " Architecture:    " << it_arch->second << "\n";
+    }
+
+    auto it_ver = g.metadata_str.find("ggmlc.version");
+    if (it_ver != g.metadata_str.end()) {
+        std::cout << " Compiler Ver:    " << it_ver->second << "\n";
+    }
+
+    auto tasks = g.get_tasks();
+    if (!tasks.empty()) {
+        std::cout << " Declared Tasks:  [";
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            std::cout << tasks[i] << (i + 1 < tasks.size() ? ", " : "");
+        }
+        std::cout << "]\n";
+    } else {
+        std::cout << " Declared Tasks:  [none]\n";
+    }
+
+    std::cout << " Total Tensors:   " << g.tensors.size() << "\n"
+              << " Graph Ops:       " << g.ops.size() << "\n";
+
+    if (!g.symbol_table.empty()) {
+        std::cout << " Dynamic Symbols: ";
+        for (size_t i = 0; i < g.symbol_table.size(); ++i) {
+            std::cout << g.symbol_table[i] << (i + 1 < g.symbol_table.size() ? ", " : "");
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "\n Capabilities:\n"
+              << "   [" << (g.has_tokenizer() ? "x" : " ") << "] Tokenizer:      "
+              << (g.has_tokenizer() ? "Present in GGUF metadata" : "Not present") << "\n"
+              << "   [" << (g.has_chat_template() ? "x" : " ") << "] Chat Template:  "
+              << (g.has_chat_template() ? "Present in GGUF metadata" : "Not present") << "\n"
+              << "   [" << (g.has_vision() ? "x" : " ") << "] Vision Preproc: "
+              << (g.has_vision() ? "Present in GGUF metadata" : "Not present") << "\n";
+
+    std::cout << "\n Graph Inputs (" << g.inputs.size() << "):\n";
+    for (uint32_t tid : g.inputs) {
+        auto t_it = g.tensors.find(tid);
+        if (t_it != g.tensors.end()) {
+            std::cout << "   #" << tid << ": " << t_it->second.name << " (type: "
+                      << static_cast<int>(t_it->second.type) << ")\n";
+        }
+    }
+
+    std::cout << "\n Graph Outputs (" << g.outputs.size() << "):\n";
+    for (uint32_t tid : g.outputs) {
+        auto t_it = g.tensors.find(tid);
+        if (t_it != g.tensors.end()) {
+            std::cout << "   #" << tid << ": " << t_it->second.name << " (type: "
+                      << static_cast<int>(t_it->second.type) << ")\n";
+        }
+    }
+    std::cout << "================================================================================\n";
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ggmlc-run <model.gguf> [options]\n"
-                  << "Options:\n"
-                  << "  --prompt <string>           Autoregressive text generation with raw prompt\n"
-                  << "  --chat <string>             Autoregressive chat generation with chat template\n"
-                  << "  --system <string>           System prompt for chat template\n"
-                  << "  --generate                  Enable autoregressive text generation\n"
-                  << "  --max-tokens <N>            Maximum new tokens to generate (default: 32)\n"
-                  << "  --temperature <T>           Sampling temperature (0.0 = greedy argmax, default: 0.0)\n"
-                  << "  --top-p <P>                 Nucleus sampling probability (default: 0.9)\n"
-                  << "  --input <name:file.bin>     Set input tensor from binary file\n"
-                  << "  --image <name:file.jpg>     Preprocess and set image input tensor (bicubic + normalize)\n"
-                  << "  --text <name:string>        Tokenize and set text input tensor (BPE)\n"
-                  << "  --output <id:file.bin>      Save output tensor ID to binary file\n"
-                  << "  --state-in <name:file.bin>  Load initial state tensor from binary file\n"
-                  << "  --state-out <name:file.bin> Save final state tensor to binary file\n"
-                  << "  --symbol <key=value>        Bind dynamic symbol\n"
-                  << "  --device <cpu|cuda>         Device to execute on (default: cpu)\n"
-                  << "  --threads <N>               Number of threads (default: 1)\n"
-                  << "  --unplanned                 Disable memory arena reuse planning\n";
+        print_help(argv[0]);
         return 1;
     }
 
-    std::string model_path = argv[1];
+    std::string first_arg = argv[1];
+    if (first_arg == "--help" || first_arg == "-h") {
+        print_help(argv[0]);
+        return 0;
+    }
+
+    std::string model_path = first_arg;
     std::unordered_map<std::string, std::string> input_files;
     std::unordered_map<std::string, std::string> image_files;
     std::unordered_map<std::string, std::string> text_inputs;
@@ -50,6 +150,9 @@ int main(int argc, char** argv) {
     std::string chat_text;
     std::string system_text;
     bool is_generate = false;
+    bool show_info = false;
+    bool echo_prompt = false;
+    bool show_special = false;
     int max_tokens = 32;
     float temperature = 0.0f;
     float top_p = 0.9f;
@@ -60,7 +163,12 @@ int main(int argc, char** argv) {
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--prompt" && i + 1 < argc) {
+        if (arg == "--help" || arg == "-h") {
+            print_help(argv[0]);
+            return 0;
+        } else if (arg == "--info") {
+            show_info = true;
+        } else if (arg == "--prompt" && i + 1 < argc) {
             prompt_text = argv[++i];
             is_generate = true;
         } else if (arg == "--chat" && i + 1 < argc) {
@@ -70,6 +178,10 @@ int main(int argc, char** argv) {
             system_text = argv[++i];
         } else if (arg == "--generate") {
             is_generate = true;
+        } else if (arg == "--echo-prompt") {
+            echo_prompt = true;
+        } else if (arg == "--show-special") {
+            show_special = true;
         } else if (arg == "--max-tokens" && i + 1 < argc) {
             max_tokens = std::stoi(argv[++i]);
         } else if (arg == "--temperature" && i + 1 < argc) {
@@ -130,12 +242,52 @@ int main(int argc, char** argv) {
 
     try {
         auto model_graph = ggmlc::ModelLoader::load_from_file(model_path);
+
+        if (show_info) {
+            print_model_info(model_path, model_graph);
+            return 0;
+        }
+
+        // Validate argument compatibility against model capabilities
+        if (!image_files.empty() && !model_graph.has_vision()) {
+            std::cerr << "[ggmlc-run ERROR] Model '" << model_graph.name
+                      << "' does not specify an image preprocessing pipeline in its GGUF metadata.\n"
+                      << "  Cannot use '--image'. If this model requires raw image tensors, provide them via '--input <name:file.bin>'.\n";
+            return 1;
+        }
+
+        if (!text_inputs.empty() && !model_graph.has_tokenizer()) {
+            std::cerr << "[ggmlc-run ERROR] Model '" << model_graph.name
+                      << "' does not specify tokenizer metadata in its GGUF container.\n"
+                      << "  Cannot use '--text'. Provide token IDs via '--input <name:file.bin>'.\n";
+            return 1;
+        }
+
+        if ((!prompt_text.empty() || is_generate) && chat_text.empty() && !model_graph.has_tokenizer()) {
+            std::cerr << "[ggmlc-run ERROR] Model '" << model_graph.name
+                      << "' does not contain tokenizer metadata for text generation.\n"
+                      << "  Cannot use '--prompt' or '--generate'.\n";
+            return 1;
+        }
+
+        if (!chat_text.empty()) {
+            if (!model_graph.has_tokenizer()) {
+                std::cerr << "[ggmlc-run ERROR] Model '" << model_graph.name
+                          << "' does not contain tokenizer metadata. Cannot use '--chat'.\n";
+                return 1;
+            }
+            if (!model_graph.has_chat_template()) {
+                std::cerr << "[ggmlc-run NOTICE] Model '" << model_graph.name
+                          << "' does not define a chat template in its GGUF metadata. Using standard prompt format.\n";
+            }
+        }
+
         std::cout << "[ggmlc-run] Loaded model '" << model_graph.name << "' with "
                   << model_graph.tensors.size() << " tensors and "
                   << model_graph.ops.size() << " operations"
                   << (unplanned ? " (UNPLANNED / NO REUSE)" : " (PLANNED ARENA REUSE)") << ".\n";
 
-        // Initialize tokenizer from model GGUF file
+        // Initialize tokenizer from model GGUF file if available
         ggmlc::pipeline::BPETokenizer tokenizer;
         bool has_tokenizer = tokenizer.init_from_gguf_file(model_path);
 
@@ -144,7 +296,7 @@ int main(int argc, char** argv) {
         // ====================================================================
         if (is_generate || !chat_text.empty() || !prompt_text.empty()) {
             if (!has_tokenizer) {
-                std::cerr << "[ggmlc-run ERROR] Model does not contain GGUF tokenizer metadata for text generation.\n";
+                std::cerr << "[ggmlc-run ERROR] Failed to initialize tokenizer from GGUF metadata.\n";
                 return 1;
             }
 
@@ -157,7 +309,8 @@ int main(int argc, char** argv) {
             uint32_t out_tid = model_graph.outputs[0];
 
             std::string formatted_prompt;
-            if (!chat_text.empty()) {
+            bool is_chat_mode = !chat_text.empty();
+            if (is_chat_mode) {
                 formatted_prompt = tokenizer.apply_chat_template(chat_text, system_text, true);
             } else if (!prompt_text.empty()) {
                 formatted_prompt = prompt_text;
@@ -165,14 +318,21 @@ int main(int argc, char** argv) {
                 formatted_prompt = "Hello";
             }
 
-            std::vector<int32_t> current_tokens = tokenizer.encode(formatted_prompt, 0, true, false);
+            std::vector<int32_t> current_tokens = tokenizer.encode(formatted_prompt, 0, false, false);
             if (current_tokens.empty()) {
                 current_tokens.push_back(tokenizer.bos_token_id() >= 0 ? tokenizer.bos_token_id() : 0);
             }
 
             std::cout << "[ggmlc-run] Prompt tokens: " << current_tokens.size() << "\n";
-            std::cout << "[ggmlc-run] Generating (" << max_tokens << " max tokens, temp=" << temperature << ", device=" << device_name << "):\n\n";
-            std::cout << formatted_prompt << std::flush;
+            std::cout << "[ggmlc-run] Generating (" << max_tokens << " max tokens, temp="
+                      << temperature << ", device=" << device_name << "):\n\n";
+
+            // If prompt echo was explicitly requested, or if in raw prompt mode, print prompt
+            if (echo_prompt) {
+                std::cout << formatted_prompt << std::flush;
+            } else if (!is_chat_mode) {
+                std::cout << formatted_prompt << std::flush;
+            }
 
             ggmlc::ModelExecutor executor(model_graph, device_name);
             auto t_start = std::chrono::high_resolution_clock::now();
@@ -182,7 +342,7 @@ int main(int argc, char** argv) {
                 int64_t S = static_cast<int64_t>(current_tokens.size());
                 symbol_env["s"] = S;
 
-                // Auto-deduce any symbolic dimensions
+                // Auto-deduce any symbolic dimensions in input tensor
                 for (const auto& dim_expr : model_graph.tensors[in_tid].ne) {
                     if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
                         int64_t sym_idx = dim_expr->val;
@@ -266,18 +426,28 @@ int main(int argc, char** argv) {
                 current_tokens.push_back(next_token);
                 generated_count++;
 
+                // Stop immediately on EOS
                 if (tokenizer.eos_token_id() >= 0 && next_token == tokenizer.eos_token_id()) {
                     break;
                 }
 
-                std::string piece = tokenizer.decode_token(next_token, false);
+                // If special token generated and show_special is not enabled, stop or skip
+                if (tokenizer.is_special_token(next_token)) {
+                    if (show_special) {
+                        std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                    }
+                    break;
+                }
+
+                std::string piece = tokenizer.decode_token(next_token, true);
                 std::cout << piece << std::flush;
             }
 
             auto t_end = std::chrono::high_resolution_clock::now();
             double elapsed_sec = std::chrono::duration<double>(t_end - t_start).count();
             std::cout << "\n\n[ggmlc-run] Generated " << generated_count << " tokens in "
-                      << elapsed_sec << "s (" << (generated_count / std::max(elapsed_sec, 1e-6)) << " tok/s)\n";
+                      << std::fixed << std::setprecision(2) << elapsed_sec << "s ("
+                      << (generated_count / std::max(elapsed_sec, 1e-6)) << " tok/s)\n";
 
             return 0;
         }
@@ -322,7 +492,14 @@ int main(int argc, char** argv) {
 
         // Load and preprocess image inputs
         for (const auto& pair : image_files) {
-            auto img_tensor = ggmlc::pipeline::ImagePreprocessor::preprocess_file(pair.second, 224, 224);
+            int target_w = 224;
+            int target_h = 224;
+            auto it_size = model_graph.metadata_int.find("clip.vision.image_size");
+            if (it_size != model_graph.metadata_int.end() && it_size->second > 0) {
+                target_w = static_cast<int>(it_size->second);
+                target_h = target_w;
+            }
+            auto img_tensor = ggmlc::pipeline::ImagePreprocessor::preprocess_file(pair.second, target_w, target_h);
             executor.set_input_by_name(pair.first, img_tensor.data.data(), img_tensor.data.size() * sizeof(float));
             std::cout << "[ggmlc-run] Preprocessed image '" << pair.first << "' from " << pair.second
                       << " (" << img_tensor.channels << "x" << img_tensor.height << "x" << img_tensor.width << ")\n";
@@ -339,7 +516,7 @@ int main(int argc, char** argv) {
         executor.run(n_threads);
         std::cout << "[ggmlc-run] Execution completed successfully.\n";
 
-        // Save output data
+        // Save output data to files if specified
         for (const auto& pair : output_files) {
             uint32_t tid = pair.first;
             const void* data = executor.get_output_data(tid);
@@ -375,11 +552,58 @@ int main(int argc, char** argv) {
             }
         }
 
-        // If no explicit output files, dump primary graph outputs
+        // Explicit Task-Aware Output Formatting (when no explicit output file requested)
         if (output_files.empty() && !model_graph.outputs.empty()) {
-            for (uint32_t out_id : model_graph.outputs) {
-                size_t sz = executor.get_tensor_size_bytes(out_id);
-                std::cout << "[ggmlc-run] Graph output tensor " << out_id << ": " << sz << " bytes computed.\n";
+            uint32_t primary_out_tid = model_graph.outputs[0];
+            const float* out_f32 = static_cast<const float*>(executor.get_output_data(primary_out_tid));
+            size_t n_elem = executor.get_tensor_size_bytes(primary_out_tid) / sizeof(float);
+
+            if (model_graph.has_task("classification") || model_graph.has_task("image-classification")) {
+                // Compute Softmax and display Top-5
+                std::vector<std::pair<float, int>> ranked(n_elem);
+                float max_logit = -1e30f;
+                for (size_t i = 0; i < n_elem; ++i) {
+                    if (out_f32[i] > max_logit) max_logit = out_f32[i];
+                }
+                float sum_exp = 0.0f;
+                for (size_t i = 0; i < n_elem; ++i) {
+                    float exp_val = std::exp(out_f32[i] - max_logit);
+                    ranked[i] = {exp_val, static_cast<int>(i)};
+                    sum_exp += exp_val;
+                }
+                for (auto& p : ranked) p.first /= sum_exp;
+
+                std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                    return a.first > b.first;
+                });
+
+                std::cout << "\n[ggmlc-run] Classification Results (Top 5):\n";
+                for (size_t k = 0; k < std::min<size_t>(5, ranked.size()); ++k) {
+                    std::cout << "  #" << (k + 1) << ": Class " << std::setw(5) << ranked[k].second
+                              << "  - " << std::fixed << std::setprecision(2) << (ranked[k].first * 100.0f) << "%\n";
+                }
+            } else if (model_graph.has_task("embedding") || model_graph.has_task("text-embedding")) {
+                // Compute L2 norm
+                double sum_sq = 0.0;
+                for (size_t i = 0; i < n_elem; ++i) {
+                    sum_sq += static_cast<double>(out_f32[i]) * out_f32[i];
+                }
+                double l2_norm = std::sqrt(sum_sq);
+                std::cout << "\n[ggmlc-run] Embedding Vector (dim=" << n_elem
+                          << ", L2 norm=" << std::fixed << std::setprecision(4) << l2_norm << "):\n  [";
+                for (size_t i = 0; i < std::min<size_t>(4, n_elem); ++i) {
+                    std::cout << std::setprecision(4) << out_f32[i] << ", ";
+                }
+                std::cout << "... (" << n_elem << " float32 elements)]\n";
+            } else if (model_graph.has_task("similarity")) {
+                float logit_val = out_f32[0];
+                std::cout << "\n[ggmlc-run] Similarity Logit: " << std::fixed << std::setprecision(4)
+                          << logit_val << "\n";
+            } else {
+                for (uint32_t out_id : model_graph.outputs) {
+                    size_t sz = executor.get_tensor_size_bytes(out_id);
+                    std::cout << "[ggmlc-run] Graph output tensor " << out_id << ": " << sz << " bytes computed.\n";
+                }
             }
         }
 

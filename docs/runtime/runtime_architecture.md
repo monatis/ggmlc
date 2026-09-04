@@ -72,20 +72,42 @@ Main runtime orchestrator:
 
 ---
 
-## 4. CLI Runner (`ggmlc-run`)
+## 4. Standalone CLI Runner (`ggmlc-run`)
+
+`ggmlc-run` is a standalone, dependency-free C++ executable capable of running arbitrary GGUF compiled models, autoregressive chat generation, multimodal preprocessing, and task-aware inference.
 
 ```bash
 ggmlc-run <model.gguf> [options]
 ```
 
 ### Supported CLI Options
-- `--device <cpu|cuda|auto>`: Hardware execution target (default: `cpu`).
-- `--threads <N>`: Sets the number of CPU execution threads (default: `4`).
-- `--input <name:file.bin>`: Loads input tensor from binary file.
-- `--output <id:file.bin>`: Writes output tensor to binary file.
-- `--state-in <name:file.bin>`: Loads initial state tensor from binary file.
-- `--state-out <name:file.bin>`: Writes final state tensor to binary file.
-- `--symbol <name=value>`: Binds a dynamic symbolic dimension (e.g. `--symbol batch=4 --symbol seq=32`).
+- `-h, --help`: Displays comprehensive categorized help and copy-pasteable usage examples.
+- `--info`: Inspects GGUF metadata, declared tasks array (`ggmlc.tasks`), dynamic symbols, tensor graph, and model capabilities.
+- `--chat <message>`: Instruction chat generation with automatic template application. Streams **only** the assistant response cleanly.
+- `--prompt <string>`: Autoregressive text completion from a raw prompt string.
+- `--system <message>`: System prompt instructions for chat template.
+- `--generate`: Enables autoregressive token generation.
+- `--max-tokens <N>`: Maximum new tokens to generate (default: `32`).
+- `--temperature <T>`: Sampling temperature (`0.0` = greedy argmax, default: `0.0`).
+- `--top-p <P>`: Nucleus sampling probability (default: `0.9`).
+- `--echo-prompt`: Echoes the prompt / chat template before streaming the assistant response (for debugging).
+- `--show-special`: Prints special control tokens (e.g. `<|im_end|>`) instead of stopping silently.
+- `--image <name:file.jpg>`: Preprocesses an image file (bicubic resize, normalize) and binds it to input tensor `name`.
+- `--text <name:string>`: Tokenizes a text string and binds it to input tensor `name`.
+- `--device <cpu|cuda>`: Hardware execution target (default: `cpu`).
+- `--threads <N>`: Sets the number of CPU execution threads (default: `1`).
+- `--unplanned`: Disables memory arena reuse planning (for debugging).
+- `--symbol <name=value>`: Binds a dynamic symbolic dimension (e.g. `--symbol s=128`).
+- `--input <name:file.bin>`: Loads raw input tensor from binary file.
+- `--output <id:file.bin>`: Writes raw computed output tensor ID to binary file.
+- `--state-in <name:file.bin>`: Loads initial recurrent state tensor from binary file.
+- `--state-out <name:file.bin>`: Writes final recurrent state tensor to binary file.
+
+### Explicit Compile-Time Tasks Array
+Models can declare their supported tasks during compilation via `ggmlc.compile(..., tasks=["classification"])` or multi-task architectures like CLIP via `tasks=["similarity", "embedding"]`. When run without custom binary output flags, `ggmlc-run` uses these declared tasks to format output deterministically:
+- `classification`: Computes Softmax across class logits and displays Top-K predictions and percentages.
+- `embedding`: Prints vector dimensionality, L2 norm, and formatted vector slice.
+- `similarity`: Prints cosine similarity score.
 
 ---
 
