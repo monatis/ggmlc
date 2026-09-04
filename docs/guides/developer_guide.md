@@ -173,6 +173,20 @@ pytest tests/e2e/test_vit_models.py -v
 
 # Run Audio Seq2Seq (Whisper) tests
 pytest tests/e2e/test_audio_models.py -v
+
+# Run Multimodal Vision Preprocessor & Tokenizer unit tests
+pytest tests/unit/test_pipeline_image.py tests/unit/test_pipeline_tokenizer.py -v
+
+### Testing Standalone Runner (`ggmlc-run`)
+```powershell
+# Model capabilities & metadata inspection
+.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --info
+
+# Instruction chat generation (clean assistant-only stream)
+.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --chat "What is the capital of France?" --threads 4
+
+# Chat generation on NVIDIA CUDA GPU
+.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --chat "Explain gravity" --device cuda
 ```
 
 ### Multi-Framework Ingestion with Keras 3

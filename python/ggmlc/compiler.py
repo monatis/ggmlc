@@ -47,6 +47,11 @@ def compile(
         fusion_options: Optional granular flags for specific fusion patterns.
         quantize: Optional quantization format ('q4_0', 'q8_0', DType.Q4_0, DType.Q8_0).
         return_runner: If True, automatically loads and returns an instantiated ModelRunner.
+        pipeline: Optional multimodal pipeline preprocessor (e.g. VisionPreprocessor or BPETokenizer)
+            whose schema metadata will be embedded into GGUF headers.
+        tasks: Explicit task or list of tasks supported by this model (e.g. 'classification',
+            ['embedding', 'similarity'], or 'text-generation') embedded into 'ggmlc.tasks'.
+        extra_metadata: Optional custom key-value metadata dictionary embedded into the GGUF file.
         **kwargs: Additional framework-specific keyword arguments.
 
     Returns:

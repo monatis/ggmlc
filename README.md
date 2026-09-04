@@ -200,6 +200,23 @@ text = generator.generate("Artificial intelligence will", max_new_tokens=16, gre
 print("Generated text:", text)
 ```
 
+### 7. Standalone Native CLI Runner (`ggmlc-run`)
+`ggmlc` compiles into a zero-dependency C++ executable (`ggmlc-run`) capable of executing any compiled GGUF model:
+
+```bash
+# 1. Inspect model metadata, tensor graph, dynamic symbols, and detected capabilities
+./ggmlc-run model.gguf --info
+
+# 2. Clean instruction chat streaming with automatic template application
+./ggmlc-run smollm2.gguf --chat "What is the capital of France?" --threads 4
+
+# 3. Offload chat inference to NVIDIA CUDA GPU
+./ggmlc-run smollm2.gguf --chat "Explain quantum computing in one sentence." --device cuda
+
+# 4. Multimodal image preprocessing & task-aware classification
+./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4
+```
+
 ---
 
 ## 🔍 Visual Graph Inspector
@@ -438,6 +455,7 @@ pytest -v
 Comprehensive guides, tutorials, and API references are available in the [`docs/`](docs/) directory:
 
 - **[Python API Guide](docs/guides/python_api_guide.md)**: Detailed Python usage with `ggmlc.compile`, `ggmlc.load`, and `ggmlc.codegen`.
+- **[Standalone C++ Runner & Architecture](docs/runtime/runtime_architecture.md)**: Architecture of `ggmlc-run`, GGUF metadata schema, chat templates, and hardware execution.
 - **[Developer & Contributor Guide](docs/guides/developer_guide.md)**: Adding new operators, lowering rules, and C++ kernels.
 - **[Quantization Subsystem Guide](docs/guides/quantization_guide.md)**: Q8_0 and Q4_0 block quantization details and precision benchmarks.
 - **[Autoregressive Text Generation](docs/guides/autoregressive_generation.md)**: Multi-token KV-cache generation and parity verification.
