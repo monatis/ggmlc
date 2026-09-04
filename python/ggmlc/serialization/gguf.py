@@ -440,7 +440,18 @@ def _build_gguf_writer(
                 static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
             elif isinstance(t.data, bytes):
                 raw_bytes = t.data
-                static_shape = [1]
+                static_shape = []
+                for d in getattr(t, "ne", ()):
+                    if hasattr(d, "evaluate"):
+                        static_shape.append(int(d.evaluate({})))
+                    elif hasattr(d, "value"):
+                        static_shape.append(int(d.value))
+                    elif isinstance(d, int):
+                        static_shape.append(d)
+                    else:
+                        static_shape.append(1)
+                if not static_shape:
+                    static_shape = [1]
             else:
                 raw_bytes = b""
                 static_shape = [1]
