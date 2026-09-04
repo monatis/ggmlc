@@ -21,6 +21,7 @@ class VisionPreprocessor:
     def __init__(
         self,
         target_size: tuple[int, int] | int | VisionPipelineSpec = (224, 224),
+        resize_size: tuple[int, int] | int | None = None,
         interpolation: str = "bicubic",
         crop_mode: str = "center",
         mean: list[float] | tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
@@ -31,6 +32,7 @@ class VisionPreprocessor:
         if isinstance(target_size, VisionPipelineSpec):
             spec = target_size
             self.target_size = spec.target_size
+            self.resize_size = spec.resize_size
             self.interpolation = spec.interpolation.lower()
             self.crop_mode = spec.crop_mode.lower()
             self.mean = np.array(spec.mean, dtype=np.float32)
@@ -42,6 +44,14 @@ class VisionPreprocessor:
                 self.target_size = (target_size, target_size)
             else:
                 self.target_size = tuple(target_size)
+
+            if resize_size is not None:
+                if isinstance(resize_size, int):
+                    self.resize_size = (resize_size, resize_size)
+                else:
+                    self.resize_size = tuple(resize_size)
+            else:
+                self.resize_size = None
 
             self.interpolation = interpolation.lower()
             self.crop_mode = crop_mode.lower()
@@ -56,6 +66,20 @@ class VisionPreprocessor:
             "nearest": Image.Resampling.NEAREST,
         }.get(self.interpolation, Image.Resampling.BICUBIC)
 
+    @classmethod
+    def from_torchvision(cls, transforms_or_weights: Any) -> VisionPreprocessor:
+        """Constructs a VisionPreprocessor directly from torchvision transforms, weights enum, or model."""
+        from ggmlc.pipeline.torchvision import from_torchvision
+
+        return from_torchvision(transforms_or_weights)
+
+    @classmethod
+    def from_huggingface(cls, processor_or_model_id: Any) -> VisionPreprocessor:
+        """Constructs a VisionPreprocessor directly from Hugging Face ImageProcessor or model ID."""
+        from ggmlc.pipeline.huggingface import from_huggingface_image_processor
+
+        return from_huggingface_image_processor(processor_or_model_id)
+
     def preprocess_image(self, image_input: str | Path | Image.Image | np.ndarray) -> np.ndarray:
         """Alias for process()."""
         return self.process(image_input)
@@ -67,6 +91,7 @@ class VisionPreprocessor:
     def spec(self) -> VisionPipelineSpec:
         return VisionPipelineSpec(
             target_size=self.target_size,
+            resize_size=self.resize_size,
             interpolation=self.interpolation,
             crop_mode=self.crop_mode,
             mean=self.mean.tolist(),
@@ -94,22 +119,27 @@ class VisionPreprocessor:
             raise TypeError(f"Unsupported image input type: {type(image_input)}")
 
         target_h, target_w = self.target_size
+        if self.resize_size is not None:
+            resize_h, resize_w = self.resize_size
+        else:
+            resize_h, resize_w = target_h, target_w
 
         # 2. Resize and Crop
         if self.crop_mode == "center":
             # Scale shortest edge to target size, then center crop
             w, h = pil_img.size
+            target_edge = min(resize_w, resize_h)
             if w < h:
-                new_w = target_w
-                new_h = int(h * target_w / w)
+                new_w = target_edge
+                new_h = int(h * target_edge / w)
             else:
-                new_h = target_h
-                new_w = int(w * target_h / h)
+                new_h = target_edge
+                new_w = int(w * target_edge / h)
 
             resized = pil_img.resize((new_w, new_h), resample=self._pil_resample)
 
-            left = (new_w - target_w) // 2
-            top = (new_h - target_h) // 2
+            left = int(round((new_w - target_w) / 2.0))
+            top = int(round((new_h - target_h) / 2.0))
             right = left + target_w
             bottom = top + target_h
             cropped = resized.crop((left, top, right, bottom))

@@ -10,7 +10,8 @@ from typing import Any
 class VisionPipelineSpec:
     """Specification for image preprocessing."""
 
-    target_size: tuple[int, int] = (224, 224)  # (height, width)
+    target_size: tuple[int, int] = (224, 224)  # (height, width) of final output
+    resize_size: tuple[int, int] | None = None  # (height, width) or shortest edge before crop
     interpolation: str = "bicubic"  # "bicubic", "bilinear", "nearest"
     crop_mode: str = "center"  # "center", "letterbox", "stretch", "none"
     mean: list[float] = field(default_factory=lambda: [0.48145466, 0.4578275, 0.40821073])
@@ -26,8 +27,12 @@ class VisionPipelineSpec:
         size = d.get("target_size", (224, 224))
         if isinstance(size, list):
             size = tuple(size)
+        rs = d.get("resize_size")
+        if isinstance(rs, list):
+            rs = tuple(rs)
         return cls(
             target_size=size,
+            resize_size=rs,
             interpolation=d.get("interpolation", "bicubic"),
             crop_mode=d.get("crop_mode", "center"),
             mean=d.get("mean", [0.48145466, 0.4578275, 0.40821073]),

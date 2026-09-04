@@ -12,27 +12,60 @@ from ggmlc.pipeline.vision import VisionPreprocessor
 
 
 def from_torchvision(transforms: Any) -> VisionPreprocessor:
-    """Introspects torchvision transforms (v1 or v2 Compose) to create a VisionPreprocessor.
+    """Introspects torchvision transforms, Weights enums, or models to create a VisionPreprocessor.
 
     Extracts:
-    - Resize size & interpolation
-    - CenterCrop size
+    - Resize size (shortest edge or pre-crop size) & interpolation
+    - CenterCrop target size
     - Normalize mean & std
-    - Channel ordering
+    - Channel ordering (NCHW)
     """
-    target_size = (224, 224)
-    interpolation = "bicubic"
+    # Check if transforms is a Weights enum or has callable transforms()
+    if hasattr(transforms, "transforms") and callable(transforms.transforms):
+        transforms = transforms.transforms()
+
+    crop_size = (224, 224)
+    resize_size: tuple[int, int] | None = None
+    interpolation = "bilinear"
     crop_mode = "center"
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
 
+    # Check ImageClassification or similar transform objects (torchvision v0.13+)
+    if hasattr(transforms, "crop_size"):
+        cs = transforms.crop_size
+        crop_size = (
+            (int(cs[0]), int(cs[1]))
+            if isinstance(cs, (list, tuple)) and len(cs) > 1
+            else (int(cs[0]), int(cs[0]))
+        )
+    if hasattr(transforms, "resize_size"):
+        rs = transforms.resize_size
+        resize_size = (
+            (int(rs[0]), int(rs[1]))
+            if isinstance(rs, (list, tuple)) and len(rs) > 1
+            else (int(rs[0]), int(rs[0]))
+        )
+    if hasattr(transforms, "mean"):
+        mean = [float(x) for x in transforms.mean]
+    if hasattr(transforms, "std"):
+        std = [float(x) for x in transforms.std]
+    if hasattr(transforms, "interpolation"):
+        interp = str(transforms.interpolation).lower()
+        if "bicubic" in interp:
+            interpolation = "bicubic"
+        elif "bilinear" in interp:
+            interpolation = "bilinear"
+        elif "nearest" in interp:
+            interpolation = "nearest"
+
     # Unwrap Compose or iterable
     transform_list = []
-    if hasattr(transforms, "transforms"):
+    if hasattr(transforms, "transforms") and isinstance(transforms.transforms, (list, tuple)):
         transform_list = list(transforms.transforms)
     elif isinstance(transforms, (list, tuple)):
         transform_list = list(transforms)
-    else:
+    elif not hasattr(transforms, "crop_size"):
         transform_list = [transforms]
 
     for t in transform_list:
@@ -42,11 +75,11 @@ def from_torchvision(transforms: Any) -> VisionPreprocessor:
             if hasattr(t, "size"):
                 sz = t.size
                 if isinstance(sz, (list, tuple)):
-                    target_size = (
+                    resize_size = (
                         (int(sz[0]), int(sz[1])) if len(sz) > 1 else (int(sz[0]), int(sz[0]))
                     )
                 else:
-                    target_size = (int(sz), int(sz))
+                    resize_size = (int(sz), int(sz))
             if hasattr(t, "interpolation"):
                 interp = str(t.interpolation).lower()
                 if "bicubic" in interp:
@@ -61,11 +94,11 @@ def from_torchvision(transforms: Any) -> VisionPreprocessor:
             if hasattr(t, "size"):
                 sz = t.size
                 if isinstance(sz, (list, tuple)):
-                    target_size = (
+                    crop_size = (
                         (int(sz[0]), int(sz[1])) if len(sz) > 1 else (int(sz[0]), int(sz[0]))
                     )
                 else:
-                    target_size = (int(sz), int(sz))
+                    crop_size = (int(sz), int(sz))
 
         elif "Normalize" in cls_name:
             if hasattr(t, "mean"):
@@ -74,7 +107,8 @@ def from_torchvision(transforms: Any) -> VisionPreprocessor:
                 std = [float(x) for x in t.std]
 
     return VisionPreprocessor(
-        target_size=target_size,
+        target_size=crop_size,
+        resize_size=resize_size,
         interpolation=interpolation,
         crop_mode=crop_mode,
         mean=mean,

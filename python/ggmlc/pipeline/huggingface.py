@@ -10,37 +10,74 @@ from ggmlc.pipeline.vision import VisionPreprocessor
 
 
 def from_huggingface_image_processor(image_proc: Any) -> VisionPreprocessor:
-    """Extracts a VisionPreprocessor from Hugging Face ImageProcessor / FeatureExtractor."""
-    # Target size
-    size = getattr(image_proc, "size", {"shortest_edge": 224})
-    if isinstance(size, dict):
-        if "height" in size and "width" in size:
-            target_size = (int(size["height"]), int(size["width"]))
-        elif "shortest_edge" in size:
-            target_size = (int(size["shortest_edge"]), int(size["shortest_edge"]))
-        else:
-            target_size = (224, 224)
-    elif isinstance(size, (list, tuple)):
-        target_size = (
-            (int(size[0]), int(size[1])) if len(size) > 1 else (int(size[0]), int(size[0]))
-        )
-    elif isinstance(size, int):
-        target_size = (size, size)
-    else:
-        target_size = (224, 224)
+    """Extracts a VisionPreprocessor from Hugging Face ImageProcessor, FeatureExtractor, or model ID."""
+    if isinstance(image_proc, str):
+        try:
+            from transformers import AutoImageProcessor
 
-    # Crop size
-    crop_size = getattr(image_proc, "crop_size", None)
-    if isinstance(crop_size, dict) and "height" in crop_size and "width" in crop_size:
-        target_size = (int(crop_size["height"]), int(crop_size["width"]))
+            image_proc = AutoImageProcessor.from_pretrained(image_proc)
+        except Exception:  # noqa: BLE001
+            from transformers import AutoFeatureExtractor
 
-    # Mean & Std
-    mean = getattr(image_proc, "image_mean", [0.48145466, 0.4578275, 0.40821073])
-    std = getattr(image_proc, "image_std", [0.26862954, 0.26130258, 0.27577711])
-    rescale = getattr(image_proc, "rescale_factor", 1.0 / 255.0)
+            image_proc = AutoFeatureExtractor.from_pretrained(image_proc)
 
-    # Resample / Interpolation
-    resample = getattr(image_proc, "resample", 3)
+    d = image_proc.to_dict() if hasattr(image_proc, "to_dict") else {}
+
+    # 1. Target crop size
+    target_size = (224, 224)
+    if "crop_size" in d and d["crop_size"] is not None:
+        cs = d["crop_size"]
+        if isinstance(cs, dict):
+            target_size = (int(cs.get("height", 224)), int(cs.get("width", 224)))
+        elif isinstance(cs, (list, tuple)):
+            target_size = (int(cs[0]), int(cs[1])) if len(cs) > 1 else (int(cs[0]), int(cs[0]))
+        elif isinstance(cs, int):
+            target_size = (cs, cs)
+    elif "size" in d and d["size"] is not None:
+        sz = d["size"]
+        if isinstance(sz, dict):
+            if "height" in sz and "width" in sz:
+                target_size = (int(sz["height"]), int(sz["width"]))
+            elif "shortest_edge" in sz:
+                target_size = (int(sz["shortest_edge"]), int(sz["shortest_edge"]))
+        elif isinstance(sz, (list, tuple)):
+            target_size = (int(sz[0]), int(sz[1])) if len(sz) > 1 else (int(sz[0]), int(sz[0]))
+        elif isinstance(sz, int):
+            target_size = (sz, sz)
+
+    # 2. Resize size
+    resize_size: tuple[int, int] | None = None
+    if "size" in d and d["size"] is not None:
+        sz = d["size"]
+        if isinstance(sz, dict):
+            if "shortest_edge" in sz:
+                se = int(sz["shortest_edge"])
+                resize_size = (se, se)
+            elif "height" in sz and "width" in sz:
+                resize_size = (int(sz["height"]), int(sz["width"]))
+        elif isinstance(sz, (list, tuple)):
+            resize_size = (int(sz[0]), int(sz[1])) if len(sz) > 1 else (int(sz[0]), int(sz[0]))
+        elif isinstance(sz, int):
+            resize_size = (sz, sz)
+
+    if "crop_pct" in d and d["crop_pct"] is not None and float(d["crop_pct"]) > 0:
+        crop_pct = float(d["crop_pct"])
+        se = int(target_size[0] / crop_pct)
+        resize_size = (se, se)
+
+    # 3. Mean & Std
+    mean = d.get("image_mean", getattr(image_proc, "image_mean", [0.485, 0.456, 0.406]))
+    if hasattr(mean, "__iter__"):
+        mean = [float(x) for x in mean]
+    std = d.get("image_std", getattr(image_proc, "image_std", [0.229, 0.224, 0.225]))
+    if hasattr(std, "__iter__"):
+        std = [float(x) for x in std]
+    rescale = float(d.get("rescale_factor", getattr(image_proc, "rescale_factor", 1.0 / 255.0)))
+
+    # 4. Resample / Interpolation
+    resample = d.get("resample", getattr(image_proc, "resample", 3))
+    if hasattr(resample, "value"):
+        resample = resample.value
     if resample in (3, "bicubic", "BICUBIC"):
         interpolation = "bicubic"
     elif resample in (2, "bilinear", "BILINEAR"):
@@ -48,12 +85,24 @@ def from_huggingface_image_processor(image_proc: Any) -> VisionPreprocessor:
     elif resample in (0, "nearest", "NEAREST"):
         interpolation = "nearest"
     else:
-        interpolation = "bicubic"
+        interpolation = "bilinear"
 
-    crop_mode = "center" if getattr(image_proc, "do_center_crop", True) else "stretch"
+    # 5. Crop mode
+    if (
+        "crop_size" in d
+        and d["crop_size"] is not None
+        or d.get("crop_pct") is not None
+        or d.get("do_center_crop", False)
+        or isinstance(d.get("size"), dict)
+        and "shortest_edge" in d.get("size", {})
+    ):
+        crop_mode = "center"
+    else:
+        crop_mode = "stretch"
 
     return VisionPreprocessor(
         target_size=target_size,
+        resize_size=resize_size,
         interpolation=interpolation,
         crop_mode=crop_mode,
         mean=mean,

@@ -673,12 +673,14 @@ def _lower_op(
                 if sq_data.ndim == 2 and sq_data.shape[0] == sq_data.shape[1]:
                     n = sq_data.shape[0]
                     tril_bool = np.tril(np.ones((n, n), dtype=bool))
-                    if (sq_data.dtype == bool or sq_data.dtype == np.bool_) and np.array_equal(
-                        sq_data, tril_bool
-                    ) or (
-                        np.issubdtype(sq_data.dtype, np.floating)
-                        and np.all(sq_data[tril_bool] == 0.0)
-                        and np.all(sq_data[~tril_bool] <= -1e4)
+                    if (
+                        (sq_data.dtype == bool or sq_data.dtype == np.bool_)
+                        and np.array_equal(sq_data, tril_bool)
+                        or (
+                            np.issubdtype(sq_data.dtype, np.floating)
+                            and np.all(sq_data[tril_bool] == 0.0)
+                            and np.all(sq_data[~tril_bool] <= -1e4)
+                        )
                     ):
                         attrs["is_causal"] = 1
                         in_ids = in_ids[:3]

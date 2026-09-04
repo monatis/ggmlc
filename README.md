@@ -154,29 +154,31 @@ Generates:
 ```python
 from ggmlc.frontend.pytorch import export_torch_model
 
-# Export Canonical IR or Lowered GGML Graph
-graph = export_torch_model(model, (example_x,)).main_graph
-
 # Render directly to PNG, SVG, or interactive HTML (with embedded pan/zoom)
-ggmlc.visualize(graph, output_path="resnet18.png")   # Pure-Python PNG rendering via mermaidx
-ggmlc.visualize(graph, output_path="resnet18.svg")   # Vector graphic
-ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan/zoom
+ggmlc.visualize(graph, output="resnet18.html")
 ```
 
-### 5. End-to-End Image Preprocessing & Tokenizer Pipelines
+### 5. Automatic Reference Vision Preprocessing & Tokenizers
 ```python
+import torchvision.models as models
 from PIL import Image
-from ggmlc.pipeline import VisionPreprocessor, from_torchvision, from_huggingface_tokenizer
+from ggmlc.pipeline import VisionPreprocessor, from_huggingface_tokenizer
 
-# 1. Vision Preprocessor (Bicubic resize + Center crop + Normalization)
-preprocessor = VisionPreprocessor(target_size=(224, 224), interpolation="bicubic", crop_mode="center")
-pixel_values = preprocessor.process("cat.jpg") # (1, 3, 224, 224) float32
+image = Image.open("cat.jpg")
 
-# 2. Tokenizer (BPE / WordPiece with C++ runtime acceleration)
+# 1. Automatic Torchvision Preprocessor (ResNet, ConvNeXt, MobileNet, EfficientNet, ViT)
+pre_tv = VisionPreprocessor.from_torchvision(models.ResNet50_Weights.DEFAULT)
+pixel_values = pre_tv(image)  # Output: (1, 3, 224, 224) np.ndarray (exact bit-for-bit parity)
+
+# 2. Automatic Hugging Face Preprocessor
+pre_hf = VisionPreprocessor.from_huggingface("openai/clip-vit-base-patch32")
+pixel_values = pre_hf(image)
+
+# 3. Tokenizer (BPE / WordPiece with C++ runtime acceleration)
 tok = from_huggingface_tokenizer(hf_tokenizer)
-input_ids = tok.encode("a photo of a cat", max_length=77) # [49406, 320, 1125, ...]
+input_ids = tok.encode("a photo of a cat", max_length=77)
 
-# 3. Direct Multimodal Inference
+# 4. Direct Multimodal Inference
 runner = ggmlc.load("clip_model.gguf", device="cuda")
 similarity_logits = runner(pixel_values, input_ids)
 ```

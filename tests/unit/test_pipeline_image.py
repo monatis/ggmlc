@@ -72,8 +72,18 @@ def test_torchvision_parity_verification():
             ),
         ]
     )
-    pre = from_torchvision(transform)
+    pre = VisionPreprocessor.from_torchvision(transform)
     img = Image.fromarray(np.random.randint(0, 255, (320, 240, 3), dtype=np.uint8))
     res = verify_torchvision_parity(img, transform, pre, atol=1e-2)
     assert res["passed"]
     assert res["max_abs_diff"] < 1e-2
+
+
+def test_vision_preprocessor_from_huggingface():
+    try:
+        pre = VisionPreprocessor.from_huggingface("openai/clip-vit-base-patch32")
+        assert pre.target_size == (224, 224)
+        assert pre.interpolation == "bicubic"
+        assert pre.crop_mode == "center"
+    except ImportError:
+        pass
