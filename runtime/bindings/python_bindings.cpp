@@ -47,14 +47,22 @@ NB_MODULE(_runtime, m) {
         .def(nb::init<>())
         .def("init", &ggmlc::pipeline::BPETokenizer::init,
              "tokens"_a, "merges"_a, "bos_id"_a = 49406, "eos_id"_a = 49407, "pad_id"_a = 49407, "unk_id"_a = 0,
-             "pre_tokenizer"_a = "clip")
+             "pre_tokenizer"_a = "clip", "chat_template"_a = "")
+        .def("init_from_gguf_file", &ggmlc::pipeline::BPETokenizer::init_from_gguf_file, "filepath"_a)
         .def("encode", &ggmlc::pipeline::BPETokenizer::encode,
-             "text"_a, "max_length"_a = 77, "add_special_tokens"_a = true, "pad_to_max"_a = true)
+             "text"_a, "max_length"_a = 0, "add_special_tokens"_a = true, "pad_to_max"_a = false)
         .def("decode", &ggmlc::pipeline::BPETokenizer::decode,
              "ids"_a, "skip_special_tokens"_a = true)
+        .def("decode_token", &ggmlc::pipeline::BPETokenizer::decode_token,
+             "id"_a, "skip_special_tokens"_a = true)
+        .def("apply_chat_template", &ggmlc::pipeline::BPETokenizer::apply_chat_template,
+             "user_msg"_a, "system_msg"_a = "", "add_generation_prompt"_a = true)
         .def_prop_ro("bos_token_id", &ggmlc::pipeline::BPETokenizer::bos_token_id)
         .def_prop_ro("eos_token_id", &ggmlc::pipeline::BPETokenizer::eos_token_id)
         .def_prop_ro("pad_token_id", &ggmlc::pipeline::BPETokenizer::pad_token_id)
+        .def_prop_ro("unk_token_id", &ggmlc::pipeline::BPETokenizer::unk_token_id)
+        .def_prop_ro("pre_tokenizer", &ggmlc::pipeline::BPETokenizer::pre_tokenizer)
+        .def_prop_ro("chat_template", &ggmlc::pipeline::BPETokenizer::chat_template)
         .def_prop_ro("vocab_size", &ggmlc::pipeline::BPETokenizer::vocab_size);
 
     // SerializedTensor

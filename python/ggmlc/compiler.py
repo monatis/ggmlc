@@ -101,10 +101,10 @@ def compile(
 
     # 2. Run Canonical IR Graph Optimizations
     if enable_optimizations:
-        pipeline = create_standard_optimization_pipeline(
+        opt_pipeline = create_standard_optimization_pipeline(
             enable_fusion=enable_fusion, options=fusion_options
         )
-        opt_result = pipeline.run(canonical_graph)
+        opt_result = opt_pipeline.run(canonical_graph)
         canonical_graph = opt_result.graph
 
     # 3. Lower to GGML Dialect

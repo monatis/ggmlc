@@ -1,4 +1,5 @@
 #include "ggmlc/pipeline/tokenizer.h"
+#include "gguf.h"
 
 #include <regex>
 #include <sstream>
@@ -64,13 +65,15 @@ void BPETokenizer::init(
     int32_t eos_id,
     int32_t pad_id,
     int32_t unk_id,
-    const std::string& pre_tokenizer
+    const std::string& pre_tokenizer,
+    const std::string& chat_template
 ) {
     bos_id_ = bos_id;
     eos_id_ = eos_id;
     pad_id_ = pad_id;
     unk_id_ = unk_id;
     pre_tokenizer_ = pre_tokenizer;
+    chat_template_ = chat_template;
 
     encoder_.clear();
     decoder_.clear();
@@ -93,6 +96,117 @@ void BPETokenizer::init(
     init_byte_encoder();
 }
 
+bool BPETokenizer::init_from_gguf_ctx(const struct gguf_context* ctx) {
+    if (!ctx) return false;
+
+    int64_t key_tokens = gguf_find_key(ctx, "tokenizer.ggml.tokens");
+    if (key_tokens < 0) return false;
+
+    size_t n_tokens = gguf_get_arr_n(ctx, key_tokens);
+    std::vector<std::string> tokens;
+    tokens.reserve(n_tokens);
+    for (size_t i = 0; i < n_tokens; ++i) {
+        tokens.push_back(gguf_get_arr_str(ctx, key_tokens, i));
+    }
+
+    int64_t key_merges = gguf_find_key(ctx, "tokenizer.ggml.merges");
+    std::vector<std::string> merges;
+    if (key_merges >= 0) {
+        size_t n_merges = gguf_get_arr_n(ctx, key_merges);
+        merges.reserve(n_merges);
+        for (size_t i = 0; i < n_merges; ++i) {
+            merges.push_back(gguf_get_arr_str(ctx, key_merges, i));
+        }
+    }
+
+    int64_t key_pre = gguf_find_key(ctx, "tokenizer.ggml.pre");
+    std::string pre = (key_pre >= 0) ? gguf_get_val_str(ctx, key_pre) : "gpt2";
+
+    int64_t key_bos = gguf_find_key(ctx, "tokenizer.ggml.bos_token_id");
+    int64_t key_eos = gguf_find_key(ctx, "tokenizer.ggml.eos_token_id");
+    int64_t key_pad = gguf_find_key(ctx, "tokenizer.ggml.padding_token_id");
+    int64_t key_unk = gguf_find_key(ctx, "tokenizer.ggml.unknown_token_id");
+
+    int32_t bos = (key_bos >= 0) ? gguf_get_val_i32(ctx, key_bos) : -1;
+    int32_t eos = (key_eos >= 0) ? gguf_get_val_i32(ctx, key_eos) : -1;
+    int32_t pad = (key_pad >= 0) ? gguf_get_val_i32(ctx, key_pad) : -1;
+    int32_t unk = (key_unk >= 0) ? gguf_get_val_i32(ctx, key_unk) : 0;
+
+    int64_t key_chat = gguf_find_key(ctx, "tokenizer.chat_template");
+    std::string chat = (key_chat >= 0) ? gguf_get_val_str(ctx, key_chat) : "";
+
+    init(tokens, merges, bos, eos, pad, unk, pre, chat);
+    return true;
+}
+
+bool BPETokenizer::init_from_gguf_file(const std::string& filepath) {
+    struct gguf_init_params params = { true, nullptr };
+    struct gguf_context* ctx = gguf_init_from_file(filepath.c_str(), params);
+    if (!ctx) return false;
+
+    bool ok = init_from_gguf_ctx(ctx);
+    gguf_free(ctx);
+    return ok;
+}
+
+std::string BPETokenizer::apply_chat_template(
+    const std::string& user_msg,
+    const std::string& system_msg,
+    bool add_generation_prompt
+) const {
+    bool is_chatml = (
+        pre_tokenizer_ == "llama" || pre_tokenizer_ == "smol" ||
+        chat_template_.find("<|im_start|>") != std::string::npos ||
+        encoder_.find("<|im_start|>") != encoder_.end()
+    );
+    bool is_gemma = (
+        pre_tokenizer_ == "gemma" ||
+        chat_template_.find("<start_of_turn>") != std::string::npos ||
+        encoder_.find("<start_of_turn>") != encoder_.end()
+    );
+    bool is_llama3 = (
+        chat_template_.find("<|start_header_id|>") != std::string::npos ||
+        encoder_.find("<|start_header_id|>") != encoder_.end()
+    );
+
+    std::string formatted;
+    if (is_chatml) {
+        if (!system_msg.empty()) {
+            formatted += "<|im_start|>system\n" + system_msg + "<|im_end|>\n";
+        }
+        formatted += "<|im_start|>user\n" + user_msg + "<|im_end|>\n";
+        if (add_generation_prompt) {
+            formatted += "<|im_start|>assistant\n";
+        }
+    } else if (is_gemma) {
+        if (!system_msg.empty()) {
+            formatted += "<start_of_turn>system\n" + system_msg + "<end_of_turn>\n";
+        }
+        formatted += "<start_of_turn>user\n" + user_msg + "<end_of_turn>\n";
+        if (add_generation_prompt) {
+            formatted += "<start_of_turn>model\n";
+        }
+    } else if (is_llama3) {
+        formatted += "<|begin_of_text|>";
+        if (!system_msg.empty()) {
+            formatted += "<|start_header_id|>system<|end_header_id|>\n\n" + system_msg + "<|eot_id|>";
+        }
+        formatted += "<|start_header_id|>user<|end_header_id|>\n\n" + user_msg + "<|eot_id|>";
+        if (add_generation_prompt) {
+            formatted += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+        }
+    } else {
+        if (!system_msg.empty()) {
+            formatted += "System: " + system_msg + "\n\n";
+        }
+        formatted += "User: " + user_msg + "\n\n";
+        if (add_generation_prompt) {
+            formatted += "Assistant: ";
+        }
+    }
+    return formatted;
+}
+
 std::vector<std::string> BPETokenizer::bpe_clip_word(const std::string& word) const {
     if (word.empty()) return {};
 
@@ -108,11 +222,13 @@ std::vector<std::string> BPETokenizer::bpe_clip_word(const std::string& word) co
         symbols.push_back(word.substr(i, len));
         i += len;
     }
-    if (!symbols.empty()) {
-        symbols.back() += "</w>";
+
+    if (symbols.size() == 1) {
+        symbols[0] += "</w>";
+        return symbols;
     }
 
-    if (symbols.size() <= 1) return symbols;
+    symbols.back() += "</w>";
 
     while (symbols.size() > 1) {
         int min_rank = 100000000;
@@ -148,7 +264,6 @@ std::vector<std::string> BPETokenizer::bpe_clip_word(const std::string& word) co
 std::vector<std::string> BPETokenizer::bpe(const std::string& token) const {
     if (token.empty()) return {};
 
-    // Break token into individual unicode characters
     std::vector<std::string> word;
     size_t i = 0;
     while (i < token.size()) {
@@ -180,12 +295,11 @@ std::vector<std::string> BPETokenizer::bpe(const std::string& token) const {
 
         if (best_idx == -1) break;
 
-        // Merge best pair
         std::vector<std::string> new_word;
         for (size_t j = 0; j < word.size(); ++j) {
             if (static_cast<int>(j) == best_idx) {
                 new_word.push_back(word[j] + word[j + 1]);
-                j++; // Skip next
+                j++;
             } else {
                 new_word.push_back(word[j]);
             }
@@ -234,7 +348,7 @@ std::vector<int32_t> BPETokenizer::encode(
             }
         }
     } else {
-        // Standard GPT-2 regex splitter and byte encoder
+        // Standard GPT-2 / Llama byte encoder
         static const std::regex pattern(R"('s|'t|'re|'ve|'m|'ll|'d| ?[a-zA-Z]+| ?[0-9]+| ?[^\s\a-zA-Z0-9]+|\s+)");
         auto words_begin = std::sregex_iterator(text.begin(), text.end(), pattern);
         auto words_end = std::sregex_iterator();
@@ -273,7 +387,7 @@ std::vector<int32_t> BPETokenizer::encode(
         bpe_tokens.push_back(eos_id_);
     }
 
-    // Truncate or pad
+    // Truncate or pad if max_length is explicitly positive
     if (max_length > 0) {
         if (static_cast<int>(bpe_tokens.size()) > max_length) {
             bpe_tokens.resize(max_length);
@@ -288,6 +402,10 @@ std::vector<int32_t> BPETokenizer::encode(
     }
 
     return bpe_tokens;
+}
+
+std::string BPETokenizer::decode_token(int32_t id, bool skip_special_tokens) const {
+    return decode({id}, skip_special_tokens);
 }
 
 std::string BPETokenizer::decode(const std::vector<int32_t>& ids, bool skip_special_tokens) const {
@@ -321,6 +439,14 @@ std::string BPETokenizer::decode(const std::vector<int32_t>& ids, bool skip_spec
             result += utf8_char;
         }
         i += len;
+    }
+
+    // Replace SentencePiece space characters (U+2581: \xe2\x96\x81) with standard spaces
+    std::string sp_marker = "\xe2\x96\x81";
+    size_t pos = 0;
+    while ((pos = result.find(sp_marker, pos)) != std::string::npos) {
+        result.replace(pos, sp_marker.length(), " ");
+        pos += 1;
     }
 
     return result;

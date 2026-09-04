@@ -648,5 +648,3 @@ def load_bert_model(
             return out.last_hidden_state
 
     return BertWrapper(model), example_input, input_names
-
-

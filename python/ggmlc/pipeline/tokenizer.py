@@ -20,6 +20,7 @@ class BPETokenizer:
         eos_token_id: int | None = 49407,
         pad_token_id: int | None = 49407,
         unk_token_id: int | None = 49407,
+        chat_template: str | None = None,
     ):
         if isinstance(vocab, TokenizerSpec):
             spec = vocab
@@ -47,6 +48,7 @@ class BPETokenizer:
             self.pad_token_id = pad_token_id
             self.unk_token_id = unk_token_id
 
+        self.chat_template = chat_template
         self._hf_tokenizer: Any = None
 
         # Initialize native C++ tokenizer
@@ -278,6 +280,8 @@ class BPETokenizer:
         else:
             pre_tok = "gpt2"
 
+        chat_template = getattr(tokenizer, "chat_template", None)
+
         inst = cls(
             vocab=vocab,
             merges=merges,
@@ -287,9 +291,87 @@ class BPETokenizer:
             eos_token_id=getattr(tokenizer, "eos_token_id", None),
             pad_token_id=getattr(tokenizer, "pad_token_id", None),
             unk_token_id=getattr(tokenizer, "unk_token_id", None),
+            chat_template=chat_template,
         )
         inst._hf_tokenizer = hf_tok
         return inst
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]] | str,
+        system: str | None = None,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """Applies chat template formatting for instruction-tuned models."""
+        if isinstance(messages, str):
+            msgs = []
+            if system:
+                msgs.append({"role": "system", "content": system})
+            msgs.append({"role": "user", "content": messages})
+        else:
+            msgs = list(messages)
+
+        if (
+            self._hf_tokenizer is not None
+            and hasattr(self._hf_tokenizer, "apply_chat_template")
+            and getattr(self._hf_tokenizer, "chat_template", None)
+        ):
+            try:
+                return self._hf_tokenizer.apply_chat_template(
+                    msgs, tokenize=False, add_generation_prompt=add_generation_prompt
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+        # Built-in chat template formatting fallbacks
+        is_chatml = (
+            self.pre_tokenizer in ("llama", "smol")
+            or (self.chat_template and "<|im_start|>" in self.chat_template)
+            or (self.vocab and "<|im_start|>" in self.vocab)
+        )
+        is_gemma = (
+            self.pre_tokenizer == "gemma"
+            or (self.chat_template and "<start_of_turn>" in self.chat_template)
+            or (self.vocab and "<start_of_turn>" in self.vocab)
+        )
+        is_llama3 = (self.chat_template and "<|start_header_id|>" in self.chat_template) or (
+            self.vocab and "<|start_header_id|>" in self.vocab
+        )
+
+        formatted = ""
+        if is_chatml:
+            for m in msgs:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                formatted += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+            if add_generation_prompt:
+                formatted += "<|im_start|>assistant\n"
+        elif is_gemma:
+            for m in msgs:
+                role = m.get("role", "user")
+                if role == "assistant":
+                    role = "model"
+                content = m.get("content", "")
+                formatted += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
+            if add_generation_prompt:
+                formatted += "<start_of_turn>model\n"
+        elif is_llama3:
+            formatted += "<|begin_of_text|>"
+            for m in msgs:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                formatted += f"<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>"
+            if add_generation_prompt:
+                formatted += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+        else:
+            for m in msgs:
+                role = m.get("role", "user").capitalize()
+                content = m.get("content", "")
+                formatted += f"{role}: {content}\n\n"
+            if add_generation_prompt:
+                formatted += "Assistant: "
+
+        return formatted
 
     def to_gguf_metadata(self) -> dict[str, Any]:
         """Generates GGUF key-value metadata pairs for GGUF tokenization specification."""
@@ -298,7 +380,7 @@ class BPETokenizer:
             if idx < len(token_list):
                 token_list[idx] = tok
 
-        meta = {
+        meta: dict[str, Any] = {
             "tokenizer.ggml.model": "gpt2" if self.pre_tokenizer != "clip" else "clip",
             "tokenizer.ggml.pre": self.pre_tokenizer,
             "tokenizer.ggml.tokens": token_list,
@@ -312,6 +394,8 @@ class BPETokenizer:
             meta["tokenizer.ggml.padding_token_id"] = int(self.pad_token_id)
         if self.unk_token_id is not None:
             meta["tokenizer.ggml.unknown_token_id"] = int(self.unk_token_id)
+        if self.chat_template:
+            meta["tokenizer.chat_template"] = str(self.chat_template)
 
         return meta
 
