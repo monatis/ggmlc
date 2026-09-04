@@ -154,13 +154,67 @@ Generates:
 ```python
 from ggmlc.frontend.pytorch import export_torch_model
 
-# Export Canonical IR or Lowered GGML Graph
-graph = export_torch_model(model, (example_x,)).main_graph
-
 # Render directly to PNG, SVG, or interactive HTML (with embedded pan/zoom)
-ggmlc.visualize(graph, output_path="resnet18.png")   # Pure-Python PNG rendering via mermaidx
-ggmlc.visualize(graph, output_path="resnet18.svg")   # Vector graphic
-ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan/zoom
+ggmlc.visualize(graph, output="resnet18.html")
+```
+
+### 5. Automatic Reference Vision Preprocessing & Tokenizers
+```python
+import torchvision.models as models
+from PIL import Image
+from ggmlc.pipeline import VisionPreprocessor, BPETokenizer, from_huggingface_tokenizer
+
+image = Image.open("cat.jpg")
+
+# 1. Automatic Torchvision Preprocessor (ResNet, ConvNeXt, MobileNet, EfficientNet, ViT)
+pre_tv = VisionPreprocessor.from_torchvision(models.ResNet50_Weights.DEFAULT)
+pixel_values = pre_tv(image)  # Output: (1, 3, 224, 224) np.ndarray (exact bit-for-bit parity)
+
+# 2. Automatic Hugging Face Preprocessor
+pre_hf = VisionPreprocessor.from_huggingface("openai/clip-vit-base-patch32")
+pixel_values = pre_hf(image)
+
+# 3. Tokenizer (BPE / WordPiece with C++ runtime acceleration)
+tok = BPETokenizer.from_huggingface("openai-community/gpt2")
+input_ids = tok.encode("a photo of a cat")
+print("Decoded:", tok.decode(input_ids))
+
+# 4. Direct Multimodal Inference
+runner = ggmlc.load("clip_model.gguf", device="cuda")
+similarity_logits = runner(pixel_values, input_ids)
+```
+
+### 6. Fast Autoregressive Text Generation (`GGMLCGenerator`)
+```python
+from ggmlc.pipeline.tokenizer import BPETokenizer
+from ggmlc.runtime.generator import GGMLCGenerator
+from examples.models.hub_models import load_smollm2_model
+
+# 1. Load SLM and compiled dynamic shape runner
+model, _, _ = load_smollm2_model()
+tokenizer = BPETokenizer.from_huggingface("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+# 2. End-to-end greedy or top-p autoregressive text generation
+generator = GGMLCGenerator(model, tokenizer, model_name="smollm2_135m", device="auto")
+text = generator.generate("Artificial intelligence will", max_new_tokens=16, greedy=True)
+print("Generated text:", text)
+```
+
+### 7. Standalone Native CLI Runner (`ggmlc-run`)
+`ggmlc` compiles into a zero-dependency C++ executable (`ggmlc-run`) capable of executing any compiled GGUF model:
+
+```bash
+# 1. Inspect model metadata, tensor graph, dynamic symbols, and detected capabilities
+./ggmlc-run model.gguf --info
+
+# 2. Clean instruction chat streaming with automatic template application
+./ggmlc-run smollm2.gguf --chat "What is the capital of France?" --threads 4
+
+# 3. Offload chat inference to NVIDIA CUDA GPU
+./ggmlc-run smollm2.gguf --chat "Explain quantum computing in one sentence." --device cuda
+
+# 4. Multimodal image preprocessing & task-aware classification
+./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4
 ```
 
 ---
@@ -199,7 +253,9 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
 | **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
 | **Text-Encoder** | **BERT-base-uncased** | PyTorch / Transformers | 12-Layer Full Bidirectional Transformer, Segment Embeddings | ✅ **PASS** | `1.84e-02` |
-| **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **GPT-2 (124M)** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **SmolLM2 (135M)** | PyTorch / Transformers | Llama-based SLM, GQA, RoPE theta 100k, SwiGLU, RMSNorm | ✅ **PASS** | `6.10e-05` |
+| **Text-SLM** | **Gemma 3 (270M)** | PyTorch / Transformers | Dual RoPE (10k/1M), QK-Norm, Scaled Embeddings, GELU SwiGLU | ✅ **PASS** | `< 1e-1` |
 | **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |
@@ -214,12 +270,15 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **JAX-NLP** | **KerasHub DistilBERT** | KerasHub / JAX | Distilled Bidirectional Transformer Backbone | ✅ **PASS** | `4.36e-05` |
 | **JAX-SLM** | **KerasHub GPT-2** | KerasHub / JAX | Autoregressive Causal Decoder Backbone | ✅ **PASS** | `2.86e-06` |
 | **JAX-SLM** | **KerasHub Gemma 3** | KerasHub / JAX | GQA, Sliding Window + Full Attention, Soft-Capping, QK-Norm | ✅ **PASS** | `< 5e-1` |
+| **Multimodal-Vision** | **CLIP ViT-B/32 (Vision)** | OpenAI / Transformers | 12-Layer Patch Vision Transformer, Class Token Pooling | ✅ **PASS** | `4.77e-06` |
+| **Multimodal-Text** | **CLIP Text Transformer** | OpenAI / Transformers | Causal Self-Attention, EOS Argmax Pooling, Text Projection | ✅ **PASS** | `2.86e-06` |
+| **Multimodal-E2E** | **CLIP Multimodal Similarity** | OpenAI / Transformers | Vision + Text Joint Projection, L2 Norm, Cosine Logits | ✅ **PASS** | `3.81e-06` |
 
 ---
 
 ## ⚡ Continuous Benchmarking Suite
 
-We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 27 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
+We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 30 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
 
 ### NVIDIA T4 GPU Benchmark Results (Google Colab)
 
@@ -252,6 +311,9 @@ We continuously verify numerical parity and GPU vs. CPU performance with a compr
 | **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **28.61** | 29.61 | 35.4 | `4.42e-05` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **26.86** | 29.07 | 36.6 | `1.55e-06` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **22.84** | 23.33 | 43.6 | `3.81e-06` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | 274 | 333.77 MB | **169.18** | 179.84 | 5.9 | `4.77e-06` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | 272 | 241.13 MB | **130.26** | 135.84 | 7.7 | `2.86e-06` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | 560 | 577.41 MB | **312.90** | 430.18 | 3.0 | `3.81e-06` | ✅ PASS |
 
 You can also run the benchmarking suite on your own machine:
 ```powershell
@@ -296,6 +358,9 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 | **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | **37.63 ms** | **26.5 inf/s** | `4.36e-05` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | PyTorch | 274 | 333.77 MB | **169.18 ms** | **5.9 inf/s** | `4.77e-06` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | PyTorch | 272 | 241.13 MB | **130.26 ms** | **7.7 inf/s** | `2.86e-06` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | PyTorch | 560 | 577.41 MB | **312.90 ms** | **3.0 inf/s** | `3.81e-06` | ✅ PASS |
 
 </details>
 
@@ -390,6 +455,7 @@ pytest -v
 Comprehensive guides, tutorials, and API references are available in the [`docs/`](docs/) directory:
 
 - **[Python API Guide](docs/guides/python_api_guide.md)**: Detailed Python usage with `ggmlc.compile`, `ggmlc.load`, and `ggmlc.codegen`.
+- **[Standalone C++ Runner & Architecture](docs/runtime/runtime_architecture.md)**: Architecture of `ggmlc-run`, GGUF metadata schema, chat templates, and hardware execution.
 - **[Developer & Contributor Guide](docs/guides/developer_guide.md)**: Adding new operators, lowering rules, and C++ kernels.
 - **[Quantization Subsystem Guide](docs/guides/quantization_guide.md)**: Q8_0 and Q4_0 block quantization details and precision benchmarks.
 - **[Autoregressive Text Generation](docs/guides/autoregressive_generation.md)**: Multi-token KV-cache generation and parity verification.

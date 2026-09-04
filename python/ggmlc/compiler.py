@@ -24,6 +24,9 @@ def compile(
     fusion_options: dict[str, bool] | None = None,
     quantize: str | DType | None = None,
     return_runner: bool = False,
+    pipeline: Any = None,
+    tasks: str | list[str] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Path | bytes | Any:
     """Compiles a PyTorch or JAX neural network model into a standard GGUF v3 binary container.
@@ -44,6 +47,11 @@ def compile(
         fusion_options: Optional granular flags for specific fusion patterns.
         quantize: Optional quantization format ('q4_0', 'q8_0', DType.Q4_0, DType.Q8_0).
         return_runner: If True, automatically loads and returns an instantiated ModelRunner.
+        pipeline: Optional multimodal pipeline preprocessor (e.g. VisionPreprocessor or BPETokenizer)
+            whose schema metadata will be embedded into GGUF headers.
+        tasks: Explicit task or list of tasks supported by this model (e.g. 'classification',
+            ['embedding', 'similarity'], or 'text-generation') embedded into 'ggmlc.tasks'.
+        extra_metadata: Optional custom key-value metadata dictionary embedded into the GGUF file.
         **kwargs: Additional framework-specific keyword arguments.
 
     Returns:
@@ -99,10 +107,10 @@ def compile(
 
     # 2. Run Canonical IR Graph Optimizations
     if enable_optimizations:
-        pipeline = create_standard_optimization_pipeline(
+        opt_pipeline = create_standard_optimization_pipeline(
             enable_fusion=enable_fusion, options=fusion_options
         )
-        opt_result = pipeline.run(canonical_graph)
+        opt_result = opt_pipeline.run(canonical_graph)
         canonical_graph = opt_result.graph
 
     # 3. Lower to GGML Dialect
@@ -117,7 +125,19 @@ def compile(
         target_dtype = DType.from_str(str(quantize)) if isinstance(quantize, str) else quantize
         ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
 
-    # 5. Stream directly to file or serialize to memory
+    # 5. Extract metadata from pipeline and tasks if provided
+    combined_metadata: dict[str, Any] = dict(extra_metadata or {})
+    if pipeline is not None:
+        if hasattr(pipeline, "to_gguf_metadata"):
+            combined_metadata.update(pipeline.to_gguf_metadata())
+        elif isinstance(pipeline, dict):
+            combined_metadata.update(pipeline)
+
+    if tasks:
+        task_list = [tasks] if isinstance(tasks, str) else [str(t) for t in tasks]
+        combined_metadata["ggmlc.tasks"] = task_list
+
+    # 6. Stream directly to file or serialize to memory
     from ggmlc.runtime.runner import load
     from ggmlc.serialization.gguf import save_to_gguf, serialize_to_gguf
 
@@ -125,16 +145,16 @@ def compile(
     n_threads = kwargs.get("n_threads", 1)
 
     if output is not None:
-        out_path = save_to_gguf(ggml_graph, output)
+        out_path = save_to_gguf(ggml_graph, output, extra_metadata=combined_metadata)
         if return_runner:
             return load(out_path, n_threads=n_threads, device=device)
         return out_path
 
     if return_runner:
-        gguf_bytes = serialize_to_gguf(ggml_graph)
+        gguf_bytes = serialize_to_gguf(ggml_graph, extra_metadata=combined_metadata)
         return load(gguf_bytes, n_threads=n_threads, device=device)
 
-    return serialize_to_gguf(ggml_graph)
+    return serialize_to_gguf(ggml_graph, extra_metadata=combined_metadata)
 
 
 def compile_to_bytes(

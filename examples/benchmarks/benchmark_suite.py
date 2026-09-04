@@ -36,6 +36,11 @@ from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 
+from examples.models.clip_model import (
+    load_clip_full_model,
+    load_clip_text_model,
+    load_clip_vision_model,
+)
 from examples.models.flax_models import load_flax_vit_b16
 from examples.models.hub_models import (
     load_bert_model,
@@ -49,6 +54,7 @@ from examples.models.hub_models import (
     load_qwen_model,
     load_regnet_model,
     load_resnet_model,
+    load_smollm2_model,
     load_ssdlite320_mobilenet_v3_model,
     load_vit_model,
     load_whisper_model,
@@ -372,6 +378,7 @@ class BenchmarkSuite:
             ("bert_base_uncased", "Text-Encoder", lambda: load_bert_model(seq_len=16)),
             # 5. Text - SLM / Decoder
             ("gpt2", "Text-SLM", lambda: load_gpt2_model(seq_len=8)),
+            ("smollm2_135m", "Text-SLM", lambda: load_smollm2_model(seq_len=8)),
             ("qwen2.5_0.5b", "Text-SLM", lambda: load_qwen_model(seq_len=8)),
             # 6. Audio - Seq2Seq & Cross-Attention
             (
@@ -396,6 +403,10 @@ class BenchmarkSuite:
             ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
             ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
             ("kerashub_gemma3", "JAX-SLM", load_kerashub_gemma3),
+            # 8. Multimodal Vision-Language Models
+            ("clip_vision_vit_b32", "Multimodal-Vision", load_clip_vision_model),
+            ("clip_text_transformer", "Multimodal-Text", load_clip_text_model),
+            ("clip_multimodal_similarity", "Multimodal-E2E", load_clip_full_model),
         ]
 
         for name, category, loader in all_models:

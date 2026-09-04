@@ -64,6 +64,9 @@ def compile(
     fusion_options: dict[str, bool] | None = None,
     quantize: str | DType | None = None,
     return_runner: bool = False,
+    pipeline: Any = None,
+    tasks: str | list[str] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
     device: str = "cpu",
     **kwargs: Any,
 ) -> Path | bytes | ModelRunner:
@@ -78,6 +81,9 @@ def compile(
 - **`enable_fusion`**: If `True`, lowers composite subgraphs into high-performance fused ops.
 - **`quantize`**: Optional parameter quantization format: `"q8_0"`, `"q4_0"`, `DType.Q8_0`, `DType.Q4_0`.
 - **`return_runner`**: If `True`, automatically loads and returns an instantiated `ModelRunner`.
+- **`pipeline`**: Optional multimodal preprocessor (e.g. `VisionPreprocessor` or `BPETokenizer`) whose specification metadata is serialized directly into GGUF headers for standalone runtime execution.
+- **`tasks`**: Explicit declared task or list of tasks (`"classification"`, `["embedding", "similarity"]`, `"text-generation"`), embedded into `"ggmlc.tasks"` for task-aware output formatting and capability checks.
+- **`extra_metadata`**: Optional dictionary of custom key-value metadata to embed into GGUF headers.
 - **`device`**: Hardware target when `return_runner=True` (`"cpu"`, `"cuda"`, `"cuda:0"`, `"auto"`).
 
 ---
@@ -150,4 +156,52 @@ Generates diagrammatic visualizations of Canonical IR or Lowered GGML execution 
 ggmlc.visualize(graph, output_path="model_graph.png")  # Render to PNG image via mermaidx
 ggmlc.visualize(graph, output_path="model_graph.svg")  # Render to vector SVG
 ggmlc.visualize(graph, output_path="model_graph.html") # Interactive browser visualization
+```
+
+---
+
+## 3. Multimodal Preprocessors & Tokenizers
+
+`ggmlc.pipeline` provides automated introspection builders for vision and text preprocessing that serialize directly into standard GGUF metadata.
+
+### Vision Preprocessors (`VisionPreprocessor`)
+Automatically introspects reference parameters (crop size, shortest-edge resize, mean, std, interpolation):
+```python
+from PIL import Image
+import torchvision.models as models
+from ggmlc.pipeline import VisionPreprocessor
+
+# 1. Introspect from Torchvision Weights enum
+pre_resnet = VisionPreprocessor.from_torchvision(models.ResNet50_Weights.DEFAULT)
+pixel_tensor = pre_resnet(Image.open("sample.jpg"))  # (1, 3, 224, 224) np.float32
+
+# 2. Introspect from Hugging Face Model ID
+pre_clip = VisionPreprocessor.from_huggingface("openai/clip-vit-base-patch32")
+clip_tensor = pre_clip(Image.open("sample.jpg"))
+
+# 3. Embed directly into GGUF container during compilation
+ggmlc.compile(
+    resnet_model,
+    (torch.randn(1, 3, 224, 224),),
+    output="resnet50_vision.gguf",
+    pipeline=pre_resnet,
+    tasks=["classification"],
+)
+```
+
+### Tokenizers (`BPETokenizer`)
+Fast BPE tokenization with native C++ runtime support:
+```python
+from ggmlc.pipeline.tokenizer import BPETokenizer
+
+# Load from Hugging Face model repository
+tokenizer = BPETokenizer.from_huggingface("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+# 1. Raw prompt encoding & decoding
+token_ids = tokenizer.encode("The capital of France is")
+text = tokenizer.decode(token_ids)
+
+# 2. Chat template formatting (ChatML, Gemma, Llama-3)
+formatted = tokenizer.apply_chat_template("What is the capital of France?", system_msg="You are helpful.")
+chat_ids = tokenizer.encode(formatted, add_special_tokens=False)
 ```

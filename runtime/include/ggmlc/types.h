@@ -105,6 +105,48 @@ struct SerializedModelGraph {
     std::unordered_map<uint32_t, SerializedTensor> tensors;
     std::vector<SerializedOp> ops;
     std::vector<uint8_t> data_buffer;
+
+    // Metadata key-values
+    std::unordered_map<std::string, std::string> metadata_str;
+    std::unordered_map<std::string, int64_t> metadata_int;
+    std::unordered_map<std::string, double> metadata_float;
+    std::unordered_map<std::string, std::vector<std::string>> metadata_str_arr;
+
+    bool has_tokenizer() const {
+        return metadata_str_arr.count("tokenizer.ggml.tokens") > 0 ||
+               metadata_str.count("tokenizer.ggml.model") > 0;
+    }
+
+    bool has_chat_template() const {
+        auto it = metadata_str.find("tokenizer.chat_template");
+        return it != metadata_str.end() && !it->second.empty();
+    }
+
+    bool has_vision() const {
+        return metadata_int.count("clip.vision.image_size") > 0 ||
+               metadata_str.count("preprocessor.image.crop_mode") > 0 ||
+               metadata_str.count("preprocessor.image.channel_format") > 0;
+    }
+
+    std::vector<std::string> get_tasks() const {
+        auto it = metadata_str_arr.find("ggmlc.tasks");
+        if (it != metadata_str_arr.end()) {
+            return it->second;
+        }
+        auto s_it = metadata_str.find("ggmlc.task");
+        if (s_it != metadata_str.end() && !s_it->second.empty()) {
+            return {s_it->second};
+        }
+        return {};
+    }
+
+    bool has_task(const std::string& task) const {
+        for (const auto& t : get_tasks()) {
+            if (t == task) return true;
+        }
+        return false;
+    }
 };
 
 } // namespace ggmlc
+

@@ -90,6 +90,7 @@ class GGMLUnaryOpCode(IntEnum):
     GGML_UNARY_OP_SILU = 10
     GGML_UNARY_OP_HARDSWISH = 11
     GGML_UNARY_OP_HARDSIGMOID = 12
+    GGML_UNARY_OP_EXP = 13
 
 
 @unique
