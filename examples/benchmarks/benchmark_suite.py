@@ -61,6 +61,11 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
 )
+from examples.models.clip_model import (
+    load_clip_full_model,
+    load_clip_text_model,
+    load_clip_vision_model,
+)
 from examples.models.kerashub_models import (
     load_kerashub_bert,
     load_kerashub_distilbert,
@@ -396,6 +401,10 @@ class BenchmarkSuite:
             ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
             ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
             ("kerashub_gemma3", "JAX-SLM", load_kerashub_gemma3),
+            # 8. Multimodal Vision-Language Models
+            ("clip_vision_vit_b32", "Multimodal-Vision", load_clip_vision_model),
+            ("clip_text_transformer", "Multimodal-Text", load_clip_text_model),
+            ("clip_multimodal_similarity", "Multimodal-E2E", load_clip_full_model),
         ]
 
         for name, category, loader in all_models:

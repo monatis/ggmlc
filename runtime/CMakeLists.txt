@@ -9,6 +9,8 @@ add_library(ggmlc_runtime STATIC
     src/loader.cpp
     src/executor.cpp
     src/stdlib_kernels.cpp
+    src/pipeline/image.cpp
+    src/pipeline/tokenizer.cpp
 )
 
 target_link_libraries(ggmlc_runtime PUBLIC
@@ -29,6 +31,8 @@ add_library(ggmlc_runtime_shared SHARED
     src/loader.cpp
     src/executor.cpp
     src/stdlib_kernels.cpp
+    src/pipeline/image.cpp
+    src/pipeline/tokenizer.cpp
 )
 
 target_link_libraries(ggmlc_runtime_shared PUBLIC
@@ -55,6 +59,8 @@ if (Python_FOUND)
             src/loader.cpp
             src/executor.cpp
             src/stdlib_kernels.cpp
+            src/pipeline/image.cpp
+            src/pipeline/tokenizer.cpp
         )
         target_link_libraries(_runtime PRIVATE ${GGML_BACKEND_LIBS})
         

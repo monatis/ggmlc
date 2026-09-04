@@ -293,6 +293,8 @@ def _lower_op(
         ggml_dim = R - 1 - dim
         attrs["ggml_dim"] = ggml_dim
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_SUM_ROWS, in_ids, out_ids, attrs, op.name)
+    elif opcode == OpCode.ARGMAX:
+        return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ARGMAX, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.CONTIGUOUS:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CONT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.LOG:
@@ -333,6 +335,15 @@ def _lower_op(
             in_ids,
             out_ids,
             {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_SIGMOID)},
+            op.name,
+        )
+    elif opcode == OpCode.EXP:
+        return GGMLOpDef(
+            op.id,
+            GGMLOpCode.GGML_OP_UNARY,
+            in_ids,
+            out_ids,
+            {"unary_op": int(GGMLUnaryOpCode.GGML_UNARY_OP_EXP)},
             op.name,
         )
     elif opcode == OpCode.HARDSWISH:
@@ -629,6 +640,48 @@ def _lower_op(
     elif opcode == OpCode.CAST:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_CPY, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.SDPA:
+        if len(in_ids) > 3 and "is_causal" not in attrs:
+            mask_id = in_ids[3]
+            mask_t = c_graph.tensors.get(mask_id)
+            data = None
+            if mask_t and mask_t.data is not None:
+                data = mask_t.data
+            else:
+                # trace producer node through expand/repeat/view/reshape
+                curr_id = mask_id
+                nodes_by_out = {out: n for n in c_graph.nodes for out in n.outputs}
+                while curr_id in nodes_by_out:
+                    prod = nodes_by_out[curr_id]
+                    if prod.opcode in (
+                        OpCode.EXPAND,
+                        OpCode.REPEAT,
+                        OpCode.VIEW,
+                        OpCode.RESHAPE,
+                        OpCode.TRANSPOSE,
+                    ):
+                        src_t = c_graph.tensors.get(prod.inputs[0])
+                        if src_t and src_t.data is not None:
+                            data = src_t.data
+                            break
+                        curr_id = prod.inputs[0]
+                    else:
+                        break
+            if data is not None:
+                import numpy as np
+
+                sq_data = np.squeeze(data)
+                if sq_data.ndim == 2 and sq_data.shape[0] == sq_data.shape[1]:
+                    n = sq_data.shape[0]
+                    tril_bool = np.tril(np.ones((n, n), dtype=bool))
+                    if (sq_data.dtype == bool or sq_data.dtype == np.bool_) and np.array_equal(
+                        sq_data, tril_bool
+                    ) or (
+                        np.issubdtype(sq_data.dtype, np.floating)
+                        and np.all(sq_data[tril_bool] == 0.0)
+                        and np.all(sq_data[~tril_bool] <= -1e4)
+                    ):
+                        attrs["is_causal"] = 1
+                        in_ids = in_ids[:3]
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ROPE:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ROPE, in_ids, out_ids, attrs, op.name)

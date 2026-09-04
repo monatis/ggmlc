@@ -52,6 +52,7 @@ class OpCode(Enum):
     MEAN = "mean"
     AMAX = "amax"
     AMIN = "amin"
+    ARGMAX = "argmax"
 
     # Tensor manipulation
     RESHAPE = "reshape"

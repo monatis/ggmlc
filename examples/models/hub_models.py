@@ -410,3 +410,10 @@ def load_bert_model(
             return out.last_hidden_state
 
     return BertWrapper(model), example_input, input_names
+
+
+from examples.models.clip_model import (
+    load_clip_full_model,
+    load_clip_text_model,
+    load_clip_vision_model,
+)

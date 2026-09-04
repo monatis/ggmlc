@@ -24,6 +24,8 @@ def compile(
     fusion_options: dict[str, bool] | None = None,
     quantize: str | DType | None = None,
     return_runner: bool = False,
+    pipeline: Any = None,
+    extra_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Path | bytes | Any:
     """Compiles a PyTorch or JAX neural network model into a standard GGUF v3 binary container.
@@ -117,7 +119,15 @@ def compile(
         target_dtype = DType.from_str(str(quantize)) if isinstance(quantize, str) else quantize
         ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
 
-    # 5. Stream directly to file or serialize to memory
+    # 5. Extract metadata from pipeline if provided
+    combined_metadata: dict[str, Any] = dict(extra_metadata or {})
+    if pipeline is not None:
+        if hasattr(pipeline, "to_gguf_metadata"):
+            combined_metadata.update(pipeline.to_gguf_metadata())
+        elif isinstance(pipeline, dict):
+            combined_metadata.update(pipeline)
+
+    # 6. Stream directly to file or serialize to memory
     from ggmlc.runtime.runner import load
     from ggmlc.serialization.gguf import save_to_gguf, serialize_to_gguf
 
@@ -125,16 +135,16 @@ def compile(
     n_threads = kwargs.get("n_threads", 1)
 
     if output is not None:
-        out_path = save_to_gguf(ggml_graph, output)
+        out_path = save_to_gguf(ggml_graph, output, extra_metadata=combined_metadata)
         if return_runner:
             return load(out_path, n_threads=n_threads, device=device)
         return out_path
 
     if return_runner:
-        gguf_bytes = serialize_to_gguf(ggml_graph)
+        gguf_bytes = serialize_to_gguf(ggml_graph, extra_metadata=combined_metadata)
         return load(gguf_bytes, n_threads=n_threads, device=device)
 
-    return serialize_to_gguf(ggml_graph)
+    return serialize_to_gguf(ggml_graph, extra_metadata=combined_metadata)
 
 
 def compile_to_bytes(

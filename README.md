@@ -163,6 +163,24 @@ ggmlc.visualize(graph, output_path="resnet18.svg")   # Vector graphic
 ggmlc.visualize(graph, output_path="resnet18.html")  # Interactive HTML with pan/zoom
 ```
 
+### 5. End-to-End Image Preprocessing & Tokenizer Pipelines
+```python
+from PIL import Image
+from ggmlc.pipeline import VisionPreprocessor, from_torchvision, from_huggingface_tokenizer
+
+# 1. Vision Preprocessor (Bicubic resize + Center crop + Normalization)
+preprocessor = VisionPreprocessor(target_size=(224, 224), interpolation="bicubic", crop_mode="center")
+pixel_values = preprocessor.process("cat.jpg") # (1, 3, 224, 224) float32
+
+# 2. Tokenizer (BPE / WordPiece with C++ runtime acceleration)
+tok = from_huggingface_tokenizer(hf_tokenizer)
+input_ids = tok.encode("a photo of a cat", max_length=77) # [49406, 320, 1125, ...]
+
+# 3. Direct Multimodal Inference
+runner = ggmlc.load("clip_model.gguf", device="cuda")
+similarity_logits = runner(pixel_values, input_ids)
+```
+
 ---
 
 ## 🔍 Visual Graph Inspector
@@ -214,12 +232,15 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **JAX-NLP** | **KerasHub DistilBERT** | KerasHub / JAX | Distilled Bidirectional Transformer Backbone | ✅ **PASS** | `4.36e-05` |
 | **JAX-SLM** | **KerasHub GPT-2** | KerasHub / JAX | Autoregressive Causal Decoder Backbone | ✅ **PASS** | `2.86e-06` |
 | **JAX-SLM** | **KerasHub Gemma 3** | KerasHub / JAX | GQA, Sliding Window + Full Attention, Soft-Capping, QK-Norm | ✅ **PASS** | `< 5e-1` |
+| **Multimodal-Vision** | **CLIP ViT-B/32 (Vision)** | OpenAI / Transformers | 12-Layer Patch Vision Transformer, Class Token Pooling | ✅ **PASS** | `4.77e-06` |
+| **Multimodal-Text** | **CLIP Text Transformer** | OpenAI / Transformers | Causal Self-Attention, EOS Argmax Pooling, Text Projection | ✅ **PASS** | `2.86e-06` |
+| **Multimodal-E2E** | **CLIP Multimodal Similarity** | OpenAI / Transformers | Vision + Text Joint Projection, L2 Norm, Cosine Logits | ✅ **PASS** | `3.81e-06` |
 
 ---
 
 ## ⚡ Continuous Benchmarking Suite
 
-We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 27 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
+We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 30 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
 
 ### NVIDIA T4 GPU Benchmark Results (Google Colab)
 
@@ -252,6 +273,9 @@ We continuously verify numerical parity and GPU vs. CPU performance with a compr
 | **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **28.61** | 29.61 | 35.4 | `4.42e-05` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **26.86** | 29.07 | 36.6 | `1.55e-06` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **22.84** | 23.33 | 43.6 | `3.81e-06` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | 274 | 333.77 MB | **169.18** | 179.84 | 5.9 | `4.77e-06` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | 272 | 241.13 MB | **130.26** | 135.84 | 7.7 | `2.86e-06` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | 560 | 577.41 MB | **312.90** | 430.18 | 3.0 | `3.81e-06` | ✅ PASS |
 
 You can also run the benchmarking suite on your own machine:
 ```powershell
@@ -296,6 +320,9 @@ python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2
 | **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | **37.63 ms** | **26.5 inf/s** | `4.36e-05` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
 | **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | PyTorch | 274 | 333.77 MB | **169.18 ms** | **5.9 inf/s** | `4.77e-06` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | PyTorch | 272 | 241.13 MB | **130.26 ms** | **7.7 inf/s** | `2.86e-06` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | PyTorch | 560 | 577.41 MB | **312.90 ms** | **3.0 inf/s** | `3.81e-06` | ✅ PASS |
 
 </details>
 

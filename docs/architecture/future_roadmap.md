@@ -37,26 +37,29 @@ Rather than trying to force both frontends into identical ASTs at the ingestion 
 
 ## 2. Living Baseline: Continuous Model Zoo & Differential Parity
 
-Expanding model coverage and differential testing is an ongoing effort that runs continuously across every development cycle:
-- **Continuous Benchmarking & Verification**: Every supported architecture is continuously tested on both CPU and GPU (CUDA, and upcoming backends) against reference PyTorch / JAX runs to guarantee mathematical parity ($> 0.99999$ cosine similarity).
-- **Edge-Cases & Symbolic Shapes**: Extending support for complex slicing, dynamic dimension expressions, non-contiguous striding, and multi-branch architectures.
-- **Current Zoo (27 validated models)**: Spans Vision-CNN (ResNet, MobileNetV3, ConvNeXt, EfficientNet, DenseNet, RegNet), Detection (SSDLite), Vision Transformers (ViT-B/16), Text Embeddings (MiniLM, BGE-M3), Encoders (BERT, DistilBERT), SLMs (GPT-2, Qwen-2.5-0.5B, Gemma 3), and Audio Seq2Seq (Whisper-Tiny Encoder & Decoder).
+- **Current Zoo (30 validated models)**: Spans Vision-CNN (ResNet, MobileNetV3, ConvNeXt, EfficientNet, DenseNet, RegNet), Detection (SSDLite), Vision Transformers (ViT-B/16), Text Embeddings (MiniLM, BGE-M3), Encoders (BERT, DistilBERT), SLMs (GPT-2, Qwen-2.5-0.5B, Gemma 3), Audio Seq2Seq (Whisper-Tiny Encoder & Decoder), and Multimodal Vision-Language (OpenAI CLIP Vision, Text, and End-to-End Similarity).
 
 ---
 
-## 3. What We're Building Next
+## 3. Implemented Capabilities & What We're Building Next
 
-### A. End-to-End Pipelines & Pre/Post-Processing
-Today, models accept pre-formatted numerical tensor buffers. We are building built-in preprocessing and postprocessing routines:
-- **Vision**: Image decoding, bicubic/bilinear resizing, aspect-ratio letterboxing, normalization (`(x - mean) / std`), channel permutations (NHWC $\leftrightarrow$ NCHW).
-- **Text**: Integrated BPE, WordPiece, and SentencePiece tokenization and detokenization.
-- **Audio**: Raw waveform loading and log-Mel spectrogram featurization.
+### ✅ Completed: End-to-End Pipelines & Pre/Post-Processing
+- **Vision Preprocessing Subsystem (`ggmlc.pipeline.vision`)**:
+  - Continuous bicubic, bilinear, nearest resampling.
+  - Aspect-ratio letterboxing, center crop, normalization (`(x - mean) / std`), channel permutations (NCHW $\leftrightarrow$ NHWC).
+  - Introspection and mathematical parity verification against `torchvision.transforms` (`from_torchvision`, `verify_torchvision_parity`).
+  - Native C++ engine (`stb_image` decode + fast SIMD bicubic interpolation + normalization) in `runtime/src/pipeline/image.cpp`.
+- **Tokenization Subsystem (`ggmlc.pipeline.tokenizer`)**:
+  - Byte-level Byte-Pair Encoding (BPE) for CLIP and GPT-2, WordPiece for BERT.
+  - Automatic metadata export to standard GGUF tokenizer keys (`tokenizer.ggml.*`).
+  - Native C++ tokenizer engine with regex pre-tokenization in `runtime/src/pipeline/tokenizer.cpp`.
+  - Introspection from Hugging Face processors/tokenizers (`from_huggingface`, `from_huggingface_tokenizer`).
 - **Raw Input Ingestion in `ggmlc-run`**:
-  - The CLI executable will directly accept raw images (`.jpg`/`.png`), plain text prompts, or audio files (`.wav`) instead of binary float arrays.
-- **Lightweight Inference Server Mode**:
-  - `ggmlc-run` will support running as a lightweight, low-overhead HTTP/IPC inference server in addition to single-shot CLI runs.
-- **Standalone C++ Project Inclusion**:
-  - Generated C++ projects (`ggmlc.codegen`) will optionally bundle these C++ preprocessing and postprocessing helpers for fully self-contained native apps.
+  - Direct execution from CLI with `--image <path>` and `--text <string>`.
+
+---
+
+## 4. Next Priorities On The Roadmap
 
 ### B. Low-Level Nanobind Tensor Ops API
 In addition to the high-level model runner (`runner(x)`), we will expose granular, direct Python bindings to GGML tensor operations:

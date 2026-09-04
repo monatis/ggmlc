@@ -241,6 +241,14 @@ class GGUFWriter:
         payload = struct.pack("<i", val)
         self.kv_pairs.append((key, GGUF_TYPE_INT32, payload))
 
+    def add_float32(self, key: str, val: float) -> None:
+        payload = struct.pack("<f", float(val))
+        self.kv_pairs.append((key, GGUF_TYPE_FLOAT32, payload))
+
+    def add_bool(self, key: str, val: bool) -> None:
+        payload = struct.pack("<?", bool(val))
+        self.kv_pairs.append((key, GGUF_TYPE_BOOL, payload))
+
     def add_string_array(self, key: str, arr: list[str]) -> None:
         buf = io.BytesIO()
         buf.write(struct.pack("<I", GGUF_TYPE_STRING))
@@ -249,6 +257,14 @@ class GGUFWriter:
             b_s = s.encode("utf-8")
             buf.write(struct.pack("<Q", len(b_s)))
             buf.write(b_s)
+        self.kv_pairs.append((key, GGUF_TYPE_ARRAY, buf.getvalue()))
+
+    def add_float_array(self, key: str, arr: list[float]) -> None:
+        buf = io.BytesIO()
+        buf.write(struct.pack("<I", GGUF_TYPE_FLOAT32))
+        buf.write(struct.pack("<Q", len(arr)))
+        for f_val in arr:
+            buf.write(struct.pack("<f", float(f_val)))
         self.kv_pairs.append((key, GGUF_TYPE_ARRAY, buf.getvalue()))
 
     def add_tensor_info(
@@ -355,7 +371,10 @@ class GGUFWriter:
         return p
 
 
-def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
+def _build_gguf_writer(
+    graph: GGMLExecutionGraph,
+    extra_metadata: dict[str, Any] | None = None,
+) -> GGUFWriter:
     """Constructs and populates a GGUFWriter with metadata and tensor descriptors."""
     writer = GGUFWriter(alignment=GGUF_DEFAULT_ALIGNMENT)
 
@@ -369,7 +388,26 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
     spec_json = _graph_to_json_spec(graph)
     writer.add_string("ggmlc.graph_spec", spec_json)
 
-    # 3. Add Tensors with data (Parameters / Constants)
+    # 3. Add Custom / Pipeline Metadata
+    if extra_metadata:
+        for k, v in extra_metadata.items():
+            if isinstance(v, str):
+                writer.add_string(k, v)
+            elif isinstance(v, bool):
+                writer.add_bool(k, v)
+            elif isinstance(v, int):
+                writer.add_int32(k, v)
+            elif isinstance(v, float):
+                writer.add_float32(k, v)
+            elif isinstance(v, (list, tuple)):
+                if len(v) == 0:
+                    continue
+                if isinstance(v[0], str):
+                    writer.add_string_array(k, [str(x) for x in v])
+                elif isinstance(v[0], (float, int)):
+                    writer.add_float_array(k, [float(x) for x in v])
+
+    # 4. Add Tensors with data (Parameters / Constants)
     used_names: set[str] = set()
     for _tid, t in sorted(graph.tensors.items()):
         if t.data is not None:
@@ -402,11 +440,10 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
                 static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
             elif isinstance(t.data, bytes):
                 raw_bytes = t.data
-                static_shape = [d.value if isinstance(d, StaticDim) else 1 for d in t.ne]
+                static_shape = [1]
             else:
-                arr = np.ascontiguousarray(np.asarray(t.data))
-                raw_bytes = arr.tobytes()
-                static_shape = list(arr.shape[::-1]) if arr.ndim > 0 else [1]
+                raw_bytes = b""
+                static_shape = [1]
 
             # Ensure strictly 4D
             if len(static_shape) > 4:
@@ -431,15 +468,22 @@ def _build_gguf_writer(graph: GGMLExecutionGraph) -> GGUFWriter:
     return writer
 
 
-def serialize_to_gguf(graph: GGMLExecutionGraph) -> bytes:
+def serialize_to_gguf(
+    graph: GGMLExecutionGraph,
+    extra_metadata: dict[str, Any] | None = None,
+) -> bytes:
     """Serializes a GGMLExecutionGraph into official GGUF v3 binary format bytes."""
-    writer = _build_gguf_writer(graph)
+    writer = _build_gguf_writer(graph, extra_metadata=extra_metadata)
     return writer.write_to_bytes()
 
 
-def save_to_gguf(graph: GGMLExecutionGraph, filepath: str | Path) -> Path:
+def save_to_gguf(
+    graph: GGMLExecutionGraph,
+    filepath: str | Path,
+    extra_metadata: dict[str, Any] | None = None,
+) -> Path:
     """Serializes and streams a GGMLExecutionGraph directly to a .gguf file on disk."""
-    writer = _build_gguf_writer(graph)
+    writer = _build_gguf_writer(graph, extra_metadata=extra_metadata)
     return writer.write_to_file(filepath)
 
 

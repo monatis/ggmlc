@@ -578,6 +578,17 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_cont(ctx_, ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset));
                 break;
             }
+            case GGML_OP_ARGMAX: {
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
+                if (in0 && in0->type != GGML_TYPE_F32) {
+                    struct ggml_tensor* target_f32 = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, in0->ne[0], in0->ne[1], in0->ne[2], in0->ne[3]);
+                    in0 = ggml_cpy(ctx_, in0, target_f32);
+                }
+                result = ggml_argmax(ctx_, in0);
+                const auto& out_ne = concrete_shapes_[out_id];
+                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                break;
+            }
             case GGML_OP_CONCAT: {
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
                 result = in0;

@@ -6,26 +6,34 @@
 #include <unordered_map>
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
+#include "ggmlc/pipeline/image.h"
+#include "ggmlc/pipeline/tokenizer.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: ggmlc-run <model.gguf> [options]\n"
                   << "Options:\n"
                   << "  --input <name:file.bin>     Set input tensor from binary file\n"
+                  << "  --image <name:file.jpg>     Preprocess and set image input tensor (bicubic + normalize)\n"
+                  << "  --text <name:string>        Tokenize and set text input tensor (BPE)\n"
                   << "  --output <id:file.bin>      Save output tensor ID to binary file\n"
                   << "  --state-in <name:file.bin>  Load initial state tensor from binary file\n"
                   << "  --state-out <name:file.bin> Save final state tensor to binary file\n"
                   << "  --symbol <key=value>        Bind dynamic symbol\n"
+                  << "  --device <cpu|cuda>         Device to execute on (default: cpu)\n"
                   << "  --threads <N>               Number of threads (default: 1)\n";
         return 1;
     }
 
     std::string model_path = argv[1];
     std::unordered_map<std::string, std::string> input_files;
+    std::unordered_map<std::string, std::string> image_files;
+    std::unordered_map<std::string, std::string> text_inputs;
     std::unordered_map<uint32_t, std::string> output_files;
     std::unordered_map<std::string, std::string> state_in_files;
     std::unordered_map<std::string, std::string> state_out_files;
     std::unordered_map<std::string, int64_t> symbol_env;
+    std::string device_name = "cpu";
     int n_threads = 1;
     bool unplanned = false;
 
@@ -37,6 +45,20 @@ int main(int argc, char** argv) {
             if (colon != std::string::npos) {
                 input_files[val.substr(0, colon)] = val.substr(colon + 1);
             }
+        } else if (arg == "--image" && i + 1 < argc) {
+            std::string val = argv[++i];
+            size_t colon = val.find(':');
+            if (colon != std::string::npos) {
+                image_files[val.substr(0, colon)] = val.substr(colon + 1);
+            }
+        } else if (arg == "--text" && i + 1 < argc) {
+            std::string val = argv[++i];
+            size_t colon = val.find(':');
+            if (colon != std::string::npos) {
+                text_inputs[val.substr(0, colon)] = val.substr(colon + 1);
+            }
+        } else if (arg == "--device" && i + 1 < argc) {
+            device_name = argv[++i];
         } else if (arg == "--output" && i + 1 < argc) {
             std::string val = argv[++i];
             size_t colon = val.find(':');
@@ -76,7 +98,7 @@ int main(int argc, char** argv) {
                   << model_graph.ops.size() << " operations"
                   << (unplanned ? " (UNPLANNED / NO REUSE)" : " (PLANNED ARENA REUSE)") << ".\n";
 
-        ggmlc::ModelExecutor executor(model_graph);
+        ggmlc::ModelExecutor executor(model_graph, device_name);
         executor.prepare(symbol_env, !unplanned);
 
         // Load initial state data if provided
@@ -109,6 +131,22 @@ int main(int argc, char** argv) {
 
             executor.set_input_by_name(pair.first, buf.data(), sz);
             std::cout << "[ggmlc-run] Loaded input '" << pair.first << "' (" << sz << " bytes)\n";
+        }
+
+        // Load and preprocess image inputs
+        for (const auto& pair : image_files) {
+            auto img_tensor = ggmlc::pipeline::ImagePreprocessor::preprocess_file(pair.second, 224, 224);
+            executor.set_input_by_name(pair.first, img_tensor.data.data(), img_tensor.data.size() * sizeof(float));
+            std::cout << "[ggmlc-run] Preprocessed image '" << pair.first << "' from " << pair.second
+                      << " (" << img_tensor.channels << "x" << img_tensor.height << "x" << img_tensor.width << ")\n";
+        }
+
+        // Tokenize and load text inputs
+        for (const auto& pair : text_inputs) {
+            ggmlc::pipeline::BPETokenizer tokenizer;
+            auto tokens = tokenizer.encode(pair.second, 77, true, true);
+            executor.set_input_by_name(pair.first, tokens.data(), tokens.size() * sizeof(int32_t));
+            std::cout << "[ggmlc-run] Tokenized text '" << pair.first << "' (" << tokens.size() << " tokens)\n";
         }
 
         // Execute

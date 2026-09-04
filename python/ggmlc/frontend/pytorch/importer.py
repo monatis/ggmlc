@@ -277,6 +277,79 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name_to_tensor[node.name] = node_to_tensor[parent]
                 continue
 
+        if "linalg_vector_norm" in target_str or (
+            target_str.startswith("aten.norm")
+            and "layer_norm" not in target_str
+            and "rms_norm" not in target_str
+        ):
+            in_t = node_to_tensor[node.args[0]]
+            val = node.meta.get("val")
+            out_shape = (
+                _torch_shape_to_shape(val.shape)
+                if val is not None and isinstance(val, torch.Tensor)
+                else in_t.shape
+            )
+            out_dtype = (
+                DType.from_torch(val.dtype)
+                if val is not None and isinstance(val, torch.Tensor)
+                else in_t.dtype
+            )
+            dim = node.args[2] if len(node.args) > 2 else node.kwargs.get("dim", -1)
+            if isinstance(dim, (list, tuple)):
+                dim = dim[0] if len(dim) > 0 else -1
+            dim = int(dim) if dim is not None else -1
+            keepdim = (
+                bool(node.args[3])
+                if len(node.args) > 3
+                else bool(node.kwargs.get("keepdim", False))
+            )
+
+            # 1. x_sq = x * x
+            t_sq = g.add_tensor(
+                name=f"{node.name}_sq",
+                shape=in_t.shape,
+                dtype=in_t.dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.MUL,
+                inputs=[in_t.id, in_t.id],
+                outputs=[t_sq.id],
+                name=f"{node.name}_mul_sq",
+            )
+
+            # 2. t_sum = sum(x_sq, dim=dim, keepdim=keepdim)
+            t_sum = g.add_tensor(
+                name=f"{node.name}_sum",
+                shape=out_shape,
+                dtype=out_dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.SUM,
+                inputs=[t_sq.id],
+                outputs=[t_sum.id],
+                attributes={"dim": dim, "keepdim": keepdim},
+                name=f"{node.name}_sum_op",
+            )
+
+            # 3. out = sqrt(t_sum)
+            out_t = g.add_tensor(
+                name=node.name,
+                shape=out_shape,
+                dtype=out_dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.SQRT,
+                inputs=[t_sum.id],
+                outputs=[out_t.id],
+                name=node.name,
+            )
+            node_to_tensor[node] = out_t
+            name_to_tensor[node.name] = out_t
+            continue
+
         if "roll" in target_str:
             curr_tensor = node_to_tensor[node.args[0]]
             shifts = node.args[1]
@@ -530,6 +603,12 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             if not dims and shape:
                 dims = list(shape.dims)
             attributes["shape"] = tuple(dims)
+        elif opcode == OpCode.ARGMAX:
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            dim = int(node.args[1]) if len(node.args) > 1 and node.args[1] is not None else -1
+            keepdim = bool(node.args[2]) if len(node.args) > 2 else False
+            attributes["dim"] = dim
+            attributes["keepdim"] = keepdim
         elif opcode == OpCode.SOFTMAX:
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             attributes["dim"] = int(node.args[1]) if len(node.args) > 1 else -1
@@ -559,9 +638,16 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             input_tensor_ids.append(node_to_tensor[node.args[0]].id)
             indices_arg = node.args[1]
             if isinstance(indices_arg, (list, tuple)):
-                for idx_node in indices_arg:
-                    if isinstance(idx_node, Node) and idx_node in node_to_tensor:
-                        input_tensor_ids.append(node_to_tensor[idx_node].id)
+                non_trivial = [
+                    idx_node
+                    for idx_node in indices_arg
+                    if isinstance(idx_node, Node) and idx_node in node_to_tensor
+                ]
+                if len(non_trivial) > 1:
+                    # Take the sequence index (last dimension) for 2D/3D tensor pooling
+                    input_tensor_ids.append(node_to_tensor[non_trivial[-1]].id)
+                elif len(non_trivial) == 1:
+                    input_tensor_ids.append(node_to_tensor[non_trivial[0]].id)
             elif isinstance(indices_arg, Node) and indices_arg in node_to_tensor:
                 input_tensor_ids.append(node_to_tensor[indices_arg].id)
         elif opcode == OpCode.RMS_NORM:

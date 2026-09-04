@@ -13,8 +13,49 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
+#include "ggmlc/pipeline/image.h"
+#include "ggmlc/pipeline/tokenizer.h"
+
 NB_MODULE(_runtime, m) {
-    m.doc() = "Native C++ execution runtime for ggmlc models (nanobind)";
+    m.doc() = "Native C++ execution runtime and preprocessing for ggmlc models (nanobind)";
+
+    // ImagePreprocessor
+    nb::class_<ggmlc::pipeline::ImageTensor>(m, "ImageTensor")
+        .def_ro("channels", &ggmlc::pipeline::ImageTensor::channels)
+        .def_ro("height", &ggmlc::pipeline::ImageTensor::height)
+        .def_ro("width", &ggmlc::pipeline::ImageTensor::width)
+        .def_ro("data", &ggmlc::pipeline::ImageTensor::data);
+
+    nb::class_<ggmlc::pipeline::ImagePreprocessor>(m, "NativeImagePreprocessor")
+        .def_static("preprocess_file", &ggmlc::pipeline::ImagePreprocessor::preprocess_file,
+                    "filepath"_a, "target_width"_a = 224, "target_height"_a = 224,
+                    "mean"_a = std::vector<float>{0.48145466f, 0.4578275f, 0.40821073f},
+                    "std"_a = std::vector<float>{0.26862954f, 0.26130258f, 0.27577711f},
+                    "do_center_crop"_a = true)
+        .def_static("preprocess_memory", [](nb::bytes bytes_obj, int target_w, int target_h,
+                                            const std::vector<float>& mean, const std::vector<float>& std,
+                                            bool do_center_crop) {
+            const uint8_t* ptr = reinterpret_cast<const uint8_t*>(bytes_obj.c_str());
+            return ggmlc::pipeline::ImagePreprocessor::preprocess_memory(ptr, bytes_obj.size(), target_w, target_h, mean, std, do_center_crop);
+        }, "data"_a, "target_width"_a = 224, "target_height"_a = 224,
+           "mean"_a = std::vector<float>{0.48145466f, 0.4578275f, 0.40821073f},
+           "std"_a = std::vector<float>{0.26862954f, 0.26130258f, 0.27577711f},
+           "do_center_crop"_a = true);
+
+    // BPETokenizer
+    nb::class_<ggmlc::pipeline::BPETokenizer>(m, "NativeBPETokenizer")
+        .def(nb::init<>())
+        .def("init", &ggmlc::pipeline::BPETokenizer::init,
+             "tokens"_a, "merges"_a, "bos_id"_a = 49406, "eos_id"_a = 49407, "pad_id"_a = 49407, "unk_id"_a = 0,
+             "pre_tokenizer"_a = "clip")
+        .def("encode", &ggmlc::pipeline::BPETokenizer::encode,
+             "text"_a, "max_length"_a = 77, "add_special_tokens"_a = true, "pad_to_max"_a = true)
+        .def("decode", &ggmlc::pipeline::BPETokenizer::decode,
+             "ids"_a, "skip_special_tokens"_a = true)
+        .def_prop_ro("bos_token_id", &ggmlc::pipeline::BPETokenizer::bos_token_id)
+        .def_prop_ro("eos_token_id", &ggmlc::pipeline::BPETokenizer::eos_token_id)
+        .def_prop_ro("pad_token_id", &ggmlc::pipeline::BPETokenizer::pad_token_id)
+        .def_prop_ro("vocab_size", &ggmlc::pipeline::BPETokenizer::vocab_size);
 
     // SerializedTensor
     nb::class_<ggmlc::SerializedTensor>(m, "SerializedTensor")
