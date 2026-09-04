@@ -4,9 +4,9 @@ from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.generator import verify_generation_parity_with_pytorch
 from ggmlc.serialization.graph import serialize_ggml_graph
-from ggmlc.validation.numerical import check_numerical_accuracy, run_compiled_model_wsl
+from ggmlc.validation.numerical import check_numerical_accuracy
 from torch import nn
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel
 
 from examples.models.hub_models import (
     load_bert_model,
@@ -14,11 +14,13 @@ from examples.models.hub_models import (
     load_convnext_model,
     load_densenet_model,
     load_efficientnet_model,
+    load_gemma3_model,
     load_gpt2_model,
     load_minilm_model,
     load_qwen_model,
     load_regnet_model,
     load_resnet_model,
+    load_smollm2_model,
 )
 
 
@@ -54,23 +56,22 @@ def _verify_full_model_e2e(
     ser_bytes = serialize_ggml_graph(ggml_graph)
     assert len(ser_bytes) > 0
 
-    # 5. Execute in C++ Generic Runtime via WSL
+    # 5. Execute in C++ Generic Runtime via fast in-memory ModelRunner
+    from ggmlc.runtime.runner import ModelRunner
+
     inputs_dict = {
         name: tensor_val.numpy() for name, tensor_val in zip(input_names, inputs, strict=False)
     }
-    out_id = exported.main_graph.outputs[0]
 
-    results = run_compiled_model_wsl(
-        serialized_bytes=ser_bytes,
-        inputs=inputs_dict,
-        output_tensor_ids=[out_id],
-    )
+    runner = ModelRunner(ser_bytes, device="cpu")
+    out = runner(inputs_dict)
+    actual_raw = next(iter(out.values())) if isinstance(out, dict) else out
+    actual_np = actual_raw.reshape(ref_np.shape)
 
-    actual_np = results[out_id].reshape(ref_np.shape)
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=atol)
     import gc
 
-    del model, inputs, exported, ggml_graph, ser_bytes, results
+    del model, inputs, exported, ggml_graph, ser_bytes, runner, out
     gc.collect()
     assert cmp.passed, f"Hub model verification failed for {model_name}: {cmp.message}"
 
@@ -109,19 +110,83 @@ def test_bge_m3_distill_hub_compilation_and_execution():
 
 def test_gpt2_autoregressive_generation_parity():
     """Validates multi-token autoregressive generation parity between ggmlc and PyTorch model.generate."""
+    from ggmlc.pipeline.tokenizer import BPETokenizer
+
     torch.manual_seed(42)
     model_id = "openai-community/gpt2"
-    tokenizer = GPT2Tokenizer.from_pretrained(model_id)
-    model = GPT2LMHeadModel.from_pretrained(model_id).eval()
+    raw_model = GPT2LMHeadModel.from_pretrained(model_id).eval()
+    wrapped_model, _, _ = load_gpt2_model()
+    tokenizer = BPETokenizer.from_huggingface(model_id)
 
     prompt = "The capital of France is"
     passed, ref_text, actual_text = verify_generation_parity_with_pytorch(
-        model=model,
+        model=wrapped_model,
+        ref_model=raw_model,
         tokenizer=tokenizer,
         prompt=prompt,
         max_new_tokens=6,
+        model_name="gpt2",
     )
-    assert passed, f"Generation mismatch!\nPyTorch: '{ref_text}'\nggmlc:   '{actual_text}'"
+    assert passed, f"GPT-2 Generation mismatch!\nPyTorch: '{ref_text}'\nggmlc:   '{actual_text}'"
+
+
+def test_smollm2_hub_compilation_and_execution():
+    """Validates SmolLM2-135M compilation and numerical parity."""
+    torch.manual_seed(42)
+    model, inputs, names = load_smollm2_model(seq_len=8)
+    _verify_full_model_e2e(model, inputs, names, "smollm2_135m", atol=1e-3)
+
+
+@pytest.mark.slow
+def test_smollm2_autoregressive_generation_parity():
+    """Validates multi-token autoregressive generation parity for SmolLM2."""
+    from ggmlc.pipeline.tokenizer import BPETokenizer
+
+    torch.manual_seed(42)
+    model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+    wrapped_model, _, _ = load_smollm2_model()
+    tokenizer = BPETokenizer.from_huggingface(model_id)
+
+    prompt = "Artificial intelligence will"
+    passed, ref_text, actual_text = verify_generation_parity_with_pytorch(
+        model=wrapped_model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=5,
+        model_name="smollm2_135m",
+        add_special_tokens=False,
+    )
+    assert passed, f"SmolLM2 Generation mismatch!\nPyTorch: '{ref_text}'\nggmlc:   '{actual_text}'"
+
+
+@pytest.mark.slow
+def test_gemma3_hub_compilation_and_execution():
+    """Validates Google Gemma 3 270M compilation and numerical parity."""
+    torch.manual_seed(42)
+    model, inputs, names = load_gemma3_model(seq_len=8)
+    _verify_full_model_e2e(model, inputs, names, "gemma3_270m", atol=0.1)
+
+
+@pytest.mark.slow
+def test_gemma3_autoregressive_generation_parity():
+    """Validates multi-token autoregressive generation parity for Google Gemma 3 270M."""
+    from ggmlc.pipeline.tokenizer import BPETokenizer
+
+    torch.manual_seed(42)
+    model_id = "google/gemma-3-270m-it"
+    wrapped_model, _, _ = load_gemma3_model()
+    tokenizer = BPETokenizer.from_huggingface(model_id)
+
+    prompt = "The sky is blue because"
+    passed, ref_text, actual_text = verify_generation_parity_with_pytorch(
+        model=wrapped_model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=6,
+        model_name="gemma3_270m",
+        add_special_tokens=True,
+    )
+    assert passed, f"Gemma 3 Generation mismatch!\nPyTorch: '{ref_text}'\nggmlc:   '{actual_text}'"
 
 
 def test_convnext_hub_compilation_and_execution():

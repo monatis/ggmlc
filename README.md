@@ -162,7 +162,7 @@ ggmlc.visualize(graph, output="resnet18.html")
 ```python
 import torchvision.models as models
 from PIL import Image
-from ggmlc.pipeline import VisionPreprocessor, from_huggingface_tokenizer
+from ggmlc.pipeline import VisionPreprocessor, BPETokenizer, from_huggingface_tokenizer
 
 image = Image.open("cat.jpg")
 
@@ -175,12 +175,29 @@ pre_hf = VisionPreprocessor.from_huggingface("openai/clip-vit-base-patch32")
 pixel_values = pre_hf(image)
 
 # 3. Tokenizer (BPE / WordPiece with C++ runtime acceleration)
-tok = from_huggingface_tokenizer(hf_tokenizer)
-input_ids = tok.encode("a photo of a cat", max_length=77)
+tok = BPETokenizer.from_huggingface("openai-community/gpt2")
+input_ids = tok.encode("a photo of a cat")
+print("Decoded:", tok.decode(input_ids))
 
 # 4. Direct Multimodal Inference
 runner = ggmlc.load("clip_model.gguf", device="cuda")
 similarity_logits = runner(pixel_values, input_ids)
+```
+
+### 6. Fast Autoregressive Text Generation (`GGMLCGenerator`)
+```python
+from ggmlc.pipeline.tokenizer import BPETokenizer
+from ggmlc.runtime.generator import GGMLCGenerator
+from examples.models.hub_models import load_smollm2_model
+
+# 1. Load SLM and compiled dynamic shape runner
+model, _, _ = load_smollm2_model()
+tokenizer = BPETokenizer.from_huggingface("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+# 2. End-to-end greedy or top-p autoregressive text generation
+generator = GGMLCGenerator(model, tokenizer, model_name="smollm2_135m", device="auto")
+text = generator.generate("Artificial intelligence will", max_new_tokens=16, greedy=True)
+print("Generated text:", text)
 ```
 
 ---
@@ -219,7 +236,9 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 | **Text-Embedding** | **MiniLM-L6-v2** | PyTorch / Transformers | Bidirectional Multi-Head Attention, Word/Pos/Token Embeddings | ✅ **PASS** | `2.33e-03` |
 | **Text-Embedding** | **BGE-M3-Distill** | PyTorch / Transformers | Dense Vector Pooling, Multilingual Text Embeddings | ✅ **PASS** | `1.73e-01` |
 | **Text-Encoder** | **BERT-base-uncased** | PyTorch / Transformers | 12-Layer Full Bidirectional Transformer, Segment Embeddings | ✅ **PASS** | `1.84e-02` |
-| **Text-SLM** | **GPT-2** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **GPT-2 (124M)** | PyTorch / Transformers | Causal Self-Attention, WTE/WPE, Autoregressive LM Head | ✅ **PASS** | `7.63e-05` |
+| **Text-SLM** | **SmolLM2 (135M)** | PyTorch / Transformers | Llama-based SLM, GQA, RoPE theta 100k, SwiGLU, RMSNorm | ✅ **PASS** | `6.10e-05` |
+| **Text-SLM** | **Gemma 3 (270M)** | PyTorch / Transformers | Dual RoPE (10k/1M), QK-Norm, Scaled Embeddings, GELU SwiGLU | ✅ **PASS** | `< 1e-1` |
 | **Text-SLM** | **Qwen-2.5 (0.5B)** | PyTorch / Transformers | Grouped Query Attention (GQA), RoPE, SwiGLU, RMSNorm | ✅ **PASS** | `1.08e-04` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Encoder)** | PyTorch / Transformers | 1D Strided Conv, Sinusoidal Positional Embeddings, Audio Attention | ✅ **PASS** | `3.96e-02` |
 | **Audio-Seq2Seq** | **Whisper-Tiny (Decoder)** | PyTorch / Transformers | Autoregressive Decoder, Cross-Attention over Audio Hidden States | ✅ **PASS** | `5.45e-01` |

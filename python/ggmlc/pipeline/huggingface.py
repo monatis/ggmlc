@@ -113,7 +113,12 @@ def from_huggingface_image_processor(image_proc: Any) -> VisionPreprocessor:
 
 
 def from_huggingface_tokenizer(tokenizer: Any, context_length: int | None = None) -> Any:
-    """Extracts a BPETokenizer or WordPieceTokenizer from Hugging Face PreTrainedTokenizer."""
+    """Extracts a BPETokenizer or WordPieceTokenizer from Hugging Face PreTrainedTokenizer or Model ID."""
+    if isinstance(tokenizer, str):
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+
     cls_name = tokenizer.__class__.__name__.lower()
     if (
         "bert" in cls_name

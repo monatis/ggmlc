@@ -183,6 +183,244 @@ def load_qwen_model(
     return QwenWrapper(model), example_input, input_names
 
 
+def load_smollm2_model(
+    variant: str = "HuggingFaceTB/SmolLM2-135M-Instruct",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Hugging Face SmolLM2 135M checkpoint."""
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(variant, dtype=torch.float32).eval()
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
+    example_input = (input_ids,)
+    input_names = ["input_ids"]
+
+    class SmolLM2Wrapper(nn.Module):
+        def __init__(self, base_model):
+            super().__init__()
+            self.embed_tokens = base_model.model.embed_tokens
+            self.layers = base_model.model.layers
+            self.norm = base_model.model.norm
+            self.lm_head = base_model.lm_head
+            self.num_heads = base_model.config.num_attention_heads
+            self.num_kv_heads = base_model.config.num_key_value_heads
+            self.head_dim = getattr(base_model.config, "head_dim", None) or (
+                base_model.config.hidden_size // self.num_heads
+            )
+            self.kv_groups = self.num_heads // self.num_kv_heads
+
+            # Rotary embedding inv_freq calculation
+            dim = self.head_dim
+            base = (
+                getattr(base_model.config, "rope_theta", None)
+                or (
+                    base_model.config.rope_parameters.get("rope_theta")
+                    if hasattr(base_model.config, "rope_parameters")
+                    and base_model.config.rope_parameters
+                    else None
+                )
+                or 100000.0
+            )
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+            self.register_buffer("inv_freq", inv_freq)
+
+        def forward(self, input_ids):
+            h = self.embed_tokens(input_ids)
+            bsz, seq_len, _ = h.shape
+            pos = torch.arange(0, seq_len, dtype=torch.float32, device=h.device)
+            freqs = pos.unsqueeze(-1) * self.inv_freq.unsqueeze(0)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos().unsqueeze(0)
+            sin = emb.sin().unsqueeze(0)
+
+            def rotate_half(x):
+                x1 = x[..., : x.shape[-1] // 2]
+                x2 = x[..., x.shape[-1] // 2 :]
+                return torch.cat((-x2, x1), dim=-1)
+
+            def apply_rope(x):
+                c = cos.unsqueeze(1)
+                s = sin.unsqueeze(1)
+                return (x * c) + (rotate_half(x) * s)
+
+            for layer in self.layers:
+                residual = h
+                h_norm = layer.input_layernorm(h)
+
+                q = (
+                    layer.self_attn.q_proj(h_norm)
+                    .view(bsz, seq_len, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = (
+                    layer.self_attn.k_proj(h_norm)
+                    .view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                v = (
+                    layer.self_attn.v_proj(h_norm)
+                    .view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+
+                q = apply_rope(q)
+                k = apply_rope(k)
+
+                def repeat_kv(x, kv_groups):
+                    if kv_groups == 1:
+                        return x
+                    heads = [
+                        x[:, i : i + 1, :, :].expand(-1, kv_groups, -1, -1)
+                        for i in range(x.shape[1])
+                    ]
+                    return torch.cat(heads, dim=1)
+
+                k = repeat_kv(k, self.kv_groups)
+                v = repeat_kv(v, self.kv_groups)
+
+                attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+                attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+                attn_proj = layer.self_attn.o_proj(attn_out)
+                h = residual + attn_proj
+
+                # MLP
+                residual = h
+                h_post = layer.post_attention_layernorm(h)
+                gate = layer.mlp.gate_proj(h_post)
+                up = layer.mlp.up_proj(h_post)
+                act = torch.nn.functional.silu(gate) * up
+                down = layer.mlp.down_proj(act)
+                h = residual + down
+
+            h = self.norm(h)
+            return self.lm_head(h)
+
+    return SmolLM2Wrapper(model), example_input, input_names
+
+
+def load_gemma3_model(
+    variant: str = "google/gemma-3-270m-it",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Google Gemma 3 270M checkpoint."""
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(variant, dtype=torch.float32).eval()
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
+    example_input = (input_ids,)
+    input_names = ["input_ids"]
+
+    class Gemma3Wrapper(nn.Module):
+        def __init__(self, base_model):
+            super().__init__()
+            self.config = base_model.config
+            self.model = base_model.model
+            self.lm_head = base_model.lm_head
+            self.hidden_size = self.config.hidden_size
+            self.num_heads = self.config.num_attention_heads
+            self.num_kv_heads = self.config.num_key_value_heads
+            self.head_dim = self.config.head_dim
+            self.kv_groups = self.num_heads // self.num_kv_heads
+            self.scale = 1.0 / (self.config.query_pre_attn_scalar**0.5)
+
+            dim = self.head_dim
+            theta_sliding = self.config.rope_parameters["sliding_attention"]["rope_theta"]
+            theta_full = self.config.rope_parameters["full_attention"]["rope_theta"]
+            inv_sliding = 1.0 / (
+                theta_sliding ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+            )
+            inv_full = 1.0 / (theta_full ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+            self.register_buffer("inv_sliding", inv_sliding)
+            self.register_buffer("inv_full", inv_full)
+
+        def forward(self, input_ids):
+            h = self.model.embed_tokens(input_ids)
+            bsz, seq_len, _ = h.shape
+
+            pos = torch.arange(0, seq_len, dtype=torch.float32, device=h.device)
+            freq_s = pos.unsqueeze(-1) * self.inv_sliding.unsqueeze(0)
+            emb_s = torch.cat((freq_s, freq_s), dim=-1)
+            cos_s = emb_s.cos().unsqueeze(0).unsqueeze(1)
+            sin_s = emb_s.sin().unsqueeze(0).unsqueeze(1)
+
+            freq_f = pos.unsqueeze(-1) * self.inv_full.unsqueeze(0)
+            emb_f = torch.cat((freq_f, freq_f), dim=-1)
+            cos_f = emb_f.cos().unsqueeze(0).unsqueeze(1)
+            sin_f = emb_f.sin().unsqueeze(0).unsqueeze(1)
+
+            def rotate_half(x):
+                x1 = x[..., : x.shape[-1] // 2]
+                x2 = x[..., x.shape[-1] // 2 :]
+                return torch.cat((-x2, x1), dim=-1)
+
+            for i, layer in enumerate(self.model.layers):
+                layer_type = self.config.layer_types[i]
+                cos = cos_s if layer_type == "sliding_attention" else cos_f
+                sin = sin_s if layer_type == "sliding_attention" else sin_f
+
+                residual = h
+                h_norm = layer.input_layernorm(h)
+
+                q = (
+                    layer.self_attn.q_proj(h_norm)
+                    .view(bsz, seq_len, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = (
+                    layer.self_attn.k_proj(h_norm)
+                    .view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                v = (
+                    layer.self_attn.v_proj(h_norm)
+                    .view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+
+                q = layer.self_attn.q_norm(q)
+                k = layer.self_attn.k_norm(k)
+
+                q = (q * cos) + (rotate_half(q) * sin)
+                k = (k * cos) + (rotate_half(k) * sin)
+
+                if self.kv_groups > 1:
+                    k_slices = [
+                        k[:, i : i + 1].expand(-1, self.kv_groups, -1, -1)
+                        for i in range(self.num_kv_heads)
+                    ]
+                    v_slices = [
+                        v[:, i : i + 1].expand(-1, self.kv_groups, -1, -1)
+                        for i in range(self.num_kv_heads)
+                    ]
+                    k = torch.cat(k_slices, dim=1)
+                    v = torch.cat(v_slices, dim=1)
+
+                attn_out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, is_causal=True, scale=self.scale
+                )
+                attn_out = (
+                    attn_out.transpose(1, 2)
+                    .contiguous()
+                    .view(bsz, seq_len, self.num_heads * self.head_dim)
+                )
+                attn_out = layer.self_attn.o_proj(attn_out)
+                attn_out = layer.post_attention_layernorm(attn_out)
+                h = residual + attn_out
+
+                residual = h
+                h_mlp = layer.pre_feedforward_layernorm(h)
+                mlp_gate = layer.mlp.act_fn(layer.mlp.gate_proj(h_mlp))
+                mlp_up = layer.mlp.up_proj(h_mlp)
+                mlp_out = layer.mlp.down_proj(mlp_gate * mlp_up)
+                mlp_out = layer.post_feedforward_layernorm(mlp_out)
+                h = residual + mlp_out
+
+            h = self.model.norm(h)
+            return self.lm_head(h)
+
+    return Gemma3Wrapper(model), example_input, input_names
+
+
 def load_bge_m3_distill_model(
     seq_len: int = 16,
 ) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
@@ -412,8 +650,3 @@ def load_bert_model(
     return BertWrapper(model), example_input, input_names
 
 
-from examples.models.clip_model import (
-    load_clip_full_model,
-    load_clip_text_model,
-    load_clip_vision_model,
-)

@@ -47,6 +47,8 @@ class BPETokenizer:
             self.pad_token_id = pad_token_id
             self.unk_token_id = unk_token_id
 
+        self._hf_tokenizer: Any = None
+
         # Initialize native C++ tokenizer
         try:
             from ggmlc._runtime import NativeBPETokenizer
@@ -77,9 +79,18 @@ class BPETokenizer:
         text: str,
         max_length: int | None = None,
         add_special_tokens: bool = True,
-        pad_to_max: bool = True,
+        pad_to_max: bool = False,
     ) -> list[int]:
         max_len = max_length or self.context_length
+        if self._hf_tokenizer is not None:
+            ids = self._hf_tokenizer.encode(text, add_special_tokens=add_special_tokens)
+            if max_len > 0:
+                if len(ids) > max_len:
+                    ids = ids[:max_len]
+                elif pad_to_max and self.pad_token_id is not None:
+                    ids.extend([self.pad_token_id] * (max_len - len(ids)))
+            return ids
+
         if self._native is not None:
             return self._native.encode(text, max_len, add_special_tokens, pad_to_max)
 
@@ -146,17 +157,54 @@ class BPETokenizer:
                     tokens.extend([self.pad_token_id or 49407] * (max_len - len(tokens)))
             return tokens
 
-        return (
-            [self.bos_token_id or 0]
-            + [self.vocab.get(w, self.unk_token_id or 0) for w in text.split()]
-            + [self.eos_token_id or 0]
-        )
+        tokens = []
+        if add_special_tokens and self.bos_token_id is not None:
+            tokens.append(self.bos_token_id)
+        for w in text.split():
+            tokens.append(self.vocab.get(w, self.unk_token_id or 0))
+        if add_special_tokens and self.eos_token_id is not None:
+            tokens.append(self.eos_token_id)
+        if max_len > 0:
+            if len(tokens) > max_len:
+                tokens = tokens[:max_len]
+            elif pad_to_max and self.pad_token_id is not None:
+                tokens.extend([self.pad_token_id] * (max_len - len(tokens)))
+        return tokens
 
-    def decode(self, ids: list[int], skip_special_tokens: bool = True) -> str:
+    def decode(self, ids: list[int] | Any, skip_special_tokens: bool = True) -> str:
+        if isinstance(ids, (list, tuple)) and len(ids) > 0 and isinstance(ids[0], (list, tuple)):
+            ids = ids[0]
+        if hasattr(ids, "tolist"):
+            ids = ids.tolist()
+            if isinstance(ids, list) and len(ids) > 0 and isinstance(ids[0], list):
+                ids = ids[0]
+
+        if self._hf_tokenizer is not None:
+            return self._hf_tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+
         if self._native is not None:
             return self._native.decode(ids, skip_special_tokens)
+
+        special_set = set()
+        if skip_special_tokens:
+            for s in (self.bos_token_id, self.eos_token_id, self.pad_token_id, self.unk_token_id):
+                if s is not None:
+                    special_set.add(s)
+
         rev = {v: k for k, v in self.vocab.items()}
-        return "".join([rev.get(i, "") for i in ids])
+        pieces = []
+        for i in ids:
+            if skip_special_tokens and i in special_set:
+                continue
+            tok_str = rev.get(i, "")
+            if skip_special_tokens and tok_str.startswith("<|") and tok_str.endswith("|>"):
+                continue
+            pieces.append(tok_str)
+
+        text = "".join(pieces)
+        # Byte-level / BPE space replacements
+        text = text.replace("Ġ", " ").replace("</w>", " ").replace(" ", " ")
+        return text.strip()
 
     @property
     def spec(self) -> TokenizerSpec:
@@ -174,7 +222,16 @@ class BPETokenizer:
 
     @classmethod
     def from_huggingface(cls, tokenizer: Any, context_length: int | None = None) -> BPETokenizer:
-        """Extracts BPE vocab and merges from Hugging Face PreTrainedTokenizer."""
+        """Extracts BPE vocab and merges from Hugging Face PreTrainedTokenizer or Model ID."""
+        hf_tok = None
+        if isinstance(tokenizer, str):
+            from transformers import AutoTokenizer
+
+            hf_tok = AutoTokenizer.from_pretrained(tokenizer)
+            tokenizer = hf_tok
+        elif hasattr(tokenizer, "get_vocab"):
+            hf_tok = tokenizer
+
         vocab = tokenizer.get_vocab()
 
         # Extract merges
@@ -205,20 +262,34 @@ class BPETokenizer:
                 pass
 
         # Context length
-        max_len = context_length or getattr(tokenizer, "model_max_length", 77)
+        max_len = context_length or getattr(tokenizer, "model_max_length", 2048)
         if max_len is None or max_len > 100000:
-            max_len = 77
+            max_len = 2048
 
-        return cls(
+        # Pre-tokenizer detection
+        cls_name = tokenizer.__class__.__name__.lower()
+        model_name = str(getattr(tokenizer, "name_or_path", "")).lower()
+        if "clip" in cls_name or "clip" in model_name:
+            pre_tok = "clip"
+        elif "llama" in cls_name or "smol" in model_name or "llama" in model_name:
+            pre_tok = "llama"
+        elif "gemma" in cls_name or "gemma" in model_name:
+            pre_tok = "gemma"
+        else:
+            pre_tok = "gpt2"
+
+        inst = cls(
             vocab=vocab,
             merges=merges,
-            pre_tokenizer="clip",
+            pre_tokenizer=pre_tok,
             context_length=int(max_len),
-            bos_token_id=getattr(tokenizer, "bos_token_id", 49406),
-            eos_token_id=getattr(tokenizer, "eos_token_id", 49407),
-            pad_token_id=getattr(tokenizer, "pad_token_id", 49407),
-            unk_token_id=getattr(tokenizer, "unk_token_id", 49407),
+            bos_token_id=getattr(tokenizer, "bos_token_id", None),
+            eos_token_id=getattr(tokenizer, "eos_token_id", None),
+            pad_token_id=getattr(tokenizer, "pad_token_id", None),
+            unk_token_id=getattr(tokenizer, "unk_token_id", None),
         )
+        inst._hf_tokenizer = hf_tok
+        return inst
 
     def to_gguf_metadata(self) -> dict[str, Any]:
         """Generates GGUF key-value metadata pairs for GGUF tokenization specification."""
@@ -287,7 +358,7 @@ class WordPieceTokenizer:
         self,
         text: str,
         add_special_tokens: bool = True,
-        pad_to_max: bool = True,
+        pad_to_max: bool = False,
     ) -> list[int]:
         tokens: list[int] = []
         if add_special_tokens and self.cls_token_id is not None:
@@ -321,6 +392,11 @@ class WordPieceTokenizer:
     def from_huggingface(
         cls, tokenizer: Any, context_length: int | None = None
     ) -> WordPieceTokenizer:
+        if isinstance(tokenizer, str):
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+
         vocab = tokenizer.get_vocab()
         max_len = context_length or getattr(tokenizer, "model_max_length", 512)
         if max_len is None or max_len > 100000:
@@ -329,10 +405,10 @@ class WordPieceTokenizer:
         return cls(
             vocab=vocab,
             context_length=int(max_len),
-            cls_token_id=tokenizer.cls_token_id,
-            sep_token_id=tokenizer.sep_token_id,
-            pad_token_id=tokenizer.pad_token_id or 0,
-            unk_token_id=tokenizer.unk_token_id or 100,
+            cls_token_id=getattr(tokenizer, "cls_token_id", 101),
+            sep_token_id=getattr(tokenizer, "sep_token_id", 102),
+            pad_token_id=getattr(tokenizer, "pad_token_id", 0) or 0,
+            unk_token_id=getattr(tokenizer, "unk_token_id", 100) or 100,
         )
 
     def to_gguf_metadata(self) -> dict[str, Any]:

@@ -138,8 +138,8 @@ class VisionPreprocessor:
 
             resized = pil_img.resize((new_w, new_h), resample=self._pil_resample)
 
-            left = int(round((new_w - target_w) / 2.0))
-            top = int(round((new_h - target_h) / 2.0))
+            left = round((new_w - target_w) / 2.0)
+            top = round((new_h - target_h) / 2.0)
             right = left + target_w
             bottom = top + target_h
             cropped = resized.crop((left, top, right, bottom))

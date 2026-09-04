@@ -36,6 +36,11 @@ from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 
+from examples.models.clip_model import (
+    load_clip_full_model,
+    load_clip_text_model,
+    load_clip_vision_model,
+)
 from examples.models.flax_models import load_flax_vit_b16
 from examples.models.hub_models import (
     load_bert_model,
@@ -49,6 +54,7 @@ from examples.models.hub_models import (
     load_qwen_model,
     load_regnet_model,
     load_resnet_model,
+    load_smollm2_model,
     load_ssdlite320_mobilenet_v3_model,
     load_vit_model,
     load_whisper_model,
@@ -60,11 +66,6 @@ from examples.models.keras_models import (
     load_keras_mobilenet_v3_large,
     load_keras_mobilenet_v3_small,
     load_keras_resnet50,
-)
-from examples.models.clip_model import (
-    load_clip_full_model,
-    load_clip_text_model,
-    load_clip_vision_model,
 )
 from examples.models.kerashub_models import (
     load_kerashub_bert,
@@ -377,6 +378,7 @@ class BenchmarkSuite:
             ("bert_base_uncased", "Text-Encoder", lambda: load_bert_model(seq_len=16)),
             # 5. Text - SLM / Decoder
             ("gpt2", "Text-SLM", lambda: load_gpt2_model(seq_len=8)),
+            ("smollm2_135m", "Text-SLM", lambda: load_smollm2_model(seq_len=8)),
             ("qwen2.5_0.5b", "Text-SLM", lambda: load_qwen_model(seq_len=8)),
             # 6. Audio - Seq2Seq & Cross-Attention
             (
