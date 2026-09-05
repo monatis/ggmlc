@@ -45,7 +45,7 @@ def compile(
         enable_optimizations: If True, applies standard IR graph optimization passes.
         enable_fusion: If True, lowers composite subgraphs into high-performance fused ops.
         fusion_options: Optional granular flags for specific fusion patterns.
-        quantize: Optional quantization format ('q4_0', 'q8_0', DType.Q4_0, DType.Q8_0).
+        quantize: Optional quantization format ('f16', 'q4_0', 'q8_0', DType.F16, DType.Q4_0, DType.Q8_0).
         return_runner: If True, automatically loads and returns an instantiated ModelRunner.
         pipeline: Optional multimodal pipeline preprocessor (e.g. VisionPreprocessor or BPETokenizer)
             whose schema metadata will be embedded into GGUF headers.

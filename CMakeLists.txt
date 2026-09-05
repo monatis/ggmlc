@@ -19,6 +19,7 @@ include_directories(
 if (GGMLC_ENABLE_CUDA)
     enable_language(CUDA)
     set(GGML_CUDA ON CACHE BOOL "Enable CUDA in GGML" FORCE)
+    set(GGML_LLAMAFILE ON CACHE BOOL "Enable llamafile in GGML" FORCE)
     set(GGML_BUILD_TESTS OFF CACHE BOOL "Disable GGML tests" FORCE)
     set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "Disable GGML examples" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static GGML libraries" FORCE)
@@ -80,6 +81,7 @@ else()
     target_compile_definitions(ggml_lib PUBLIC
         _GNU_SOURCE
         GGML_USE_CPU
+        GGML_USE_LLAMAFILE
         GGML_VERSION="0.1.0"
         GGML_COMMIT="master"
     )

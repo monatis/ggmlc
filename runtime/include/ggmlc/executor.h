@@ -61,6 +61,7 @@ public:
     void init_kv_cache(int64_t max_ctx = 2048);
     void reset_kv_cache();
     bool has_kv_cache() const { return kv_cache_buffer_ != nullptr; }
+    void set_decode_pos(int64_t pos);
 
 private:
     void init_weights();
@@ -105,6 +106,21 @@ private:
     struct ggml_context* ctx_kv_cache_ = nullptr;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_k_;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_v_;
+
+    // Decode Graph Cache: static execution graph and buffer for S=1 decode
+    struct AttnViewRefs {
+        struct ggml_tensor* k_slot = nullptr;
+        struct ggml_tensor* v_slot = nullptr;
+        struct ggml_tensor* k_active = nullptr;
+        struct ggml_tensor* v_active = nullptr;
+        struct ggml_tensor* scores = nullptr;
+        struct ggml_tensor* probs = nullptr;
+        struct ggml_tensor* v_t = nullptr;
+    };
+    bool decode_graph_cached_ = false;
+    int64_t decode_cached_pos_ = -1;
+    std::unordered_map<uint32_t, AttnViewRefs> decode_attn_views_;
+    std::vector<std::pair<struct ggml_tensor*, uint32_t>> decode_rope_arange_tensors_;
 
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;

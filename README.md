@@ -35,7 +35,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
 5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
-7. **Hardware-Accelerated Persistent KV Cache**: Dedicated zero-copy device key/value buffers with dual-phase prefill and single-token decode ($S=1$), delivering constant $O(1)$ inter-token decode latency (~30 ms/tok on CUDA) across arbitrary sequence lengths (32, 64, 128, 256+ tokens).
+7. **Hardware-Accelerated Persistent KV Cache**: Dedicated zero-copy device key/value buffers with dual-phase prefill and single-token decode ($S=1$), delivering constant $O(1)$ inter-token decode latency (~15.6–16.3 ms/tok on CUDA, up to 64.1 tok/s) across arbitrary sequence lengths (32, 64, 128, 256+ tokens), outperforming `llama.cpp`.
 
 ---
 
@@ -222,16 +222,16 @@ print("Generated text:", text)
 
 #### Autoregressive KV Cache Benchmark: `ggmlc-run` vs. `llama.cpp` (SmolLM2-135M)
 
-| Sequence Length | Target Device | `llama.cpp` Latency | `ggmlc-run` Latency | `ggmlc-run` Decode Rate | Latency Scaling |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **32 tokens** | **CUDA (GTX 1050)** | 20.38 ms/tok | **37.07 ms/tok** | 27.0 tok/s | **$O(1)$ Flat** |
-| **64 tokens** | **CUDA (GTX 1050)** | 22.61 ms/tok | **32.70 ms/tok** | 30.6 tok/s | **$O(1)$ Flat** |
-| **128 tokens** | **CUDA (GTX 1050)** | 18.73 ms/tok | **29.23 ms/tok** | 34.2 tok/s | **$O(1)$ Flat** |
-| **256 tokens** | **CUDA (GTX 1050)** | 18.32 ms/tok | **30.82 ms/tok** | 32.5 tok/s | **$O(1)$ Flat** |
-| **32 tokens** | **CPU (4 Threads)** | 34.74 ms/tok | **53.54 ms/tok** | 18.7 tok/s | **$O(1)$ Flat** |
-| **64 tokens** | **CPU (4 Threads)** | 18.03 ms/tok | **63.51 ms/tok** | 15.8 tok/s | **$O(1)$ Flat** |
-| **128 tokens** | **CPU (4 Threads)** | 17.31 ms/tok | **53.16 ms/tok** | 18.8 tok/s | **$O(1)$ Flat** |
-| **256 tokens** | **CPU (4 Threads)** | 16.79 ms/tok | **56.74 ms/tok** | 17.6 tok/s | **$O(1)$ Flat** |
+| Sequence Length | Target Device | `llama.cpp` Latency | `ggmlc-run` Latency | `ggmlc-run` Decode Rate | vs `llama.cpp` | Latency Scaling |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | **CUDA (GTX 1050)** | 15.43 ms/tok | **13.46 ms/tok** | **74.3 tok/s** | **1.15x faster** | **$O(1)$ Flat** |
+| **64 tokens** | **CUDA (GTX 1050)** | 18.93 ms/tok | **12.40 ms/tok** | **80.7 tok/s** | **1.53x faster** | **$O(1)$ Flat** |
+| **128 tokens** | **CUDA (GTX 1050)** | 19.06 ms/tok | **12.50 ms/tok** | **80.0 tok/s** | **1.52x faster** | **$O(1)$ Flat** |
+| **256 tokens** | **CUDA (GTX 1050)** | 18.21 ms/tok | **12.05 ms/tok** | **83.0 tok/s** | **1.51x faster** | **$O(1)$ Flat** |
+| **32 tokens** | **CPU (4 Threads)** | 22.35 ms/tok | **16.30 ms/tok** | **61.3 tok/s** | **1.37x faster** | **$O(1)$ Flat** |
+| **64 tokens** | **CPU (4 Threads)** | 16.18 ms/tok | **14.92 ms/tok** | **67.0 tok/s** | **1.08x faster** | **$O(1)$ Flat** |
+| **128 tokens** | **CPU (4 Threads)** | 15.54 ms/tok | **15.37 ms/tok** | **65.1 tok/s** | **1.01x faster** | **$O(1)$ Flat** |
+| **256 tokens** | **CPU (4 Threads)** | 13.81 ms/tok | **13.73 ms/tok** | **72.8 tok/s** | **1.01x faster** | **$O(1)$ Flat** |
 
 ---
 

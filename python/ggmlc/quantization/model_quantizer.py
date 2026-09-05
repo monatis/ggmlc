@@ -19,7 +19,7 @@ def quantize_graph_parameters(
     Returns:
       (quantized_graph, stats_dict)
     """
-    if target_dtype not in (DType.Q4_0, DType.Q8_0):
+    if target_dtype not in (DType.Q4_0, DType.Q8_0, DType.F16):
         msg = f"Unsupported quantization dtype: {target_dtype}"
         raise ValueError(msg)
 
@@ -49,35 +49,50 @@ def quantize_graph_parameters(
         has_f32 = (getattr(tensor, "dtype", None) == DType.F32) or (
             getattr(tensor, "ggml_type", None) == GGMLType.GGML_TYPE_F32
         )
-        is_multi_d = (
-            len(tensor.shape.dims) >= 2
-            if hasattr(tensor, "shape")
-            else (
-                tensor.ne[1].evaluate({}) > 1
-                or tensor.ne[2].evaluate({}) > 1
-                or tensor.ne[3].evaluate({}) > 1
-            )
-        )
+
+        # 1D tensors (e.g. norm weights, biases, RoPE constants) must remain in F32.
+        # Only multi-dimensional matrices (>= 2 non-unit dimensions) are converted.
+        dims: list[int] = []
+        if hasattr(tensor, "shape") and hasattr(tensor.shape, "dims"):
+            for d in tensor.shape.dims:
+                dims.append(int(getattr(d, "value", d)))
+        else:
+            for d in getattr(tensor, "ne", ()):
+                if hasattr(d, "evaluate"):
+                    try:
+                        dims.append(int(d.evaluate({})))
+                    except Exception:  # noqa: BLE001
+                        dims.append(1)
+                elif hasattr(d, "value"):
+                    dims.append(int(d.value))
+                else:
+                    dims.append(int(d))
+
+        non_unit_dims = [d for d in dims if d > 1]
+        is_multi_d = len(non_unit_dims) >= 2
 
         if is_param and tensor.data is not None and has_f32 and is_multi_d:
             arr = np.array(tensor.data, dtype=np.float32)
-            if arr.size >= min_elements_to_quantize and arr.size % 32 == 0:
+            valid_size = arr.size >= min_elements_to_quantize and (
+                target_dtype == DType.F16 or arr.size % 32 == 0
+            )
+            if valid_size:
                 orig_tensor_bytes = arr.nbytes
                 if target_dtype == DType.Q4_0:
                     q_bytes = quantize_q4_0(arr)
-                else:
+                    target_ggml_type = GGMLType.GGML_TYPE_Q4_0
+                elif target_dtype == DType.Q8_0:
                     q_bytes = quantize_q8_0(arr)
+                    target_ggml_type = GGMLType.GGML_TYPE_Q8_0
+                elif target_dtype == DType.F16:
+                    q_bytes = arr.astype(np.float16).tobytes()
+                    target_ggml_type = GGMLType.GGML_TYPE_F16
 
                 orig_bytes += orig_tensor_bytes
                 quant_bytes += len(q_bytes)
                 tensors_quantized += 1
 
                 if isinstance(graph, GGMLExecutionGraph):
-                    target_ggml_type = (
-                        GGMLType.GGML_TYPE_Q4_0
-                        if target_dtype == DType.Q4_0
-                        else GGMLType.GGML_TYPE_Q8_0
-                    )
                     q_tensor = GGMLTensorDef(
                         id=tensor.id,
                         name=tensor.name,

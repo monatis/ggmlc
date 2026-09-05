@@ -289,8 +289,9 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
         int64_t num_kv_heads = k_t.ne[2]->evaluate(dummy_env, model_graph_.symbol_table);
         int64_t batch = k_t.ne[3]->evaluate(dummy_env, model_graph_.symbol_table);
 
-        struct ggml_tensor* g_k = ggml_new_tensor_4d(ctx_kv_cache_, k_t.type, head_dim, max_ctx, num_kv_heads, batch);
-        struct ggml_tensor* g_v = ggml_new_tensor_4d(ctx_kv_cache_, v_t.type, head_dim, max_ctx, num_kv_heads, batch);
+        enum ggml_type kv_type = (k_t.type == GGML_TYPE_F32) ? GGML_TYPE_F16 : k_t.type;
+        struct ggml_tensor* g_k = ggml_new_tensor_4d(ctx_kv_cache_, kv_type, head_dim, max_ctx, num_kv_heads, batch);
+        struct ggml_tensor* g_v = ggml_new_tensor_4d(ctx_kv_cache_, kv_type, head_dim, max_ctx, num_kv_heads, batch);
 
         std::string k_name = "kv_cache_k_" + std::to_string(op->id);
         std::string v_name = "kv_cache_v_" + std::to_string(op->id);
@@ -321,6 +322,59 @@ void ModelExecutor::reset_kv_cache() {
             ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
         }
     }
+    decode_graph_cached_ = false;
+    decode_attn_views_.clear();
+    decode_rope_arange_tensors_.clear();
+}
+
+void ModelExecutor::set_decode_pos(int64_t pos) {
+    if (!decode_graph_cached_) return;
+    decode_cached_pos_ = pos;
+
+    // 1. Update attention KV views in-place
+    for (auto& pair : decode_attn_views_) {
+        uint32_t op_id = pair.first;
+        auto& refs = pair.second;
+        struct ggml_tensor* k_cache = kv_cache_k_[op_id];
+        struct ggml_tensor* v_cache = kv_cache_v_[op_id];
+
+        // Slot offsets
+        refs.k_slot->view_offs = pos * k_cache->nb[1];
+        refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
+
+        refs.v_slot->view_offs = pos * v_cache->nb[1];
+        refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
+
+        // Active sequence length
+        int64_t s_kv = pos + 1;
+        refs.k_active->ne[1] = s_kv;
+        refs.v_active->ne[1] = s_kv;
+
+        if (refs.scores) {
+            refs.scores->ne[0] = s_kv;
+        }
+        if (refs.probs) {
+            refs.probs->ne[0] = s_kv;
+        }
+        if (refs.v_t) {
+            refs.v_t->ne[1] = s_kv;
+        }
+    }
+
+    // 2. Update RoPE arange position constants
+    for (const auto& pair : decode_rope_arange_tensors_) {
+        struct ggml_tensor* arange_tensor = pair.first;
+        uint32_t tid = pair.second;
+        const auto& t = model_graph_.tensors.at(tid);
+        if (t.data_ptr && t.data_size > 0) {
+            size_t elem_sz = ggml_type_size(t.type);
+            size_t offset = static_cast<size_t>(pos) * elem_sz;
+            if (offset < t.data_size) {
+                size_t sz = std::min<size_t>(t.data_size - offset, ggml_nbytes(arange_tensor));
+                ggml_backend_tensor_set(arange_tensor, static_cast<const uint8_t*>(t.data_ptr) + offset, 0, sz);
+            }
+        }
+    }
 }
 
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
@@ -334,9 +388,31 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         init_kv_cache(kv_cache_max_ctx_);
     }
 
+    bool is_single_token = false;
+    if (symbol_env.count("s") > 0 && symbol_env.at("s") == 1) is_single_token = true;
+    for (const auto& sym : model_graph_.symbol_table) {
+        if (symbol_env.count(sym) > 0 && symbol_env.at(sym) == 1) {
+            is_single_token = true;
+            break;
+        }
+    }
+    bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
+
+    // Fast path: if decode graph is already cached, mutate in-place and return immediately (0.0 ms overhead)
+    if (is_decode_step && decode_graph_cached_) {
+        set_decode_pos(symbol_env.at("pos"));
+        last_symbol_env_ = symbol_env;
+        return;
+    }
+
     if (prepared_ && symbol_env == last_symbol_env_ && enable_arena_reuse == last_enable_arena_reuse_) {
         return;
     }
+
+    // Invalidate decode cache if recompiling
+    decode_graph_cached_ = false;
+    decode_attn_views_.clear();
+    decode_rope_arange_tensors_.clear();
 
     if (buffer_) {
         ggml_backend_buffer_free(buffer_);
@@ -778,21 +854,39 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         0
                     );
 
-                    struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
-                    struct ggml_tensor* scores = ggml_mul_mat(ctx_, k_active, q_scaled);
+                    if (s_q == 1) {
+                        // Direct fused flash attention kernel without causal mask (since s_q == 1)
+                        struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                            ctx_, q, k_active, v_active, nullptr, scale, 0.0f, 0.0f
+                        );
+                        // Permute from [head_dim, num_heads, s_q, batch] to [head_dim, s_q, num_heads, batch]
+                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
 
-                    if (s_q > 1) {
-                        scores = ggml_diag_mask_inf(ctx_, scores, static_cast<int>(pos));
-                    } else if (mask) {
-                        if (ggml_can_repeat(mask, scores)) {
-                            mask = ggml_repeat(ctx_, mask, scores);
+                        if (is_decode_step) {
+                            AttnViewRefs refs;
+                            refs.k_slot = k_slot;
+                            refs.v_slot = v_slot;
+                            refs.k_active = k_active;
+                            refs.v_active = v_active;
+                            decode_attn_views_[op.id] = refs;
                         }
-                        scores = ggml_add(ctx_, scores, mask);
-                    }
+                    } else {
+                        struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
+                        struct ggml_tensor* scores = ggml_mul_mat(ctx_, k_active, q_scaled);
 
-                    struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
-                    struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v_active));
-                    result = ggml_mul_mat(ctx_, v_t, probs);
+                        if (s_q > 1) {
+                            scores = ggml_diag_mask_inf(ctx_, scores, static_cast<int>(pos));
+                        } else if (mask) {
+                            if (ggml_can_repeat(mask, scores)) {
+                                mask = ggml_repeat(ctx_, mask, scores);
+                            }
+                            scores = ggml_add(ctx_, scores, mask);
+                        }
+
+                        struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
+                        struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v_active));
+                        result = ggml_mul_mat(ctx_, v_t, probs);
+                    }
                 } else {
                     // 1. Q_scaled = Q * scale
                     struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
@@ -1126,9 +1220,17 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     offset = static_cast<size_t>(pos) * elem_sz;
                     sz = std::min<size_t>(t.data_size - offset, ggml_nbytes(pair.second));
                 }
+                if (is_decode_step) {
+                    decode_rope_arange_tensors_.push_back({pair.second, tid});
+                }
             }
             ggml_backend_tensor_set(pair.second, static_cast<const uint8_t*>(t.data_ptr) + offset, 0, sz);
         }
+    }
+
+    if (is_decode_step) {
+        decode_graph_cached_ = true;
+        decode_cached_pos_ = symbol_env.at("pos");
     }
 
     last_symbol_env_ = symbol_env;

@@ -78,7 +78,9 @@ def run_ggmlc_run(
         str(n_threads),
     ]
 
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    res = subprocess.run(
+        cmd, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace"
+    )
     stdout = res.stdout
 
     # Parse stdout metrics
