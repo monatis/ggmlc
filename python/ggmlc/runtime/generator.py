@@ -89,13 +89,27 @@ class GGMLCGenerator:
             generated_tokens = list(encoded["input_ids"][0])
 
         eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        use_kv_cache = False
+        if hasattr(self.runner, "init_kv_cache") and hasattr(self.runner, "has_kv_cache"):
+            self.runner.init_kv_cache(len(generated_tokens) + max_new_tokens + 256)
+            use_kv_cache = self.runner.has_kv_cache()
 
-        for _ in range(max_new_tokens):
-            curr_input = np.array([generated_tokens], dtype=np.int32)
-            out = self.runner(curr_input)
+        prompt_len = len(generated_tokens)
+        pos = 0
+        last_token = 0
+
+        for step in range(max_new_tokens):
+            if use_kv_cache and step > 0:
+                curr_input = np.array([[last_token]], dtype=np.int32)
+                symbols = {"pos": pos, "s": 1}
+            else:
+                curr_input = np.array([generated_tokens], dtype=np.int32)
+                symbols = {"pos": 0, "s": len(generated_tokens)} if use_kv_cache else None
+
+            out = self.runner(curr_input, symbols=symbols)
             out_tensor = next(iter(out.values())) if isinstance(out, dict) else out
 
-            S = len(generated_tokens)
+            S = curr_input.shape[1]
             vocab_size = out_tensor.size // S
             logits = out_tensor.reshape((1, S, vocab_size))
             next_token_logits = logits[0, -1, :]
@@ -120,7 +134,11 @@ class GGMLCGenerator:
                 else:
                     next_token = int(np.random.choice(len(probs), p=probs))
 
+            last_token = next_token
             generated_tokens.append(next_token)
+            if use_kv_cache:
+                pos = prompt_len if step == 0 else pos + 1
+
             if eos_token_id is not None and next_token == eos_token_id:
                 break
 

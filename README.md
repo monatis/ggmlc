@@ -35,6 +35,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
 5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
+7. **Hardware-Accelerated Persistent KV Cache**: Dedicated zero-copy device key/value buffers with dual-phase prefill and single-token decode ($S=1$), delivering constant $O(1)$ inter-token decode latency (~30 ms/tok on CUDA) across arbitrary sequence lengths (32, 64, 128, 256+ tokens).
 
 ---
 
@@ -185,6 +186,8 @@ similarity_logits = runner(pixel_values, input_ids)
 ```
 
 ### 6. Fast Autoregressive Text Generation (`GGMLCGenerator`)
+`GGMLCGenerator` integrates dynamic hardware KV caching to provide flat $O(1)$ inter-token decode latency:
+
 ```python
 from ggmlc.pipeline.tokenizer import BPETokenizer
 from ggmlc.runtime.generator import GGMLCGenerator
@@ -194,28 +197,41 @@ from examples.models.hub_models import load_smollm2_model
 model, _, _ = load_smollm2_model()
 tokenizer = BPETokenizer.from_huggingface("HuggingFaceTB/SmolLM2-135M-Instruct")
 
-# 2. End-to-end greedy or top-p autoregressive text generation
+# 2. End-to-end autoregressive text generation with persistent KV cache
 generator = GGMLCGenerator(model, tokenizer, model_name="smollm2_135m", device="auto")
-text = generator.generate("Artificial intelligence will", max_new_tokens=16, greedy=True)
+text = generator.generate("Artificial intelligence will", max_new_tokens=128, greedy=True)
 print("Generated text:", text)
 ```
 
 ### 7. Standalone Native CLI Runner (`ggmlc-run`)
-`ggmlc` compiles into a zero-dependency C++ executable (`ggmlc-run`) capable of executing any compiled GGUF model:
+`ggmlc` compiles into a zero-dependency C++ executable (`ggmlc-run`) capable of executing any compiled GGUF model with hardware KV caching:
 
 ```bash
 # 1. Inspect model metadata, tensor graph, dynamic symbols, and detected capabilities
 ./ggmlc-run model.gguf --info
 
-# 2. Clean instruction chat streaming with automatic template application
-./ggmlc-run smollm2.gguf --chat "What is the capital of France?" --threads 4
+# 2. Clean instruction chat streaming with automatic template application & KV cache
+./ggmlc-run smollm2_chat.gguf --chat "What is the capital of France?" --threads 4
 
-# 3. Offload chat inference to NVIDIA CUDA GPU
-./ggmlc-run smollm2.gguf --chat "Explain quantum computing in one sentence." --device cuda
+# 3. Offload autoregressive chat inference to NVIDIA CUDA GPU
+./ggmlc-run smollm2_chat.gguf --chat "Explain quantum computing in one sentence." --device cuda --max-tokens 256
 
 # 4. Multimodal image preprocessing & task-aware classification
 ./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4
 ```
+
+#### Autoregressive KV Cache Benchmark: `ggmlc-run` vs. `llama.cpp` (SmolLM2-135M)
+
+| Sequence Length | Target Device | `llama.cpp` Latency | `ggmlc-run` Latency | `ggmlc-run` Decode Rate | Latency Scaling |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | **CUDA (GTX 1050)** | 20.38 ms/tok | **37.07 ms/tok** | 27.0 tok/s | **$O(1)$ Flat** |
+| **64 tokens** | **CUDA (GTX 1050)** | 22.61 ms/tok | **32.70 ms/tok** | 30.6 tok/s | **$O(1)$ Flat** |
+| **128 tokens** | **CUDA (GTX 1050)** | 18.73 ms/tok | **29.23 ms/tok** | 34.2 tok/s | **$O(1)$ Flat** |
+| **256 tokens** | **CUDA (GTX 1050)** | 18.32 ms/tok | **30.82 ms/tok** | 32.5 tok/s | **$O(1)$ Flat** |
+| **32 tokens** | **CPU (4 Threads)** | 34.74 ms/tok | **53.54 ms/tok** | 18.7 tok/s | **$O(1)$ Flat** |
+| **64 tokens** | **CPU (4 Threads)** | 18.03 ms/tok | **63.51 ms/tok** | 15.8 tok/s | **$O(1)$ Flat** |
+| **128 tokens** | **CPU (4 Threads)** | 17.31 ms/tok | **53.16 ms/tok** | 18.8 tok/s | **$O(1)$ Flat** |
+| **256 tokens** | **CPU (4 Threads)** | 16.79 ms/tok | **56.74 ms/tok** | 17.6 tok/s | **$O(1)$ Flat** |
 
 ---
 

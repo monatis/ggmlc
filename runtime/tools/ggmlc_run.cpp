@@ -336,11 +336,37 @@ int main(int argc, char** argv) {
 
             ggmlc::ModelExecutor executor(model_graph, device_name);
             auto t_start = std::chrono::high_resolution_clock::now();
+            auto t_prefill_end = t_start;
+            auto t_decode_start = t_start;
             int generated_count = 0;
 
+            bool use_kv_cache = false;
+            for (const auto& op : model_graph.ops) {
+                if (op.opcode == 74) { // GGML_OP_FLASH_ATTN_EXT
+                    use_kv_cache = true;
+                    break;
+                }
+            }
+
+            if (use_kv_cache) {
+                executor.init_kv_cache(current_tokens.size() + max_tokens + 256);
+            }
+
+            int64_t prompt_len = static_cast<int64_t>(current_tokens.size());
+            int64_t pos = 0;
+            int32_t last_token = 0;
+
             for (int step = 0; step < max_tokens; ++step) {
-                int64_t S = static_cast<int64_t>(current_tokens.size());
+                int64_t S = (use_kv_cache && step > 0) ? 1 : (step == 0 ? prompt_len : static_cast<int64_t>(current_tokens.size()));
                 symbol_env["s"] = S;
+                for (const auto& sym : model_graph.symbol_table) {
+                    if (sym.rfind("s", 0) == 0 || sym.find("seq") != std::string::npos) {
+                        symbol_env[sym] = S;
+                    }
+                }
+                if (model_graph.symbol_table.size() == 1) {
+                    symbol_env[model_graph.symbol_table[0]] = S;
+                }
 
                 // Auto-deduce any symbolic dimensions in input tensor
                 for (const auto& dim_expr : model_graph.tensors[in_tid].ne) {
@@ -352,9 +378,22 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                if (use_kv_cache) {
+                    symbol_env["pos"] = pos;
+                }
+
                 executor.prepare(symbol_env, !unplanned);
-                executor.set_input(in_tid, current_tokens.data(), current_tokens.size() * sizeof(int32_t));
+
+                if (use_kv_cache && step > 0) {
+                    executor.set_input(in_tid, &last_token, sizeof(int32_t));
+                } else {
+                    executor.set_input(in_tid, current_tokens.data(), current_tokens.size() * sizeof(int32_t));
+                }
                 executor.run(n_threads);
+                if (step == 0) {
+                    t_prefill_end = std::chrono::high_resolution_clock::now();
+                    t_decode_start = t_prefill_end;
+                }
 
                 const float* logits_data = static_cast<const float*>(executor.get_output_data(out_tid));
                 size_t total_elements = executor.get_tensor_size_bytes(out_tid) / sizeof(float);
@@ -423,8 +462,16 @@ int main(int argc, char** argv) {
                     }
                 }
 
+                last_token = next_token;
                 current_tokens.push_back(next_token);
                 generated_count++;
+                if (use_kv_cache) {
+                    if (step == 0) {
+                        pos = prompt_len;
+                    } else {
+                        pos++;
+                    }
+                }
 
                 // Stop immediately on EOS
                 if (tokenizer.eos_token_id() >= 0 && next_token == tokenizer.eos_token_id()) {
@@ -444,10 +491,22 @@ int main(int argc, char** argv) {
             }
 
             auto t_end = std::chrono::high_resolution_clock::now();
-            double elapsed_sec = std::chrono::duration<double>(t_end - t_start).count();
-            std::cout << "\n\n[ggmlc-run] Generated " << generated_count << " tokens in "
-                      << std::fixed << std::setprecision(2) << elapsed_sec << "s ("
-                      << (generated_count / std::max(elapsed_sec, 1e-6)) << " tok/s)\n";
+            double total_sec = std::chrono::duration<double>(t_end - t_start).count();
+            double prefill_sec = std::chrono::duration<double>(t_prefill_end - t_start).count();
+            int decode_count = std::max(0, generated_count - 1);
+            double decode_sec = decode_count > 0 ? std::chrono::duration<double>(t_end - t_decode_start).count() : 0.0;
+            double decode_ms_tok = decode_count > 0 ? (decode_sec * 1000.0 / decode_count) : 0.0;
+            double decode_tok_s = decode_sec > 1e-6 ? (decode_count / decode_sec) : 0.0;
+
+            std::cout << "\n\n[ggmlc-run] Summary: " << generated_count << " tokens generated in "
+                      << std::fixed << std::setprecision(2) << total_sec << "s ("
+                      << (generated_count / std::max(total_sec, 1e-6)) << " tok/s overall)\n"
+                      << "[ggmlc-run]   Prompt Prefill : " << prompt_len << " tokens in "
+                      << std::fixed << std::setprecision(2) << (prefill_sec * 1000.0) << " ms ("
+                      << (prompt_len / std::max(prefill_sec, 1e-6)) << " tok/s)\n"
+                      << "[ggmlc-run]   Token Decode   : " << decode_count << " tokens in "
+                      << std::fixed << std::setprecision(2) << (decode_sec * 1000.0) << " ms ("
+                      << decode_tok_s << " tok/s, " << decode_ms_tok << " ms/tok)\n";
 
             return 0;
         }

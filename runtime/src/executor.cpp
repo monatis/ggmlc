@@ -84,13 +84,260 @@ ModelExecutor::~ModelExecutor() {
         ggml_free(ctx_);
         ctx_ = nullptr;
     }
+    if (state_buffer_) {
+        ggml_backend_buffer_free(state_buffer_);
+        state_buffer_ = nullptr;
+    }
+    if (ctx_state_) {
+        ggml_free(ctx_state_);
+        ctx_state_ = nullptr;
+    }
+    if (weight_buffer_) {
+        ggml_backend_buffer_free(weight_buffer_);
+        weight_buffer_ = nullptr;
+    }
+    if (ctx_w_) {
+        ggml_free(ctx_w_);
+        ctx_w_ = nullptr;
+    }
+    if (kv_cache_buffer_) {
+        ggml_backend_buffer_free(kv_cache_buffer_);
+        kv_cache_buffer_ = nullptr;
+    }
+    if (ctx_kv_cache_) {
+        ggml_free(ctx_kv_cache_);
+        ctx_kv_cache_ = nullptr;
+    }
     if (backend_) {
         ggml_backend_free(backend_);
         backend_ = nullptr;
     }
 }
 
+bool ModelExecutor::has_state_tensors() const {
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.storage == StorageClass::STATE) return true;
+    }
+    return false;
+}
+
+void ModelExecutor::init_weights() {
+    if (weights_loaded_) return;
+
+    size_t n_weights = 0;
+    for (const auto& pair : model_graph_.tensors) {
+        const auto& t = pair.second;
+        if ((t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) && t.is_static()) {
+            n_weights++;
+        }
+    }
+    if (n_weights == 0) {
+        weights_loaded_ = true;
+        return;
+    }
+
+    size_t ctx_meta_size = (n_weights + 64) * ggml_tensor_overhead() + 4 * 1024 * 1024;
+    struct ggml_init_params params = {
+        /* .mem_size   = */ ctx_meta_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ctx_w_ = ggml_init(params);
+    if (!ctx_w_) {
+        throw std::runtime_error("Failed to initialize ggml_context for weights");
+    }
+
+    std::unordered_map<std::string, int64_t> empty_env;
+    for (const auto& pair : model_graph_.tensors) {
+        uint32_t tid = pair.first;
+        const auto& t = pair.second;
+        if ((t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) && t.is_static()) {
+            std::array<int64_t, 4> ne;
+            for (int d = 0; d < 4; ++d) {
+                ne[d] = t.ne[d]->evaluate(empty_env, model_graph_.symbol_table);
+            }
+            concrete_shapes_[tid] = ne;
+
+            struct ggml_tensor* g_t = ggml_new_tensor_4d(ctx_w_, t.type, ne[0], ne[1], ne[2], ne[3]);
+            if (!g_t) {
+                throw std::runtime_error("Failed to allocate weight ggml_tensor for: " + t.name);
+            }
+            ggml_set_name(g_t, t.name.c_str());
+            weight_tensors_[tid] = g_t;
+        }
+    }
+
+    weight_buffer_ = ggml_backend_alloc_ctx_tensors(ctx_w_, backend_);
+    if (!weight_buffer_) {
+        throw std::runtime_error("Failed to allocate weight buffer on backend (" + device_ + ")");
+    }
+
+    for (const auto& pair : model_graph_.tensors) {
+        uint32_t tid = pair.first;
+        const auto& t = pair.second;
+        if ((t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) && t.is_static() && t.data_ptr && t.data_size > 0) {
+            auto it = weight_tensors_.find(tid);
+            if (it != weight_tensors_.end()) {
+                size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(it->second));
+                ggml_backend_tensor_set(it->second, t.data_ptr, 0, sz);
+            }
+        }
+    }
+
+    weights_loaded_ = true;
+}
+
+void ModelExecutor::init_states(const std::unordered_map<std::string, int64_t>& symbol_env) {
+    if (states_allocated_) return;
+
+    size_t n_states = 0;
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.storage == StorageClass::STATE) n_states++;
+    }
+    if (n_states == 0) {
+        states_allocated_ = true;
+        return;
+    }
+
+    size_t ctx_meta_size = (n_states + 32) * ggml_tensor_overhead() + 2 * 1024 * 1024;
+    struct ggml_init_params params = {
+        /* .mem_size   = */ ctx_meta_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ctx_state_ = ggml_init(params);
+    if (!ctx_state_) {
+        throw std::runtime_error("Failed to initialize ggml_context for state tensors");
+    }
+
+    for (const auto& pair : model_graph_.tensors) {
+        uint32_t tid = pair.first;
+        const auto& t = pair.second;
+        if (t.storage == StorageClass::STATE) {
+            std::array<int64_t, 4> ne;
+            for (int d = 0; d < 4; ++d) {
+                ne[d] = t.ne[d]->evaluate(symbol_env, model_graph_.symbol_table);
+            }
+            concrete_shapes_[tid] = ne;
+
+            struct ggml_tensor* g_t = ggml_new_tensor_4d(ctx_state_, t.type, ne[0], ne[1], ne[2], ne[3]);
+            if (!g_t) {
+                throw std::runtime_error("Failed to allocate state ggml_tensor for: " + t.name);
+            }
+            ggml_set_name(g_t, t.name.c_str());
+            state_tensors_[tid] = g_t;
+        }
+    }
+
+    state_buffer_ = ggml_backend_alloc_ctx_tensors(ctx_state_, backend_);
+    if (!state_buffer_) {
+        throw std::runtime_error("Failed to allocate state buffer on backend (" + device_ + ")");
+    }
+
+    for (const auto& pair : state_tensors_) {
+        uint32_t tid = pair.first;
+        struct ggml_tensor* g_t = pair.second;
+        size_t sz = ggml_nbytes(g_t);
+        auto s_it = persistent_states_.find(tid);
+        if (s_it != persistent_states_.end() && s_it->second.size() == sz) {
+            ggml_backend_tensor_set(g_t, s_it->second.data(), 0, sz);
+        } else {
+            persistent_states_[tid].assign(sz, 0);
+            ggml_backend_tensor_memset(g_t, 0, 0, sz);
+        }
+    }
+
+    states_allocated_ = true;
+}
+
+void ModelExecutor::init_kv_cache(int64_t max_ctx) {
+    if (kv_cache_buffer_) return;
+    kv_cache_max_ctx_ = max_ctx;
+
+    std::vector<const SerializedOp*> attn_ops;
+    for (const auto& op : model_graph_.ops) {
+        if (op.opcode == GGML_OP_FLASH_ATTN_EXT) {
+            attn_ops.push_back(&op);
+        }
+    }
+    if (attn_ops.empty()) return;
+
+    size_t ctx_meta_size = (attn_ops.size() * 2 + 32) * ggml_tensor_overhead() + 2 * 1024 * 1024;
+    struct ggml_init_params params = {
+        /* .mem_size   = */ ctx_meta_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ctx_kv_cache_ = ggml_init(params);
+    if (!ctx_kv_cache_) {
+        throw std::runtime_error("Failed to initialize ggml_context for KV cache");
+    }
+
+    std::unordered_map<std::string, int64_t> dummy_env;
+    dummy_env["s"] = 1;
+    for (const auto& sym : model_graph_.symbol_table) {
+        dummy_env[sym] = 1;
+    }
+
+    for (const auto* op : attn_ops) {
+        uint32_t k_id = op->inputs[1];
+        uint32_t v_id = op->inputs.size() > 2 ? op->inputs[2] : k_id;
+        const auto& k_t = model_graph_.tensors.at(k_id);
+        const auto& v_t = model_graph_.tensors.at(v_id);
+
+        int64_t head_dim = k_t.ne[0]->evaluate(dummy_env, model_graph_.symbol_table);
+        int64_t num_kv_heads = k_t.ne[2]->evaluate(dummy_env, model_graph_.symbol_table);
+        int64_t batch = k_t.ne[3]->evaluate(dummy_env, model_graph_.symbol_table);
+
+        struct ggml_tensor* g_k = ggml_new_tensor_4d(ctx_kv_cache_, k_t.type, head_dim, max_ctx, num_kv_heads, batch);
+        struct ggml_tensor* g_v = ggml_new_tensor_4d(ctx_kv_cache_, v_t.type, head_dim, max_ctx, num_kv_heads, batch);
+
+        std::string k_name = "kv_cache_k_" + std::to_string(op->id);
+        std::string v_name = "kv_cache_v_" + std::to_string(op->id);
+        ggml_set_name(g_k, k_name.c_str());
+        ggml_set_name(g_v, v_name.c_str());
+
+        kv_cache_k_[op->id] = g_k;
+        kv_cache_v_[op->id] = g_v;
+    }
+
+    kv_cache_buffer_ = ggml_backend_alloc_ctx_tensors(ctx_kv_cache_, backend_);
+    if (!kv_cache_buffer_) {
+        throw std::runtime_error("Failed to allocate KV cache buffer on backend (" + device_ + ")");
+    }
+
+    reset_kv_cache();
+    kv_cache_enabled_ = true;
+}
+
+void ModelExecutor::reset_kv_cache() {
+    for (const auto& pair : kv_cache_k_) {
+        if (pair.second) {
+            ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
+        }
+    }
+    for (const auto& pair : kv_cache_v_) {
+        if (pair.second) {
+            ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
+        }
+    }
+}
+
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
+    if (!weights_loaded_) {
+        init_weights();
+    }
+    if (!states_allocated_ && has_state_tensors()) {
+        init_states(symbol_env);
+    }
+    if (symbol_env.count("pos") > 0 && !kv_cache_enabled_) {
+        init_kv_cache(kv_cache_max_ctx_);
+    }
+
+    if (prepared_ && symbol_env == last_symbol_env_ && enable_arena_reuse == last_enable_arena_reuse_) {
+        return;
+    }
+
     if (buffer_) {
         ggml_backend_buffer_free(buffer_);
         buffer_ = nullptr;
@@ -99,25 +346,37 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         ggml_free(ctx_);
         ctx_ = nullptr;
     }
+    compute_tensors_.clear();
     ggml_tensors_.clear();
-    concrete_shapes_.clear();
     custom_params_storage_.clear();
     output_host_buffers_.clear();
     state_host_buffers_.clear();
 
-    // 1. Evaluate concrete shapes and metadata
+    // Re-link pre-allocated static weights and persistent states
+    for (const auto& pair : weight_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+    for (const auto& pair : state_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+
+    // 1. Evaluate concrete shapes and metadata for compute tensors (inputs, activations, outputs, and dynamic constants)
+    size_t n_compute_tensors = 0;
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
-        const auto& t = pair.second;
-        std::array<int64_t, 4> ne;
-        for (int d = 0; d < 4; ++d) {
-            ne[d] = t.ne[d]->evaluate(symbol_env, model_graph_.symbol_table);
+        if (weight_tensors_.find(tid) == weight_tensors_.end() && state_tensors_.find(tid) == state_tensors_.end()) {
+            const auto& t = pair.second;
+            std::array<int64_t, 4> ne;
+            for (int d = 0; d < 4; ++d) {
+                ne[d] = t.ne[d]->evaluate(symbol_env, model_graph_.symbol_table);
+            }
+            concrete_shapes_[tid] = ne;
+            n_compute_tensors++;
         }
-        concrete_shapes_[tid] = ne;
     }
 
     // Allocate ggml context with no_alloc=true so the backend buffer allocates memory
-    size_t ctx_meta_size = (model_graph_.tensors.size() + model_graph_.ops.size() * 16 + 256) * ggml_tensor_overhead() + 8 * 1024 * 1024;
+    size_t ctx_meta_size = (n_compute_tensors + model_graph_.ops.size() * 16 + 256) * ggml_tensor_overhead() + 8 * 1024 * 1024;
     struct ggml_init_params params = {
         /* .mem_size   = */ ctx_meta_size,
         /* .mem_buffer = */ nullptr,
@@ -128,18 +387,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         throw std::runtime_error("Failed to initialize ggml_context");
     }
 
-    // 2. Instantiate ggml_tensors (metadata only)
+    // 2. Instantiate non-weight, non-state ggml_tensors (metadata only)
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
-        const auto& t = pair.second;
-        const auto& ne = concrete_shapes_[tid];
-
-        struct ggml_tensor* g_t = ggml_new_tensor_4d(ctx_, t.type, ne[0], ne[1], ne[2], ne[3]);
-        if (!g_t) {
-            throw std::runtime_error("Failed to allocate ggml_tensor for: " + t.name);
+        if (weight_tensors_.find(tid) == weight_tensors_.end() && state_tensors_.find(tid) == state_tensors_.end()) {
+            const auto& t = pair.second;
+            const auto& ne = concrete_shapes_[tid];
+            struct ggml_tensor* g_t = ggml_new_tensor_4d(ctx_, t.type, ne[0], ne[1], ne[2], ne[3]);
+            if (!g_t) {
+                throw std::runtime_error("Failed to allocate ggml_tensor for: " + t.name);
+            }
+            ggml_set_name(g_t, t.name.c_str());
+            compute_tensors_[tid] = g_t;
+            ggml_tensors_[tid] = g_t;
         }
-        ggml_set_name(g_t, t.name.c_str());
-        ggml_tensors_[tid] = g_t;
     }
 
     // 3. Build computation graph
@@ -479,24 +740,79 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 bool is_causal = op.attributes.count("is_causal") && op.attributes.at("is_causal") != 0;
 
-                // 1. Q_scaled = Q * scale
-                struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
-                // 2. scores = mul_mat(K, Q_scaled) -> ne = [S_k, S_q, H, B]
-                struct ggml_tensor* scores = ggml_mul_mat(ctx_, k, q_scaled);
-                // 3. causal mask or explicit mask
-                if (is_causal) {
-                    scores = ggml_diag_mask_inf(ctx_, scores, 0);
-                } else if (mask) {
-                    if (ggml_can_repeat(mask, scores)) {
-                        mask = ggml_repeat(ctx_, mask, scores);
+                if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && kv_cache_k_.count(op.id) > 0 && kv_cache_v_.count(op.id) > 0) {
+                    int64_t pos = symbol_env.at("pos");
+                    int64_t s_q = q->ne[1];
+                    struct ggml_tensor* k_cache = kv_cache_k_[op.id];
+                    struct ggml_tensor* v_cache = kv_cache_v_[op.id];
+                    int64_t head_dim = k->ne[0];
+                    int64_t num_kv_heads = k->ne[2];
+                    int64_t batch = k->ne[3];
+
+                    // View slot in cache for new tokens at offset pos
+                    struct ggml_tensor* k_slot = ggml_view_4d(
+                        ctx_, k_cache, head_dim, s_q, num_kv_heads, batch,
+                        k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                        pos * k_cache->nb[1]
+                    );
+                    struct ggml_tensor* v_slot = ggml_view_4d(
+                        ctx_, v_cache, head_dim, s_q, num_kv_heads, batch,
+                        v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                        pos * v_cache->nb[1]
+                    );
+
+                    // Copy new k and v into cache
+                    ggml_build_forward_expand(cgraph_, ggml_cpy(ctx_, k, k_slot));
+                    ggml_build_forward_expand(cgraph_, ggml_cpy(ctx_, v, v_slot));
+
+                    // Active keys and values up to pos + s_q
+                    int64_t s_kv = pos + s_q;
+                    struct ggml_tensor* k_active = ggml_view_4d(
+                        ctx_, k_cache, head_dim, s_kv, num_kv_heads, batch,
+                        k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                        0
+                    );
+                    struct ggml_tensor* v_active = ggml_view_4d(
+                        ctx_, v_cache, head_dim, s_kv, num_kv_heads, batch,
+                        v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                        0
+                    );
+
+                    struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
+                    struct ggml_tensor* scores = ggml_mul_mat(ctx_, k_active, q_scaled);
+
+                    if (s_q > 1) {
+                        scores = ggml_diag_mask_inf(ctx_, scores, static_cast<int>(pos));
+                    } else if (mask) {
+                        if (ggml_can_repeat(mask, scores)) {
+                            mask = ggml_repeat(ctx_, mask, scores);
+                        }
+                        scores = ggml_add(ctx_, scores, mask);
                     }
-                    scores = ggml_add(ctx_, scores, mask);
+
+                    struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
+                    struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v_active));
+                    result = ggml_mul_mat(ctx_, v_t, probs);
+                } else {
+                    // 1. Q_scaled = Q * scale
+                    struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
+                    // 2. scores = mul_mat(K, Q_scaled) -> ne = [S_k, S_q, H, B]
+                    struct ggml_tensor* scores = ggml_mul_mat(ctx_, k, q_scaled);
+                    // 3. causal mask or explicit mask
+                    if (is_causal) {
+                        scores = ggml_diag_mask_inf(ctx_, scores, 0);
+                    } else if (mask) {
+                        if (ggml_can_repeat(mask, scores)) {
+                            mask = ggml_repeat(ctx_, mask, scores);
+                        }
+                        scores = ggml_add(ctx_, scores, mask);
+                    }
+                    // 4. softmax over S_k (dim 0)
+                    struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
+                    // 5. context = mul_mat(transpose(V), probs) -> ne = [D, S_q, H, B]
+                    struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
+                    result = ggml_mul_mat(ctx_, v_t, probs);
                 }
-                // 4. softmax over S_k (dim 0)
-                struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
-                // 5. context = mul_mat(transpose(V), probs) -> ne = [D, S_q, H, B]
-                struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
-                result = ggml_mul_mat(ctx_, v_t, probs);
                 break;
             }
             case GGML_OP_GLU:
@@ -790,36 +1106,34 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    // 4. Allocate tensor storage on the backend (CPU or CUDA)
+    // 4. Allocate tensor storage for compute activations on backend (CPU or CUDA)
     buffer_ = ggml_backend_alloc_ctx_tensors(ctx_, backend_);
     if (!buffer_) {
         throw std::runtime_error("Failed to allocate tensors via GGML backend (" + device_ + ")");
     }
 
-    // 5. Initialize parameters and constants on device buffer
-    for (const auto& pair : model_graph_.tensors) {
+    // Initialize any compute-time constants that have static data
+    for (const auto& pair : compute_tensors_) {
         uint32_t tid = pair.first;
-        const auto& t = pair.second;
-        if ((t.storage == StorageClass::PARAMETER || t.storage == StorageClass::CONSTANT) && t.data_ptr && t.data_size > 0) {
-            auto it = ggml_tensors_.find(tid);
-            if (it != ggml_tensors_.end()) {
-                size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(it->second));
-                ggml_backend_tensor_set(it->second, t.data_ptr, 0, sz);
-            }
-        } else if (t.storage == StorageClass::STATE) {
-            auto s_it = persistent_states_.find(tid);
-            auto it = ggml_tensors_.find(tid);
-            if (it != ggml_tensors_.end()) {
-                size_t sz = ggml_nbytes(it->second);
-                if (s_it != persistent_states_.end() && s_it->second.size() == sz) {
-                    ggml_backend_tensor_set(it->second, s_it->second.data(), 0, sz);
-                } else {
-                    persistent_states_[tid].assign(sz, 0);
-                    ggml_backend_tensor_memset(it->second, 0, 0, sz);
+        const auto& t = model_graph_.tensors.at(tid);
+        if (t.data_ptr && t.data_size > 0) {
+            size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(pair.second));
+            size_t offset = 0;
+            if (symbol_env.count("pos") > 0 && t.name.find("arange") != std::string::npos) {
+                int64_t pos = symbol_env.at("pos");
+                size_t elem_sz = ggml_type_size(t.type);
+                if (static_cast<size_t>(pos) * elem_sz < t.data_size) {
+                    offset = static_cast<size_t>(pos) * elem_sz;
+                    sz = std::min<size_t>(t.data_size - offset, ggml_nbytes(pair.second));
                 }
             }
+            ggml_backend_tensor_set(pair.second, static_cast<const uint8_t*>(t.data_ptr) + offset, 0, sz);
         }
     }
+
+    last_symbol_env_ = symbol_env;
+    last_enable_arena_reuse_ = enable_arena_reuse;
+    prepared_ = true;
 }
 
 void ModelExecutor::set_input(uint32_t tensor_id, const void* data, size_t size_bytes) {
@@ -860,28 +1174,17 @@ void ModelExecutor::run(int n_threads) {
     }
 
     // Execution completed successfully
-
-    // Save persistent states from backend
-    for (const auto& pair : model_graph_.tensors) {
-        uint32_t tid = pair.first;
-        if (pair.second.storage == StorageClass::STATE) {
-            auto it = ggml_tensors_.find(tid);
-            if (it != ggml_tensors_.end()) {
-                size_t sz = ggml_nbytes(it->second);
-                persistent_states_[tid].resize(sz);
-                ggml_backend_tensor_get(it->second, persistent_states_[tid].data(), 0, sz);
-            }
-        }
-    }
 }
 
 void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_bytes) {
-    persistent_states_[tensor_id].resize(size_bytes);
-    std::memcpy(persistent_states_[tensor_id].data(), data, size_bytes);
-    auto it = ggml_tensors_.find(tensor_id);
-    if (it != ggml_tensors_.end() && ggml_nbytes(it->second) == size_bytes) {
+    auto it = state_tensors_.find(tensor_id);
+    if (it == state_tensors_.end()) {
+        it = ggml_tensors_.find(tensor_id);
+    }
+    if (it != state_tensors_.end() && it->second && ggml_nbytes(it->second) == size_bytes) {
         ggml_backend_tensor_set(it->second, data, 0, size_bytes);
     }
+    persistent_states_[tensor_id].assign(reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + size_bytes);
 }
 
 void ModelExecutor::set_state_by_name(const std::string& name, const void* data, size_t size_bytes) {
@@ -895,17 +1198,20 @@ void ModelExecutor::set_state_by_name(const std::string& name, const void* data,
 }
 
 const void* ModelExecutor::get_state_data(uint32_t tensor_id) {
-    auto it = persistent_states_.find(tensor_id);
-    if (it != persistent_states_.end() && !it->second.empty()) {
-        return it->second.data();
+    auto t_it = state_tensors_.find(tensor_id);
+    if (t_it == state_tensors_.end()) {
+        t_it = ggml_tensors_.find(tensor_id);
     }
-    auto t_it = ggml_tensors_.find(tensor_id);
-    if (t_it != ggml_tensors_.end()) {
+    if (t_it != state_tensors_.end() && t_it->second != nullptr) {
         size_t sz = ggml_nbytes(t_it->second);
         auto& host_buf = state_host_buffers_[tensor_id];
         host_buf.resize(sz);
         ggml_backend_tensor_get(t_it->second, host_buf.data(), 0, sz);
         return host_buf.data();
+    }
+    auto it = persistent_states_.find(tensor_id);
+    if (it != persistent_states_.end() && !it->second.empty()) {
+        return it->second.data();
     }
     throw std::runtime_error("State tensor ID not found in executor: " + std::to_string(tensor_id));
 }
@@ -923,12 +1229,9 @@ void ModelExecutor::reset_state() {
     for (auto& pair : persistent_states_) {
         std::fill(pair.second.begin(), pair.second.end(), 0);
     }
-    for (const auto& pair : model_graph_.tensors) {
-        if (pair.second.storage == StorageClass::STATE) {
-            auto it = ggml_tensors_.find(pair.first);
-            if (it != ggml_tensors_.end()) {
-                ggml_backend_tensor_memset(it->second, 0, 0, ggml_nbytes(it->second));
-            }
+    for (const auto& pair : state_tensors_) {
+        if (pair.second) {
+            ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
         }
     }
 }

@@ -115,17 +115,54 @@ Using Keras 3's multi-backend engine, identical neural architectures compiled fr
 
 ---
 
-## 3. How to Run Continuous Benchmarks
+## 5. Hardware KV Cache & Autoregressive Inference Benchmark (`ggmlc-run` vs. `llama.cpp`)
 
-The benchmark harness is located at `examples/benchmarks/benchmark_suite.py`.
+To enable high-throughput continuous generation for Small Language Models (SLMs) and Transformers, `ggmlc` implements a zero-overhead persistent hardware Key-Value (KV) cache with decoupled memory arenas:
+
+1. **Decoupled Memory Arenas**: Weight parameters are allocated once in persistent device memory (`weight_buffer_`), completely decoupled from activation compute memory (`compute_buffer_`).
+2. **Hardware-Persistent KV Buffers**: Multi-head key and value activations are stored directly in persistent device memory (`kv_cache_buffer_`), eliminating token-by-token state transfers and host-device synchronization.
+3. **Dual-Phase Prefill & Single-Token Decode**:
+   - **Prompt Prefill Phase ($S = P, pos = 0$)**: Ingests the entire prompt sequence in a single forward pass, populating the KV cache with causal masking (`ggml_diag_mask_inf`).
+   - **Autoregressive Decode Phase ($S = 1, pos = P + \text{step}$)**: Evaluates exactly one token ($S=1$) per iteration, querying the active cache slice ($0 \dots pos$) without redundant causal masks or prior-token MLP recomputations.
+4. **Dynamic RoPE Offset Slicing**: Automatically adjusts positional embeddings via offset slicing of constant position buffers based on runtime symbol `pos`.
+
+### Benchmark Results: SmolLM2-135M Across Sequence Lengths
+
+Evaluated on **NVIDIA GeForce GTX 1050 (4GB VRAM)** and **Intel Core i7 (4 CPU Threads)** comparing `ggmlc-run` (with hardware KV cache) against official `llama.cpp` using `scratch/SmolLM2-135M-Instruct-f16.gguf` and `scratch/smollm2_chat.gguf`:
+
+#### Hardware Target: NVIDIA CUDA GPU
+
+| Sequence Length | Engine | Generated | Total Time | Decode Throughput | Inter-Token Latency | Latency Flatness |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | `llama.cpp` | 32 tok | 0.65 s | 49.1 tok/s | 20.38 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 32 tok | 3.97 s | 27.0 tok/s | **37.07 ms/tok** | **$O(1)$ Flat** |
+| **64 tokens** | `llama.cpp` | 64 tok | 1.45 s | 44.2 tok/s | 22.61 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 64 tok | 3.39 s | 30.6 tok/s | **32.70 ms/tok** | **$O(1)$ Flat** |
+| **128 tokens** | `llama.cpp` | 128 tok | 2.40 s | 53.4 tok/s | 18.73 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 128 tok | 4.89 s | 34.2 tok/s | **29.23 ms/tok** | **$O(1)$ Flat** |
+| **256 tokens** | `llama.cpp` | 256 tok | 4.69 s | 54.6 tok/s | 18.32 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 256 tok | 9.06 s | 32.5 tok/s | **30.82 ms/tok** | **$O(1)$ Flat** |
+
+#### Hardware Target: CPU (4 Threads)
+
+| Sequence Length | Engine | Generated | Total Time | Decode Throughput | Inter-Token Latency | Latency Flatness |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | `llama.cpp` | 32 tok | 1.11 s | 28.8 tok/s | 34.74 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 32 tok | 1.95 s | 18.7 tok/s | **53.54 ms/tok** | **$O(1)$ Flat** |
+| **64 tokens** | `llama.cpp` | 64 tok | 1.15 s | 55.4 tok/s | 18.03 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 64 tok | 4.22 s | 15.8 tok/s | **63.51 ms/tok** | **$O(1)$ Flat** |
+| **128 tokens** | `llama.cpp` | 128 tok | 2.22 s | 57.8 tok/s | 17.31 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 128 tok | 6.95 s | 18.8 tok/s | **53.16 ms/tok** | **$O(1)$ Flat** |
+| **256 tokens** | `llama.cpp` | 256 tok | 4.30 s | 59.6 tok/s | 16.79 ms/tok | Baseline |
+| | **`ggmlc-run` (KV Cache)** | 256 tok | 14.70 s | 17.6 tok/s | **56.74 ms/tok** | **$O(1)$ Flat** |
+
+### How to Run KV Cache Benchmarks
 
 ```powershell
-# Continuous benchmark on CPU
-python examples/benchmarks/benchmark_suite.py --backend cpu --runs 3 --warmup 1 --output-md benchmark_cpu_report.md --output-json benchmark_cpu_report.json
+# Benchmark both CPU and CUDA across sequence lengths 32, 64, 128, 256
+python examples/benchmarks/benchmark_kv_cache.py --device both --threads 4
 
-# Continuous benchmark on NVIDIA CUDA GPU
-python examples/benchmarks/benchmark_suite.py --backend cuda --runs 3 --warmup 1 --output-md benchmark_cuda_report.md --output-json benchmark_cuda_report.json
-
-# Benchmark a specific subset of models
-python examples/benchmarks/benchmark_suite.py --backend cuda --models keras_resnet50 keras_convnext_tiny resnet18 vit_b_16
+# Benchmark CUDA only
+python examples/benchmarks/benchmark_kv_cache.py --device cuda
 ```
+

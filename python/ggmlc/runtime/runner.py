@@ -251,6 +251,22 @@ class ModelRunner:
         """Resets all persistent state buffers in the executor."""
         self.executor.reset_state()
 
+    def init_kv_cache(self, max_ctx: int = 2048) -> None:
+        """Initializes hardware KV cache for autoregressive attention ops."""
+        if hasattr(self.executor, "init_kv_cache"):
+            self.executor.init_kv_cache(max_ctx)
+
+    def reset_kv_cache(self) -> None:
+        """Resets the KV cache memory to zeros."""
+        if hasattr(self.executor, "reset_kv_cache"):
+            self.executor.reset_kv_cache()
+
+    def has_kv_cache(self) -> bool:
+        """Returns True if the executor has active KV cache buffers."""
+        if hasattr(self.executor, "has_kv_cache"):
+            return bool(self.executor.has_kv_cache())
+        return False
+
 
 def load(
     model_source: str | Path | bytes,
