@@ -1,8 +1,10 @@
 if (GGMLC_ENABLE_CUDA)
     set(GGML_BACKEND_LIBS ggml ggml-base ggml-cpu ggml-cuda)
     add_compile_definitions(GGML_USE_CUDA)
+    set(CUDA_GRAPH_SOURCES src/cuda_graph.cu)
 else()
     set(GGML_BACKEND_LIBS ggml_lib)
+    set(CUDA_GRAPH_SOURCES src/cuda_graph_stub.cpp)
 endif()
 
 add_library(ggmlc_runtime STATIC
@@ -11,6 +13,7 @@ add_library(ggmlc_runtime STATIC
     src/stdlib_kernels.cpp
     src/pipeline/image.cpp
     src/pipeline/tokenizer.cpp
+    ${CUDA_GRAPH_SOURCES}
 )
 
 target_link_libraries(ggmlc_runtime PUBLIC
@@ -33,6 +36,7 @@ add_library(ggmlc_runtime_shared SHARED
     src/stdlib_kernels.cpp
     src/pipeline/image.cpp
     src/pipeline/tokenizer.cpp
+    ${CUDA_GRAPH_SOURCES}
 )
 
 target_link_libraries(ggmlc_runtime_shared PUBLIC
@@ -61,6 +65,7 @@ if (Python_FOUND)
             src/stdlib_kernels.cpp
             src/pipeline/image.cpp
             src/pipeline/tokenizer.cpp
+            ${CUDA_GRAPH_SOURCES}
         )
         target_link_libraries(_runtime PRIVATE ${GGML_BACKEND_LIBS})
         

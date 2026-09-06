@@ -26,7 +26,7 @@ def main():
         "--dtype",
         type=str,
         default="q4_0",
-        choices=["q4_0", "q8_0"],
+        choices=["f16", "q4_0", "q8_0"],
         help="Target quantization data type",
     )
     parser.add_argument(
@@ -43,7 +43,7 @@ def main():
     )
     args = parser.parse_args()
 
-    target_dtype = DType.Q4_0 if args.dtype == "q4_0" else DType.Q8_0
+    target_dtype = DType.from_str(args.dtype)
 
     print(f"Loading pretrained model '{args.model}'...")
     if args.model == "gpt2":

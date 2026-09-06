@@ -141,6 +141,14 @@ class ModelRunner:
                 if reg_sym not in symbol_env:
                     symbol_env[reg_sym] = int(val)
 
+        if "s" in symbol_env:
+            s_val = symbol_env["s"]
+            for sym in self.symbol_table:
+                if (sym.startswith("s") or "seq" in sym) and sym not in symbol_env:
+                    symbol_env[sym] = s_val
+            if len(self.symbol_table) == 1 and self.symbol_table[0] not in symbol_env:
+                symbol_env[self.symbol_table[0]] = s_val
+
         # 1. Prepare context for dynamic symbols
         self.executor.prepare(symbol_env)
 
@@ -250,6 +258,22 @@ class ModelRunner:
     def reset_state(self) -> None:
         """Resets all persistent state buffers in the executor."""
         self.executor.reset_state()
+
+    def init_kv_cache(self, max_ctx: int = 2048) -> None:
+        """Initializes hardware KV cache for autoregressive attention ops."""
+        if hasattr(self.executor, "init_kv_cache"):
+            self.executor.init_kv_cache(max_ctx)
+
+    def reset_kv_cache(self) -> None:
+        """Resets the KV cache memory to zeros."""
+        if hasattr(self.executor, "reset_kv_cache"):
+            self.executor.reset_kv_cache()
+
+    def has_kv_cache(self) -> bool:
+        """Returns True if the executor has active KV cache buffers."""
+        if hasattr(self.executor, "has_kv_cache"):
+            return bool(self.executor.has_kv_cache())
+        return False
 
 
 def load(

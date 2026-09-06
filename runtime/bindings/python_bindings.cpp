@@ -168,5 +168,11 @@ NB_MODULE(_runtime, m) {
             return std::vector<int64_t>(s.begin(), s.end());
         }, "tensor_id"_a)
         .def("get_tensor_size_bytes", &ggmlc::ModelExecutor::get_tensor_size_bytes, "tensor_id"_a)
-        .def("reset_state", &ggmlc::ModelExecutor::reset_state);
+        .def("reset_state", &ggmlc::ModelExecutor::reset_state)
+        .def("init_kv_cache", &ggmlc::ModelExecutor::init_kv_cache, "max_ctx"_a = 2048)
+        .def("reset_kv_cache", &ggmlc::ModelExecutor::reset_kv_cache)
+        .def("has_kv_cache", &ggmlc::ModelExecutor::has_kv_cache)
+        .def("set_enable_cuda_graph", &ggmlc::ModelExecutor::set_enable_cuda_graph, "enable"_a)
+        .def("is_cuda_graph_enabled", &ggmlc::ModelExecutor::is_cuda_graph_enabled)
+        .def("is_cuda_graph_captured", &ggmlc::ModelExecutor::is_cuda_graph_captured);
 }

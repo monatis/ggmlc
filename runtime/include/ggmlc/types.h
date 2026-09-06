@@ -64,6 +64,14 @@ struct DimExpr {
                 return 1;
         }
     }
+
+    bool is_static() const {
+        if (type == DimType::STATIC) return true;
+        if (type == DimType::SYMBOL) return false;
+        bool l = left ? left->is_static() : true;
+        bool r = right ? right->is_static() : true;
+        return l && r;
+    }
 };
 
 enum class StorageClass : int32_t {
@@ -84,6 +92,13 @@ struct SerializedTensor {
     uint64_t data_offset;
     uint64_t data_size;
     const uint8_t* data_ptr = nullptr;
+
+    bool is_static() const {
+        for (int d = 0; d < 4; ++d) {
+            if (ne[d] && !ne[d]->is_static()) return false;
+        }
+        return true;
+    }
 };
 
 struct SerializedOp {

@@ -152,19 +152,9 @@ def load_qwen_model(
                 q = apply_rope(q)
                 k = apply_rope(k)
 
-                def repeat_kv(x, kv_groups):
-                    if kv_groups == 1:
-                        return x
-                    heads = [
-                        x[:, i : i + 1, :, :].expand(-1, kv_groups, -1, -1)
-                        for i in range(x.shape[1])
-                    ]
-                    return torch.cat(heads, dim=1)
-
-                k = repeat_kv(k, self.kv_groups)
-                v = repeat_kv(v, self.kv_groups)
-
-                attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+                attn_out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, is_causal=True, enable_gqa=True
+                )
                 attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
                 attn_out = layer.self_attn.o_proj(attn_out)
                 h = residual + attn_out
@@ -266,19 +256,9 @@ def load_smollm2_model(
                 q = apply_rope(q)
                 k = apply_rope(k)
 
-                def repeat_kv(x, kv_groups):
-                    if kv_groups == 1:
-                        return x
-                    heads = [
-                        x[:, i : i + 1, :, :].expand(-1, kv_groups, -1, -1)
-                        for i in range(x.shape[1])
-                    ]
-                    return torch.cat(heads, dim=1)
-
-                k = repeat_kv(k, self.kv_groups)
-                v = repeat_kv(v, self.kv_groups)
-
-                attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+                attn_out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, is_causal=True, enable_gqa=True
+                )
                 attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
                 attn_proj = layer.self_attn.o_proj(attn_out)
                 h = residual + attn_proj
@@ -383,20 +363,8 @@ def load_gemma3_model(
                 q = (q * cos) + (rotate_half(q) * sin)
                 k = (k * cos) + (rotate_half(k) * sin)
 
-                if self.kv_groups > 1:
-                    k_slices = [
-                        k[:, i : i + 1].expand(-1, self.kv_groups, -1, -1)
-                        for i in range(self.num_kv_heads)
-                    ]
-                    v_slices = [
-                        v[:, i : i + 1].expand(-1, self.kv_groups, -1, -1)
-                        for i in range(self.num_kv_heads)
-                    ]
-                    k = torch.cat(k_slices, dim=1)
-                    v = torch.cat(v_slices, dim=1)
-
                 attn_out = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, is_causal=True, scale=self.scale
+                    q, k, v, is_causal=True, scale=self.scale, enable_gqa=True
                 )
                 attn_out = (
                     attn_out.transpose(1, 2)
