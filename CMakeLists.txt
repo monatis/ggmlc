@@ -81,10 +81,12 @@ else()
     target_compile_definitions(ggml_lib PUBLIC
         _GNU_SOURCE
         GGML_USE_CPU
-        GGML_USE_LLAMAFILE
         GGML_VERSION="0.1.0"
         GGML_COMMIT="master"
     )
+    if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+        target_compile_definitions(ggml_lib PUBLIC GGML_USE_LLAMAFILE)
+    endif()
     find_package(Threads REQUIRED)
     target_link_libraries(ggml_lib PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 

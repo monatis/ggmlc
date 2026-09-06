@@ -254,6 +254,25 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
     if (kv_cache_buffer_) return;
     kv_cache_max_ctx_ = max_ctx;
 
+    // Only enable KV cache if model supports positional offsets (RoPE or explicit pos symbol).
+    // Models with absolute position embeddings hardcoded to input length (e.g. GPT-2)
+    // require full sequence evaluation during autoregressive decode.
+    bool has_rope = false;
+    for (const auto& op : model_graph_.ops) {
+        if (op.opcode == GGML_OP_ROPE) {
+            has_rope = true;
+            break;
+        }
+    }
+    bool has_pos_sym = false;
+    for (const auto& sym : model_graph_.symbol_table) {
+        if (sym == "pos") {
+            has_pos_sym = true;
+            break;
+        }
+    }
+    if (!has_rope && !has_pos_sym) return;
+
     std::vector<const SerializedOp*> attn_ops;
     for (const auto& op : model_graph_.ops) {
         if (op.opcode == GGML_OP_FLASH_ATTN_EXT) {
@@ -1337,12 +1356,18 @@ void ModelExecutor::run(int n_threads) {
 }
 
 void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_bytes) {
+    struct ggml_tensor* g_t = nullptr;
     auto it = state_tensors_.find(tensor_id);
-    if (it == state_tensors_.end()) {
-        it = ggml_tensors_.find(tensor_id);
+    if (it != state_tensors_.end()) {
+        g_t = it->second;
+    } else {
+        auto g_it = ggml_tensors_.find(tensor_id);
+        if (g_it != ggml_tensors_.end()) {
+            g_t = g_it->second;
+        }
     }
-    if (it != state_tensors_.end() && it->second && ggml_nbytes(it->second) == size_bytes) {
-        ggml_backend_tensor_set(it->second, data, 0, size_bytes);
+    if (g_t != nullptr && ggml_nbytes(g_t) == size_bytes) {
+        ggml_backend_tensor_set(g_t, data, 0, size_bytes);
     }
     persistent_states_[tensor_id].assign(reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + size_bytes);
 }
@@ -1358,15 +1383,21 @@ void ModelExecutor::set_state_by_name(const std::string& name, const void* data,
 }
 
 const void* ModelExecutor::get_state_data(uint32_t tensor_id) {
+    struct ggml_tensor* g_t = nullptr;
     auto t_it = state_tensors_.find(tensor_id);
-    if (t_it == state_tensors_.end()) {
-        t_it = ggml_tensors_.find(tensor_id);
+    if (t_it != state_tensors_.end()) {
+        g_t = t_it->second;
+    } else {
+        auto g_it = ggml_tensors_.find(tensor_id);
+        if (g_it != ggml_tensors_.end()) {
+            g_t = g_it->second;
+        }
     }
-    if (t_it != state_tensors_.end() && t_it->second != nullptr) {
-        size_t sz = ggml_nbytes(t_it->second);
+    if (g_t != nullptr) {
+        size_t sz = ggml_nbytes(g_t);
         auto& host_buf = state_host_buffers_[tensor_id];
         host_buf.resize(sz);
-        ggml_backend_tensor_get(t_it->second, host_buf.data(), 0, sz);
+        ggml_backend_tensor_get(g_t, host_buf.data(), 0, sz);
         return host_buf.data();
     }
     auto it = persistent_states_.find(tensor_id);
@@ -1423,9 +1454,9 @@ size_t ModelExecutor::get_tensor_size_bytes(uint32_t tensor_id) const {
     }
     size_t sz = ggml_nbytes(it->second);
     if (sz == 0) {
-        fprintf(stderr, "[DEBUG] tensor %u ne=[%lld,%lld,%lld,%lld] type=%d blck_size=%zu type_size=%zu\n",
+        fprintf(stderr, "[DEBUG] tensor %u ne=[%lld,%lld,%lld,%lld] type=%d blck_size=%lld type_size=%zu\n",
             tensor_id, (long long)it->second->ne[0], (long long)it->second->ne[1], (long long)it->second->ne[2], (long long)it->second->ne[3],
-            it->second->type, ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
+            it->second->type, (long long)ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
     }
     return sz;
 }
