@@ -375,6 +375,10 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
             }
         }
     }
+
+    if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+        cuda_graph_needs_update_ = true;
+    }
 }
 
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
@@ -413,6 +417,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     decode_graph_cached_ = false;
     decode_attn_views_.clear();
     decode_rope_arange_tensors_.clear();
+    if (cuda_graph_mgr_) {
+        cuda_graph_mgr_->reset();
+    }
+    cuda_graph_needs_update_ = false;
 
     if (buffer_) {
         ggml_backend_buffer_free(buffer_);
@@ -1264,6 +1272,20 @@ void ModelExecutor::set_input_by_name(const std::string& name, const void* data,
     throw std::runtime_error("Tensor name not found in model: " + name);
 }
 
+void ModelExecutor::set_enable_cuda_graph(bool enable) {
+    enable_cuda_graph_ = enable;
+    if (enable && is_cuda_ && !cuda_graph_mgr_) {
+        cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
+        if (backend_) {
+            cuda_graph_mgr_->init(backend_);
+        }
+    }
+}
+
+bool ModelExecutor::is_cuda_graph_captured() const {
+    return cuda_graph_mgr_ && cuda_graph_mgr_->is_captured();
+}
+
 void ModelExecutor::run(int n_threads) {
     if (!ctx_ || !cgraph_ || !backend_) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
@@ -1271,6 +1293,41 @@ void ModelExecutor::run(int n_threads) {
     if (ggml_backend_is_cpu(backend_)) {
         ggml_backend_cpu_set_n_threads(backend_, n_threads);
     }
+
+    if (is_cuda_ && enable_cuda_graph_) {
+        if (!cuda_graph_mgr_) {
+            cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
+        }
+        if (!cuda_graph_mgr_->is_initialized()) {
+            cuda_graph_mgr_->init(backend_);
+        }
+
+        if (cuda_graph_mgr_->is_initialized()) {
+            if (!cuda_graph_mgr_->is_captured()) {
+                // First run: capture stream and instantiate CUDA graph
+                if (cuda_graph_mgr_->begin_capture()) {
+                    ggml_backend_graph_compute_async(backend_, cgraph_);
+                    if (cuda_graph_mgr_->end_capture_and_instantiate()) {
+                        cuda_graph_needs_update_ = false;
+                        if (cuda_graph_mgr_->launch()) {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                // Subsequent run: update if pos changed or execute directly
+                if (cuda_graph_needs_update_) {
+                    cuda_graph_mgr_->update_executable(cgraph_, backend_);
+                    cuda_graph_needs_update_ = false;
+                }
+                if (cuda_graph_mgr_->launch()) {
+                    return;
+                }
+            }
+        }
+        // Fallback to standard compute if graph capture/launch failed
+    }
+
     enum ggml_status status = ggml_backend_graph_compute(backend_, cgraph_);
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("GGML backend graph compute failed with status: " + std::to_string(status));

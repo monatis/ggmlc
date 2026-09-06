@@ -639,9 +639,7 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
     2. MLP Gate + Up projections:
        Linear(x, W_gate) & Linear(x, W_up) -> Linear(x, [W_gate; W_up]) followed by slices.
     """
-    linear_ops = [
-        n for n in graph.nodes if n.opcode == OpCode.LINEAR and len(n.inputs) >= 2
-    ]
+    linear_ops = [n for n in graph.nodes if n.opcode == OpCode.LINEAR and len(n.inputs) >= 2]
     if len(linear_ops) < 2:
         return
 
@@ -723,7 +721,18 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
         total_out_dim = int(fused_w_data.shape[0])
         fused_w_shape = Shape([StaticDim(total_out_dim), StaticDim(d_in)])
         fused_w_name = weights[0].name
-        for old_part in ("gate_proj", "up_proj", "q_proj", "k_proj", "v_proj", "query", "key", "value", "w1", "w3"):
+        for old_part in (
+            "gate_proj",
+            "up_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "query",
+            "key",
+            "value",
+            "w1",
+            "w3",
+        ):
             if old_part in fused_w_name:
                 fused_w_name = fused_w_name.replace(old_part, f"fused_{tag}")
                 break
@@ -750,7 +759,18 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
             fused_b_data = np.ascontiguousarray(np.concatenate([b.data for b in biases], axis=0))
             fused_b_shape = Shape([StaticDim(total_out_dim)])
             fused_b_name = biases[0].name
-            for old_part in ("gate_proj", "up_proj", "q_proj", "k_proj", "v_proj", "query", "key", "value", "w1", "w3"):
+            for old_part in (
+                "gate_proj",
+                "up_proj",
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "query",
+                "key",
+                "value",
+                "w1",
+                "w3",
+            ):
                 if old_part in fused_b_name:
                     fused_b_name = fused_b_name.replace(old_part, f"fused_{tag}")
                     break
@@ -846,7 +866,9 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
             mlp_group = None
             if gate_op and up_op and gate_op.id != up_op.id:
                 mlp_group = [gate_op, up_op]
-            elif len(remaining) == 2 and not any(_is_q(op) or _is_k(op) or _is_v(op) for op in remaining):
+            elif len(remaining) == 2 and not any(
+                _is_q(op) or _is_k(op) or _is_v(op) for op in remaining
+            ):
                 mlp_group = list(remaining)
 
             if mlp_group is not None and _fuse_subgroup(mlp_group, in_id, "gate_up"):
@@ -862,4 +884,3 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
             else:
                 new_nodes.append(op)
         graph.nodes = new_nodes
-

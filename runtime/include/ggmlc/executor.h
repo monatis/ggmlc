@@ -8,6 +8,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggmlc/types.h"
+#include "ggmlc/cuda_graph.h"
 
 namespace ggmlc {
 
@@ -62,6 +63,11 @@ public:
     void reset_kv_cache();
     bool has_kv_cache() const { return kv_cache_buffer_ != nullptr; }
     void set_decode_pos(int64_t pos);
+
+    // CUDA Graph execution
+    void set_enable_cuda_graph(bool enable);
+    bool is_cuda_graph_enabled() const { return enable_cuda_graph_; }
+    bool is_cuda_graph_captured() const;
 
 private:
     void init_weights();
@@ -125,6 +131,11 @@ private:
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;
     bool prepared_ = false;
+
+    // CUDA Graph Management
+    bool enable_cuda_graph_ = false;
+    std::unique_ptr<CUDAGraphManager> cuda_graph_mgr_;
+    bool cuda_graph_needs_update_ = false;
 };
 
 } // namespace ggmlc

@@ -35,7 +35,9 @@ class Graph:
 
     def new_op_id(self) -> int:
         if self.nodes:
-            self._next_op_id = max(self._next_op_id, max((n.id for n in self.nodes), default=-1) + 1)
+            self._next_op_id = max(
+                self._next_op_id, max((n.id for n in self.nodes), default=-1) + 1
+            )
         oid = self._next_op_id
         self._next_op_id += 1
         return oid

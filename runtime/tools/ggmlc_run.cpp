@@ -38,6 +38,7 @@ static void print_help(const char* prog_name) {
               << "Execution & Hardware Options:\n"
               << "  --device <cpu|cuda>         Execution device (default: cpu)\n"
               << "  --threads <N>               Number of CPU execution threads (default: 1)\n"
+              << "  --cuda-graph                Enable CUDA graph capture for low-latency GPU execution\n"
               << "  --unplanned                 Disable memory arena reuse planning (for debugging)\n"
               << "  --symbol <key=value>        Bind dynamic symbol (e.g. s=128)\n\n"
               << "Raw Tensor I/O Options:\n"
@@ -160,6 +161,7 @@ int main(int argc, char** argv) {
     std::string device_name = "cpu";
     int n_threads = 1;
     bool unplanned = false;
+    bool use_cuda_graph = false;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -168,6 +170,8 @@ int main(int argc, char** argv) {
             return 0;
         } else if (arg == "--info") {
             show_info = true;
+        } else if (arg == "--cuda-graph") {
+            use_cuda_graph = true;
         } else if (arg == "--prompt" && i + 1 < argc) {
             prompt_text = argv[++i];
             is_generate = true;
@@ -335,6 +339,9 @@ int main(int argc, char** argv) {
             }
 
             ggmlc::ModelExecutor executor(model_graph, device_name);
+            if (use_cuda_graph) {
+                executor.set_enable_cuda_graph(true);
+            }
             auto t_start = std::chrono::high_resolution_clock::now();
             auto t_prefill_end = t_start;
             auto t_decode_start = t_start;
@@ -515,6 +522,9 @@ int main(int argc, char** argv) {
         // Mode B: Standard One-Shot Graph Execution
         // ====================================================================
         ggmlc::ModelExecutor executor(model_graph, device_name);
+        if (use_cuda_graph) {
+            executor.set_enable_cuda_graph(true);
+        }
         executor.prepare(symbol_env, !unplanned);
 
         // Load initial state data if provided

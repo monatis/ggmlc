@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 
 import numpy as np
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
@@ -41,10 +40,26 @@ def test_horizontal_mlp_fusion():
     w_up_data = np.random.randn(d_ff, d_in).astype(np.float32)
 
     t_x = g.add_tensor("x", Shape.from_tuple((1, 4, d_in)), DType.F32, StorageClass.INPUT)
-    t_w_gate = g.add_tensor("gate_proj.weight", Shape.from_tuple((d_ff, d_in)), DType.F32, StorageClass.PARAMETER, data=w_gate_data)
-    t_w_up = g.add_tensor("up_proj.weight", Shape.from_tuple((d_ff, d_in)), DType.F32, StorageClass.PARAMETER, data=w_up_data)
-    t_gate_out = g.add_tensor("gate_out", Shape.from_tuple((1, 4, d_ff)), DType.F32, StorageClass.OUTPUT)
-    t_up_out = g.add_tensor("up_out", Shape.from_tuple((1, 4, d_ff)), DType.F32, StorageClass.OUTPUT)
+    t_w_gate = g.add_tensor(
+        "gate_proj.weight",
+        Shape.from_tuple((d_ff, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w_gate_data,
+    )
+    t_w_up = g.add_tensor(
+        "up_proj.weight",
+        Shape.from_tuple((d_ff, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w_up_data,
+    )
+    t_gate_out = g.add_tensor(
+        "gate_out", Shape.from_tuple((1, 4, d_ff)), DType.F32, StorageClass.OUTPUT
+    )
+    t_up_out = g.add_tensor(
+        "up_out", Shape.from_tuple((1, 4, d_ff)), DType.F32, StorageClass.OUTPUT
+    )
 
     g.inputs = [t_x.id]
     g.parameters = [t_w_gate.id, t_w_up.id]
@@ -55,7 +70,9 @@ def test_horizontal_mlp_fusion():
 
     # 1. Unfused reference
     g_unfused = copy.deepcopy(g)
-    fuse_operations(g_unfused, FusionOptions(enable_horizontal_mlp=False, enable_horizontal_qkv=False))
+    fuse_operations(
+        g_unfused, FusionOptions(enable_horizontal_mlp=False, enable_horizontal_qkv=False)
+    )
     linear_ops_unfused = [op for op in g_unfused.nodes if op.opcode == OpCode.LINEAR]
     slice_ops_unfused = [op for op in g_unfused.nodes if op.opcode == OpCode.SLICE]
     assert len(linear_ops_unfused) == 2
@@ -96,9 +113,27 @@ def test_horizontal_qkv_fusion():
     w_v_data = np.random.randn(d_v, d_in).astype(np.float32)
 
     t_x = g.add_tensor("x", Shape.from_tuple((1, 4, d_in)), DType.F32, StorageClass.INPUT)
-    t_w_q = g.add_tensor("self_attn.q_proj.weight", Shape.from_tuple((d_q, d_in)), DType.F32, StorageClass.PARAMETER, data=w_q_data)
-    t_w_k = g.add_tensor("self_attn.k_proj.weight", Shape.from_tuple((d_k, d_in)), DType.F32, StorageClass.PARAMETER, data=w_k_data)
-    t_w_v = g.add_tensor("self_attn.v_proj.weight", Shape.from_tuple((d_v, d_in)), DType.F32, StorageClass.PARAMETER, data=w_v_data)
+    t_w_q = g.add_tensor(
+        "self_attn.q_proj.weight",
+        Shape.from_tuple((d_q, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w_q_data,
+    )
+    t_w_k = g.add_tensor(
+        "self_attn.k_proj.weight",
+        Shape.from_tuple((d_k, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w_k_data,
+    )
+    t_w_v = g.add_tensor(
+        "self_attn.v_proj.weight",
+        Shape.from_tuple((d_v, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w_v_data,
+    )
     t_q_out = g.add_tensor("q_out", Shape.from_tuple((1, 4, d_q)), DType.F32, StorageClass.OUTPUT)
     t_k_out = g.add_tensor("k_out", Shape.from_tuple((1, 4, d_k)), DType.F32, StorageClass.OUTPUT)
     t_v_out = g.add_tensor("v_out", Shape.from_tuple((1, 4, d_v)), DType.F32, StorageClass.OUTPUT)
@@ -146,10 +181,34 @@ def test_horizontal_fusion_with_bias():
     b2_data = np.random.randn(d_out2).astype(np.float32)
 
     t_x = g.add_tensor("x", Shape.from_tuple((2, 3, d_in)), DType.F32, StorageClass.INPUT)
-    t_w1 = g.add_tensor("mlp.gate_proj.weight", Shape.from_tuple((d_out1, d_in)), DType.F32, StorageClass.PARAMETER, data=w1_data)
-    t_b1 = g.add_tensor("mlp.gate_proj.bias", Shape.from_tuple((d_out1,)), DType.F32, StorageClass.PARAMETER, data=b1_data)
-    t_w2 = g.add_tensor("mlp.up_proj.weight", Shape.from_tuple((d_out2, d_in)), DType.F32, StorageClass.PARAMETER, data=w2_data)
-    t_b2 = g.add_tensor("mlp.up_proj.bias", Shape.from_tuple((d_out2,)), DType.F32, StorageClass.PARAMETER, data=b2_data)
+    t_w1 = g.add_tensor(
+        "mlp.gate_proj.weight",
+        Shape.from_tuple((d_out1, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w1_data,
+    )
+    t_b1 = g.add_tensor(
+        "mlp.gate_proj.bias",
+        Shape.from_tuple((d_out1,)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=b1_data,
+    )
+    t_w2 = g.add_tensor(
+        "mlp.up_proj.weight",
+        Shape.from_tuple((d_out2, d_in)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=w2_data,
+    )
+    t_b2 = g.add_tensor(
+        "mlp.up_proj.bias",
+        Shape.from_tuple((d_out2,)),
+        DType.F32,
+        StorageClass.PARAMETER,
+        data=b2_data,
+    )
     t_out1 = g.add_tensor("out1", Shape.from_tuple((2, 3, d_out1)), DType.F32, StorageClass.OUTPUT)
     t_out2 = g.add_tensor("out2", Shape.from_tuple((2, 3, d_out2)), DType.F32, StorageClass.OUTPUT)
 
@@ -177,4 +236,3 @@ def test_horizontal_fusion_with_bias():
     out_unfused = runner_unfused(x_data)
     out_fused = runner_fused(x_data)
     _compare_outputs(out_unfused, out_fused)
-
