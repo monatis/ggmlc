@@ -4,7 +4,7 @@ if (GGMLC_ENABLE_CUDA)
     set(CUDA_GRAPH_SOURCES src/cuda_graph.cu)
 else()
     set(GGML_BACKEND_LIBS ggml_lib)
-    set(CUDA_GRAPH_SOURCES "")
+    set(CUDA_GRAPH_SOURCES src/cuda_graph_stub.cpp)
 endif()
 
 add_library(ggmlc_runtime STATIC
