@@ -130,36 +130,38 @@ To enable high-throughput continuous generation for Small Language Models (SLMs)
 7. **Native F16 Weight Quantization (with 1D F32 Preservation)**: Multi-dimensional weight matrices are quantized to `GGML_TYPE_F16` while strictly retaining 1D vectors (RMSNorm weights, biases, RoPE frequencies) in F32 to preserve numerical stability and prevent activation drift.
 8. **Native GQA Attention Lowering**: Directly lowers PyTorch Grouped Query Attention (`scaled_dot_product_attention(enable_gqa=True)`) into `ggml_flash_attn_ext`, eliminating 240 redundant slice/expand/concat ops per forward pass and slashing KV cache write operations by 3x.
 9. **llamafile AVX2/FMA GEMV Microkernels**: Incorporates hand-tuned assembly GEMV matrix-vector multiplication kernels for CPU autoregressive decode via `GGML_LLAMAFILE=ON`.
+10. **Horizontal Operator Fusion (`Gate + Up` and `Q + K + V`)**: Compiler pattern-matching pass automatically detects and concatenates parallel linear projections sharing identical input activations (`[W_gate ; W_up]` and `[W_q ; W_k ; W_v]`). Slashes 90 CUDA kernel dispatches per token (from 5 down to 2 GEMVs per layer), bypasses WDDM driver launch queue latency on Windows, and eliminates 90 redundant weight tensors from the serialized GGUF model container.
+11. **Zero-Copy View Slicing Optimization**: Bypasses redundant `ggml_cont` memory copies in `GGML_OP_VIEW` via contiguous tensor detection (`ggml_is_contiguous(v) ? v : ggml_cont(ctx_, v)`), enabling zero-overhead zero-copy view slicing for single-token decode ($S=1$).
 
 ### Benchmark Results: SmolLM2-135M Across Sequence Lengths
 
-Evaluated on **NVIDIA GeForce GTX 1050 (4GB VRAM)** and **Intel Core i7 (4 CPU Threads)** comparing `ggmlc-run` (with hardware KV cache, native GQA, & static decode caching) against official `llama.cpp` using `scratch/SmolLM2-135M-Instruct-f16.gguf` and `scratch/smollm2_chat.gguf`:
+Evaluated on **NVIDIA GeForce GTX 1050 (4GB VRAM)** and **Intel Core i7 (4 CPU Threads)** comparing `ggmlc-run` (with hardware KV cache, native GQA, horizontal fusion & static decode caching) against official `llama.cpp` using `scratch/SmolLM2-135M-Instruct-f16.gguf` and `scratch/smollm2_chat.gguf`:
 
 #### Hardware Target: NVIDIA CUDA GPU
 
 | Sequence Length | Engine | Generated | Total Time | Decode Throughput | Inter-Token Latency | vs. `llama.cpp` |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **32 tokens** | `llama.cpp` | 32 tok | 0.49 s | 64.8 tok/s | 15.43 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 32 tok | 1.45 s | **74.3 tok/s** | **13.46 ms/tok** | **1.15x Faster** |
-| **64 tokens** | `llama.cpp` | 64 tok | 1.21 s | 52.8 tok/s | 18.93 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 64 tok | 2.09 s | **80.7 tok/s** | **12.40 ms/tok** | **1.53x Faster** |
-| **128 tokens** | `llama.cpp` | 128 tok | 2.44 s | 52.5 tok/s | 19.06 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 128 tok | 2.84 s | **80.0 tok/s** | **12.50 ms/tok** | **1.52x Faster** |
-| **256 tokens** | `llama.cpp` | 256 tok | 4.66 s | 54.9 tok/s | 18.21 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 256 tok | 4.28 s | **83.0 tok/s** | **12.05 ms/tok** | **1.51x Faster** |
+| **32 tokens** | `llama.cpp` | 32 tok | 0.59 s | 54.4 tok/s | 18.37 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 32 tok | 1.50 s | **73.4 tok/s** | **13.63 ms/tok** | **1.35x Faster** |
+| **64 tokens** | `llama.cpp` | 64 tok | 1.39 s | 46.2 tok/s | 21.65 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 64 tok | 2.10 s | **75.9 tok/s** | **13.18 ms/tok** | **1.64x Faster** |
+| **128 tokens** | `llama.cpp` | 128 tok | 2.69 s | 47.6 tok/s | 20.99 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 128 tok | 2.97 s | **78.4 tok/s** | **12.76 ms/tok** | **1.65x Faster** |
+| **256 tokens** | `llama.cpp` | 256 tok | 5.23 s | 48.9 tok/s | 20.45 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 256 tok | 4.46 s | **79.2 tok/s** | **12.63 ms/tok** | **1.62x Faster** |
 
 #### Hardware Target: CPU (4 Threads)
 
 | Sequence Length | Engine | Generated | Total Time | Decode Throughput | Inter-Token Latency | vs. `llama.cpp` |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **32 tokens** | `llama.cpp` | 32 tok | 0.72 s | 44.8 tok/s | 22.35 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 32 tok | 0.63 s | **61.3 tok/s** | **16.30 ms/tok** | **1.37x Faster** |
-| **64 tokens** | `llama.cpp` | 64 tok | 1.04 s | 61.8 tok/s | 16.18 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 64 tok | 1.05 s | **67.0 tok/s** | **14.92 ms/tok** | **1.08x Faster** |
-| **128 tokens** | `llama.cpp` | 128 tok | 1.99 s | 64.3 tok/s | 15.54 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 128 tok | 2.06 s | **65.1 tok/s** | **15.37 ms/tok** | **1.01x Faster** |
-| **256 tokens** | `llama.cpp` | 256 tok | 3.54 s | 72.4 tok/s | 13.81 ms/tok | Baseline |
-| | **`ggmlc-run` (Optimized)** | 182 tok | 2.59 s | **72.8 tok/s** | **13.73 ms/tok** | **1.01x Faster** |
+| **32 tokens** | `llama.cpp` | 32 tok | 0.89 s | 36.2 tok/s | 27.66 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 32 tok | 0.64 s | **60.0 tok/s** | **16.68 ms/tok** | **1.66x Faster** |
+| **64 tokens** | `llama.cpp` | 64 tok | 1.68 s | 38.0 tok/s | 26.29 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 64 tok | 1.08 s | **65.1 tok/s** | **15.36 ms/tok** | **1.71x Faster** |
+| **128 tokens** | `llama.cpp` | 128 tok | 2.00 s | 64.1 tok/s | 15.60 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 128 tok | 2.11 s | **64.8 tok/s** | **15.44 ms/tok** | **1.01x Faster** |
+| **256 tokens** | `llama.cpp` | 256 tok | 4.31 s | 59.4 tok/s | 16.83 ms/tok | Baseline |
+| | **`ggmlc-run` (Optimized)** | 182 tok | 3.01 s | **62.6 tok/s** | **15.98 ms/tok** | **1.05x Faster** |
 
 ### How to Run KV Cache Benchmarks
 

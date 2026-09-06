@@ -985,7 +985,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 size_t nb1 = in0->nb[1] * (g_dim == 1 ? step : 1);
                 size_t nb2 = in0->nb[2] * (g_dim == 2 ? step : 1);
                 size_t nb3 = in0->nb[3] * (g_dim == 3 ? step : 1);
-                result = ggml_cont(ctx_, ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset));
+                struct ggml_tensor* v = ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset);
+                result = ggml_is_contiguous(v) ? v : ggml_cont(ctx_, v);
                 break;
             }
             case GGML_OP_ARGMAX: {

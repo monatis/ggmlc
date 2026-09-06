@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+import numpy as np
 
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode, Operation
+from ggmlc.ir.shape import Shape, StaticDim
 from ggmlc.ir.tensor import StorageClass
 from ggmlc.transforms.base import GraphTransformResult, Pass, PassStats
 
@@ -20,6 +24,8 @@ class FusionOptions:
     enable_swiglu: bool = True
     enable_conv2d_relu: bool = True
     enable_softmax: bool = True
+    enable_horizontal_mlp: bool = True
+    enable_horizontal_qkv: bool = True
 
 
 class OperatorFusionPass(Pass):
@@ -78,6 +84,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
 
     if options.enable_bias_gelu:
         _fuse_bias_gelu_patterns(graph)
+
+    if options.enable_horizontal_mlp or options.enable_horizontal_qkv:
+        _fuse_horizontal_linear_patterns(graph, options)
 
     return graph
 
@@ -619,3 +628,238 @@ def _fuse_softmax_patterns(graph: Graph) -> None:
 
     if ops_to_remove:
         graph.nodes = [n for n in graph.nodes if n.id not in ops_to_remove]
+
+
+def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> None:
+    """Matches parallel LINEAR operations consuming the same input activation and fuses them.
+
+    Specifically targets:
+    1. Attention Q + K + V projections:
+       Linear(x, W_q) & Linear(x, W_k) & Linear(x, W_v) -> Linear(x, [W_q; W_k; W_v]) followed by slices.
+    2. MLP Gate + Up projections:
+       Linear(x, W_gate) & Linear(x, W_up) -> Linear(x, [W_gate; W_up]) followed by slices.
+    """
+    linear_ops = [
+        n for n in graph.nodes if n.opcode == OpCode.LINEAR and len(n.inputs) >= 2
+    ]
+    if len(linear_ops) < 2:
+        return
+
+    # Group linear ops by input activation ID
+    by_input: dict[int, list[Operation]] = {}
+    for op in linear_ops:
+        w = graph.get_tensor(op.inputs[1])
+        if (
+            w is not None
+            and w.storage == StorageClass.PARAMETER
+            and w.data is not None
+            and hasattr(w.data, "ndim")
+            and w.data.ndim == 2
+        ):
+            by_input.setdefault(op.inputs[0], []).append(op)
+
+    node_index_map = {op.id: i for i, op in enumerate(graph.nodes)}
+    nodes_to_replace: dict[int, list[Operation]] = {}
+    ops_to_remove: set[int] = set()
+
+    def _is_q(op: Operation) -> bool:
+        w = graph.get_tensor(op.inputs[1])
+        names = f"{op.name or ''} {w.name if w else ''}".lower()
+        return bool(re.search(r"(?:^|[._])(?:q|query)(?:_proj|[._]|$)", names))
+
+    def _is_k(op: Operation) -> bool:
+        w = graph.get_tensor(op.inputs[1])
+        names = f"{op.name or ''} {w.name if w else ''}".lower()
+        return bool(re.search(r"(?:^|[._])(?:k|key)(?:_proj|[._]|$)", names))
+
+    def _is_v(op: Operation) -> bool:
+        w = graph.get_tensor(op.inputs[1])
+        names = f"{op.name or ''} {w.name if w else ''}".lower()
+        return bool(re.search(r"(?:^|[._])(?:v|value)(?:_proj|[._]|$)", names))
+
+    def _is_gate(op: Operation) -> bool:
+        w = graph.get_tensor(op.inputs[1])
+        names = f"{op.name or ''} {w.name if w else ''}".lower()
+        return bool(re.search(r"(?:^|[._])(?:gate|w1)(?:_proj|[._]|$)", names))
+
+    def _is_up(op: Operation) -> bool:
+        w = graph.get_tensor(op.inputs[1])
+        names = f"{op.name or ''} {w.name if w else ''}".lower()
+        return bool(re.search(r"(?:^|[._])(?:up|w3)(?:_proj|[._]|$)", names))
+
+    def _fuse_subgroup(cands: list[Operation], in_id: int, tag: str) -> bool:
+        if len(cands) < 2:
+            return False
+
+        in_act = graph.get_tensor(in_id)
+        if in_act is None:
+            return False
+
+        weights = [graph.get_tensor(op.inputs[1]) for op in cands]
+        if any(w is None or w.data is None or w.data.ndim != 2 for w in weights):
+            return False
+
+        d_in = weights[0].data.shape[1]
+        if not all(w.data.shape[1] == d_in for w in weights):
+            return False
+
+        # Bias verification
+        has_bias = [len(op.inputs) > 2 for op in cands]
+        if any(has_bias) and not all(has_bias):
+            return False
+
+        biases = None
+        if all(has_bias):
+            biases = [graph.get_tensor(op.inputs[2]) for op in cands]
+            if any(b is None or b.data is None or b.data.ndim != 1 for b in biases):
+                return False
+            if not all(b.data.shape[0] == w.data.shape[0] for b, w in zip(biases, weights)):
+                return False
+
+        out_dims = [int(w.data.shape[0]) for w in weights]
+
+        # 1. Concatenate weights along dimension 0 (out_features)
+        fused_w_data = np.ascontiguousarray(np.concatenate([w.data for w in weights], axis=0))
+        total_out_dim = int(fused_w_data.shape[0])
+        fused_w_shape = Shape([StaticDim(total_out_dim), StaticDim(d_in)])
+        fused_w_name = weights[0].name
+        for old_part in ("gate_proj", "up_proj", "q_proj", "k_proj", "v_proj", "query", "key", "value", "w1", "w3"):
+            if old_part in fused_w_name:
+                fused_w_name = fused_w_name.replace(old_part, f"fused_{tag}")
+                break
+        else:
+            fused_w_name = f"{weights[0].name}_{tag}_fused"
+
+        fused_w = graph.add_tensor(
+            name=fused_w_name,
+            shape=fused_w_shape,
+            dtype=weights[0].dtype,
+            storage=StorageClass.PARAMETER,
+            data=fused_w_data,
+        )
+        graph.parameters.append(fused_w.id)
+        for w in weights:
+            if w.id in graph.parameters:
+                graph.parameters.remove(w.id)
+            w.data = None
+            graph.tensors.pop(w.id, None)
+
+        # 2. Concatenate biases along dimension 0 if present
+        fused_b_id = None
+        if biases is not None:
+            fused_b_data = np.ascontiguousarray(np.concatenate([b.data for b in biases], axis=0))
+            fused_b_shape = Shape([StaticDim(total_out_dim)])
+            fused_b_name = biases[0].name
+            for old_part in ("gate_proj", "up_proj", "q_proj", "k_proj", "v_proj", "query", "key", "value", "w1", "w3"):
+                if old_part in fused_b_name:
+                    fused_b_name = fused_b_name.replace(old_part, f"fused_{tag}")
+                    break
+            else:
+                fused_b_name = f"{biases[0].name}_{tag}_fused"
+
+            fused_b = graph.add_tensor(
+                name=fused_b_name,
+                shape=fused_b_shape,
+                dtype=biases[0].dtype,
+                storage=StorageClass.PARAMETER,
+                data=fused_b_data,
+            )
+            graph.parameters.append(fused_b.id)
+            for b in biases:
+                if b.id in graph.parameters:
+                    graph.parameters.remove(b.id)
+                b.data = None
+                graph.tensors.pop(b.id, None)
+            fused_b_id = fused_b.id
+
+        # 3. Create fused activation tensor
+        fused_act_shape = Shape(list(in_act.shape.dims[:-1]) + [StaticDim(total_out_dim)])
+        fused_act = graph.add_tensor(
+            name=f"{in_act.name}_{tag}_fused",
+            shape=fused_act_shape,
+            dtype=in_act.dtype,
+            storage=StorageClass.ACTIVATION,
+        )
+
+        # 4. Create fused LINEAR operation
+        linear_inputs = [in_id, fused_w.id]
+        if fused_b_id is not None:
+            linear_inputs.append(fused_b_id)
+
+        fused_linear_op = Operation(
+            id=graph.new_op_id(),
+            opcode=OpCode.LINEAR,
+            inputs=linear_inputs,
+            outputs=[fused_act.id],
+            name=f"linear_fused_{tag}_{d_in}_to_{total_out_dim}",
+        )
+        fused_act.producer_id = fused_linear_op.id
+
+        # 5. Create slice operations
+        slice_ops = []
+        curr_offset = 0
+        for op, out_d in zip(cands, out_dims):
+            slice_op = Operation(
+                id=graph.new_op_id(),
+                opcode=OpCode.SLICE,
+                inputs=[fused_act.id],
+                outputs=[op.outputs[0]],
+                attributes={"dim": -1, "start": curr_offset, "end": curr_offset + out_d, "step": 1},
+                name=f"slice_{op.name or tag}_{curr_offset}_{curr_offset + out_d}",
+            )
+            out_t = graph.get_tensor(op.outputs[0])
+            if out_t is not None:
+                out_t.producer_id = slice_op.id
+            slice_ops.append(slice_op)
+            curr_offset += out_d
+
+        # 6. Schedule replacement at the earliest candidate operation's position
+        earliest_op = min(cands, key=lambda op: node_index_map[op.id])
+        nodes_to_replace[earliest_op.id] = [fused_linear_op] + slice_ops
+        for op in cands:
+            if op.id != earliest_op.id:
+                ops_to_remove.add(op.id)
+
+        return True
+
+    for in_id, ops in by_input.items():
+        remaining = list(ops)
+
+        # 1. Match Attention Q + K + V
+        if options.enable_horizontal_qkv and len(remaining) >= 3:
+            q_op = next((op for op in remaining if _is_q(op)), None)
+            k_op = next((op for op in remaining if _is_k(op)), None)
+            v_op = next((op for op in remaining if _is_v(op)), None)
+            qkv_group = None
+            if q_op and k_op and v_op and len({q_op.id, k_op.id, v_op.id}) == 3:
+                qkv_group = [q_op, k_op, v_op]
+            elif len(remaining) == 3 and not any(_is_gate(op) or _is_up(op) for op in remaining):
+                qkv_group = list(remaining)
+
+            if qkv_group is not None and _fuse_subgroup(qkv_group, in_id, "qkv"):
+                remaining = [op for op in remaining if op not in qkv_group]
+
+        # 2. Match MLP Gate + Up
+        if options.enable_horizontal_mlp and len(remaining) >= 2:
+            gate_op = next((op for op in remaining if _is_gate(op)), None)
+            up_op = next((op for op in remaining if _is_up(op)), None)
+            mlp_group = None
+            if gate_op and up_op and gate_op.id != up_op.id:
+                mlp_group = [gate_op, up_op]
+            elif len(remaining) == 2 and not any(_is_q(op) or _is_k(op) or _is_v(op) for op in remaining):
+                mlp_group = list(remaining)
+
+            if mlp_group is not None and _fuse_subgroup(mlp_group, in_id, "gate_up"):
+                remaining = [op for op in remaining if op not in mlp_group]
+
+    if nodes_to_replace or ops_to_remove:
+        new_nodes = []
+        for op in graph.nodes:
+            if op.id in nodes_to_replace:
+                new_nodes.extend(nodes_to_replace[op.id])
+            elif op.id in ops_to_remove:
+                continue
+            else:
+                new_nodes.append(op)
+        graph.nodes = new_nodes
+
