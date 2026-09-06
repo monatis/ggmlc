@@ -141,6 +141,14 @@ class ModelRunner:
                 if reg_sym not in symbol_env:
                     symbol_env[reg_sym] = int(val)
 
+        if "s" in symbol_env:
+            s_val = symbol_env["s"]
+            for sym in self.symbol_table:
+                if (sym.startswith("s") or "seq" in sym) and sym not in symbol_env:
+                    symbol_env[sym] = s_val
+            if len(self.symbol_table) == 1 and self.symbol_table[0] not in symbol_env:
+                symbol_env[self.symbol_table[0]] = s_val
+
         # 1. Prepare context for dynamic symbols
         self.executor.prepare(symbol_env)
 

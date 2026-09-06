@@ -213,8 +213,8 @@ print("Generated text:", text)
 # 2. Clean instruction chat streaming with automatic template application & KV cache
 ./ggmlc-run smollm2_chat.gguf --chat "What is the capital of France?" --threads 4
 
-# 3. Offload autoregressive chat inference to NVIDIA CUDA GPU with CUDA graph capture
-./ggmlc-run smollm2_chat.gguf --chat "Explain quantum computing in one sentence." --device cuda --cuda-graph --max-tokens 256
+# 3. Offload autoregressive chat inference to NVIDIA CUDA GPU with CUDA graph capture & chunked prefill
+./ggmlc-run smollm2_chat.gguf --chat "Explain quantum computing in one sentence." --device cuda --cuda-graph --chunk-size 128 --max-tokens 256
 
 # 4. Multimodal image preprocessing & task-aware classification
 ./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4

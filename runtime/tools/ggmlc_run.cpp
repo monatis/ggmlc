@@ -38,6 +38,8 @@ static void print_help(const char* prog_name) {
               << "Execution & Hardware Options:\n"
               << "  --device <cpu|cuda>         Execution device (default: cpu)\n"
               << "  --threads <N>               Number of CPU execution threads (default: 1)\n"
+              << "  --chunk-size <N>            Prompt prefill chunk/ubatch size (default: 128, 0=disable)\n"
+              << "  --ubatch <N>                Alias for --chunk-size\n"
               << "  --cuda-graph                Enable CUDA graph capture for low-latency GPU execution\n"
               << "  --unplanned                 Disable memory arena reuse planning (for debugging)\n"
               << "  --symbol <key=value>        Bind dynamic symbol (e.g. s=128)\n\n"
@@ -126,6 +128,66 @@ static void print_model_info(const std::string& model_path, const ggmlc::Seriali
     std::cout << "================================================================================\n";
 }
 
+static int32_t sample_token(const float* last_logits, int64_t vocab_size, float temperature, float top_p) {
+    if (temperature <= 0.0f) {
+        float max_val = -1e30f;
+        int32_t next_token = 0;
+        for (int64_t v = 0; v < vocab_size; ++v) {
+            if (last_logits[v] > max_val) {
+                max_val = last_logits[v];
+                next_token = static_cast<int32_t>(v);
+            }
+        }
+        return next_token;
+    }
+
+    std::vector<std::pair<float, int32_t>> probs(vocab_size);
+    float max_l = -1e30f;
+    for (int64_t v = 0; v < vocab_size; ++v) {
+        if (last_logits[v] > max_l) max_l = last_logits[v];
+    }
+    float sum_exp = 0.0f;
+    for (int64_t v = 0; v < vocab_size; ++v) {
+        float p = std::exp((last_logits[v] - max_l) / std::max(temperature, 1e-5f));
+        probs[v] = {p, static_cast<int32_t>(v)};
+        sum_exp += p;
+    }
+    for (auto& pair : probs) {
+        pair.first /= sum_exp;
+    }
+
+    if (top_p < 1.0f) {
+        std::sort(probs.begin(), probs.end(), [](const auto& a, const auto& b) {
+            return a.first > b.first;
+        });
+        float cumsum = 0.0f;
+        size_t cutoff = 1;
+        for (size_t k = 0; k < probs.size(); ++k) {
+            cumsum += probs[k].first;
+            if (cumsum > top_p && k > 0) {
+                cutoff = k + 1;
+                break;
+            }
+        }
+        probs.resize(cutoff);
+        float new_sum = 0.0f;
+        for (const auto& p : probs) new_sum += p.first;
+        for (auto& p : probs) p.first /= new_sum;
+    }
+
+    float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+    float acc = 0.0f;
+    int32_t next_token = probs[0].second;
+    for (const auto& p : probs) {
+        acc += p.first;
+        if (r <= acc) {
+            next_token = p.second;
+            break;
+        }
+    }
+    return next_token;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         print_help(argv[0]);
@@ -160,6 +222,7 @@ int main(int argc, char** argv) {
 
     std::string device_name = "cpu";
     int n_threads = 1;
+    int chunk_size = 128;
     bool unplanned = false;
     bool use_cuda_graph = false;
 
@@ -239,6 +302,8 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--threads" && i + 1 < argc) {
             n_threads = std::stoi(argv[++i]);
+        } else if ((arg == "--chunk-size" || arg == "--ubatch") && i + 1 < argc) {
+            chunk_size = std::stoi(argv[++i]);
         } else if (arg == "--unplanned") {
             unplanned = true;
         }
@@ -362,9 +427,90 @@ int main(int argc, char** argv) {
             int64_t prompt_len = static_cast<int64_t>(current_tokens.size());
             int64_t pos = 0;
             int32_t last_token = 0;
+            bool stopped = false;
 
-            for (int step = 0; step < max_tokens; ++step) {
-                int64_t S = (use_kv_cache && step > 0) ? 1 : (step == 0 ? prompt_len : static_cast<int64_t>(current_tokens.size()));
+            int64_t effective_chunk_size = (chunk_size > 0 && use_kv_cache) ? chunk_size : prompt_len;
+            int64_t n_chunks = (prompt_len + effective_chunk_size - 1) / effective_chunk_size;
+            if (n_chunks > 1) {
+                std::cout << "[ggmlc-run] Chunked prefill enabled: " << n_chunks
+                          << " chunks (chunk_size=" << effective_chunk_size << ")\n";
+            }
+
+            // Phase 1: Prompt Prefill (Chunked or Full)
+            for (int64_t chunk_idx = 0; chunk_idx < n_chunks; ++chunk_idx) {
+                int64_t c_start = chunk_idx * effective_chunk_size;
+                int64_t c_len = std::min<int64_t>(effective_chunk_size, prompt_len - c_start);
+                pos = c_start;
+
+                symbol_env["s"] = c_len;
+                for (const auto& sym : model_graph.symbol_table) {
+                    if (sym.rfind("s", 0) == 0 || sym.find("seq") != std::string::npos) {
+                        symbol_env[sym] = c_len;
+                    }
+                }
+                if (model_graph.symbol_table.size() == 1) {
+                    symbol_env[model_graph.symbol_table[0]] = c_len;
+                }
+
+                // Auto-deduce any symbolic dimensions in input tensor
+                for (const auto& dim_expr : model_graph.tensors[in_tid].ne) {
+                    if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
+                        int64_t sym_idx = dim_expr->val;
+                        if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(model_graph.symbol_table.size())) {
+                            symbol_env[model_graph.symbol_table[sym_idx]] = c_len;
+                        }
+                    }
+                }
+
+                if (use_kv_cache) {
+                    symbol_env["pos"] = pos;
+                }
+
+                executor.prepare(symbol_env, !unplanned);
+                executor.set_input(in_tid, current_tokens.data() + c_start, c_len * sizeof(int32_t));
+                executor.run(n_threads);
+
+                if (chunk_idx == n_chunks - 1) {
+                    t_prefill_end = std::chrono::high_resolution_clock::now();
+                    t_decode_start = t_prefill_end;
+
+                    if (max_tokens > 0) {
+                        const float* logits_data = static_cast<const float*>(executor.get_output_data(out_tid));
+                        size_t total_elements = executor.get_tensor_size_bytes(out_tid) / sizeof(float);
+                        int64_t vocab_size = total_elements / c_len;
+                        if (vocab_size <= 0) {
+                            vocab_size = static_cast<int64_t>(tokenizer.vocab_size());
+                        }
+
+                        const float* last_logits = logits_data + (c_len - 1) * vocab_size;
+                        int32_t next_token = sample_token(last_logits, vocab_size, temperature, top_p);
+
+                        last_token = next_token;
+                        current_tokens.push_back(next_token);
+                        generated_count++;
+                        pos = prompt_len;
+
+                        if (tokenizer.eos_token_id() >= 0 && next_token == tokenizer.eos_token_id()) {
+                            stopped = true;
+                            break;
+                        }
+                        if (tokenizer.is_special_token(next_token)) {
+                            if (show_special) {
+                                std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                            }
+                            stopped = true;
+                            break;
+                        }
+
+                        std::string piece = tokenizer.decode_token(next_token, true);
+                        std::cout << piece << std::flush;
+                    }
+                }
+            }
+
+            // Phase 2: Token-by-Token Decode (S = 1)
+            while (generated_count < max_tokens && !stopped) {
+                int64_t S = 1;
                 symbol_env["s"] = S;
                 for (const auto& sym : model_graph.symbol_table) {
                     if (sym.rfind("s", 0) == 0 || sym.find("seq") != std::string::npos) {
@@ -375,7 +521,6 @@ int main(int argc, char** argv) {
                     symbol_env[model_graph.symbol_table[0]] = S;
                 }
 
-                // Auto-deduce any symbolic dimensions in input tensor
                 for (const auto& dim_expr : model_graph.tensors[in_tid].ne) {
                     if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
                         int64_t sym_idx = dim_expr->val;
@@ -390,17 +535,12 @@ int main(int argc, char** argv) {
                 }
 
                 executor.prepare(symbol_env, !unplanned);
-
-                if (use_kv_cache && step > 0) {
+                if (use_kv_cache) {
                     executor.set_input(in_tid, &last_token, sizeof(int32_t));
                 } else {
                     executor.set_input(in_tid, current_tokens.data(), current_tokens.size() * sizeof(int32_t));
                 }
                 executor.run(n_threads);
-                if (step == 0) {
-                    t_prefill_end = std::chrono::high_resolution_clock::now();
-                    t_decode_start = t_prefill_end;
-                }
 
                 const float* logits_data = static_cast<const float*>(executor.get_output_data(out_tid));
                 size_t total_elements = executor.get_tensor_size_bytes(out_tid) / sizeof(float);
@@ -410,82 +550,18 @@ int main(int argc, char** argv) {
                 }
 
                 const float* last_logits = logits_data + (S - 1) * vocab_size;
-
-                int32_t next_token = 0;
-                if (temperature <= 0.0f) {
-                    // Greedy argmax
-                    float max_val = -1e30f;
-                    for (int64_t v = 0; v < vocab_size; ++v) {
-                        if (last_logits[v] > max_val) {
-                            max_val = last_logits[v];
-                            next_token = static_cast<int32_t>(v);
-                        }
-                    }
-                } else {
-                    // Temperature + Top-P sampling
-                    std::vector<std::pair<float, int32_t>> probs(vocab_size);
-                    float max_l = -1e30f;
-                    for (int64_t v = 0; v < vocab_size; ++v) {
-                        if (last_logits[v] > max_l) max_l = last_logits[v];
-                    }
-                    float sum_exp = 0.0f;
-                    for (int64_t v = 0; v < vocab_size; ++v) {
-                        float p = std::exp((last_logits[v] - max_l) / std::max(temperature, 1e-5f));
-                        probs[v] = {p, static_cast<int32_t>(v)};
-                        sum_exp += p;
-                    }
-                    for (auto& pair : probs) {
-                        pair.first /= sum_exp;
-                    }
-
-                    if (top_p < 1.0f) {
-                        std::sort(probs.begin(), probs.end(), [](const auto& a, const auto& b) {
-                            return a.first > b.first;
-                        });
-                        float cumsum = 0.0f;
-                        size_t cutoff = 1;
-                        for (size_t k = 0; k < probs.size(); ++k) {
-                            cumsum += probs[k].first;
-                            if (cumsum > top_p && k > 0) {
-                                cutoff = k + 1;
-                                break;
-                            }
-                        }
-                        probs.resize(cutoff);
-                        float new_sum = 0.0f;
-                        for (const auto& p : probs) new_sum += p.first;
-                        for (auto& p : probs) p.first /= new_sum;
-                    }
-
-                    float r = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
-                    float acc = 0.0f;
-                    next_token = probs[0].second;
-                    for (const auto& p : probs) {
-                        acc += p.first;
-                        if (r <= acc) {
-                            next_token = p.second;
-                            break;
-                        }
-                    }
-                }
+                int32_t next_token = sample_token(last_logits, vocab_size, temperature, top_p);
 
                 last_token = next_token;
                 current_tokens.push_back(next_token);
                 generated_count++;
                 if (use_kv_cache) {
-                    if (step == 0) {
-                        pos = prompt_len;
-                    } else {
-                        pos++;
-                    }
+                    pos++;
                 }
 
-                // Stop immediately on EOS
                 if (tokenizer.eos_token_id() >= 0 && next_token == tokenizer.eos_token_id()) {
                     break;
                 }
-
-                // If special token generated and show_special is not enabled, stop or skip
                 if (tokenizer.is_special_token(next_token)) {
                     if (show_special) {
                         std::cout << tokenizer.decode({next_token}, false) << std::flush;
