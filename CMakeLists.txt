@@ -108,4 +108,9 @@ else()
 endif()
 
 add_subdirectory(runtime)
-add_subdirectory(scratch/tab_completion)
+
+# tab_completion is a downstream project in scratch/ (gitignored).
+# Build it locally only: cmake --build build-win-cuda --target tab_completion
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/tab_completion/CMakeLists.txt")
+    add_subdirectory(scratch/tab_completion)
+endif()
