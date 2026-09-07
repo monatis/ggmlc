@@ -145,7 +145,7 @@ class GGMLCCppCodeGenerator:
                 "    }",
                 "",
                 "    // Convenience unified load method",
-                "    void load(struct ggml_context* ctx, struct gguf_context* gguf_ctx, const std::string& filepath = \"\") {",
+                '    void load(struct ggml_context* ctx, struct gguf_context* gguf_ctx, const std::string& filepath = "") {',
                 "        init_tensors(ctx, gguf_ctx);",
                 "        if (!filepath.empty()) {",
                 "            load_data(gguf_ctx, filepath);",
@@ -426,7 +426,9 @@ class GGMLCCppCodeGenerator:
             lines.append(
                 f"    if (!ggml_is_contiguous(idx_{node.id})) idx_{node.id} = ggml_cont(ctx, idx_{node.id});"
             )
-            lines.append(f"    tensors[{out_id}] = ggml_get_rows(ctx, {inp_vars[0]}, idx_{node.id});")
+            lines.append(
+                f"    tensors[{out_id}] = ggml_get_rows(ctx, {inp_vars[0]}, idx_{node.id});"
+            )
         elif node.opcode == GGMLOpCode.GGML_OP_CONCAT:
             dim = node.attributes.get("ggml_dim", node.attributes.get("dim", 0))
             lines.append(

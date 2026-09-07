@@ -164,9 +164,9 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             parent = node.args[0]
             if isinstance(parent, Node):
                 parent_target_str = str(parent.target)
-                if (
-                    "split" in parent_target_str or "chunk" in parent_target_str
-                ) and isinstance(node.args[1], int):
+                if ("split" in parent_target_str or "chunk" in parent_target_str) and isinstance(
+                    node.args[1], int
+                ):
                     idx = int(node.args[1])
                     split_input = parent.args[0]
                     dim = (

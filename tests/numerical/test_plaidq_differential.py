@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-import pytest
-
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
+from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
-from ggmlc.runtime.runner import ModelRunner
 
 plaidq_dir = Path(__file__).resolve().parent.parent.parent / "scratch" / "plaidq"
 if str(plaidq_dir) not in sys.path:
@@ -26,6 +25,7 @@ import plaidq.schedule as ps
 
 def _patch_plaidq_for_export():
     import contextlib
+
     torch.amp.autocast = lambda *args, **kwargs: contextlib.nullcontext()
 
     def custom_rotary_forward(self, seq_len: int, device, dtype, position_ids=None):
@@ -102,7 +102,7 @@ def test_plaidq_mini_numerical_parity():
             self.register_buffer("emb", emb)
 
         def forward(self, z, gamma, x_selfcond):
-            logits, x_reconst = self.m(
+            logits, _ = self.m(
                 z=z,
                 gamma=gamma,
                 embedding_matrix=self.emb,
@@ -152,8 +152,11 @@ def test_plaidq_mini_numerical_parity():
 
     # 6. Verify numerical parity
     from ggmlc.validation.numerical import cosine_similarity
+
     cos_sim = cosine_similarity(ref_np, actual_np)
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=1e-3)
     assert cmp.passed, f"Numerical check failed: {cmp.message}, max_diff={cmp.max_abs_diff}"
     assert cos_sim > 0.9999, f"Cosine similarity too low: {cos_sim}"
-    print(f"\n[Differential Parity] max_abs_diff={cmp.max_abs_diff:.6e}, cosine_similarity={cos_sim:.6f}")
+    print(
+        f"\n[Differential Parity] max_abs_diff={cmp.max_abs_diff:.6e}, cosine_similarity={cos_sim:.6f}"
+    )
