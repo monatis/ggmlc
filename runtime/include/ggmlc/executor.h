@@ -71,6 +71,7 @@ public:
     bool is_paged_kv_cache_enabled() const { return paged_kv_enabled_; }
     void paged_kv_alloc_slot(int slot_id, const std::string& prefix_hash = "");
     void paged_kv_free_slot(int slot_id);
+    bool is_paged_slot_allocated(int slot_id) const;
     void paged_kv_ensure_tokens(int slot_id, int64_t total_tokens);
     size_t get_paged_active_vram_bytes() const;
     void configure_vmm_pool(size_t max_warm_pages, size_t prealloc_pages = 0);
@@ -153,6 +154,8 @@ private:
         struct ggml_tensor* scores = nullptr;
         struct ggml_tensor* probs = nullptr;
         struct ggml_tensor* v_t = nullptr;
+        size_t slot_base_offset_k = 0;
+        size_t slot_base_offset_v = 0;
     };
     bool decode_graph_cached_ = false;
     int64_t decode_cached_pos_ = -1;

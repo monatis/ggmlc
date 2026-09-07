@@ -12,7 +12,7 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(ModelExecutor& executor, size
     if (!executor_.is_paged_kv_cache_enabled()) {
         executor_.init_paged_kv_cache(max_batch_size_, 2048);
     }
-    executor_.set_enable_cuda_graph_buckets(true);
+    executor_.set_enable_cuda_graph_buckets(false);
     radix_tree_ = std::make_unique<PagedRadixTree>(executor_.get_tokens_per_page());
 }
 
@@ -80,6 +80,9 @@ int ContinuousBatchScheduler::find_available_slot() const {
 }
 
 int ContinuousBatchScheduler::select_batch_bucket(size_t max_active_slot) const {
+    if (!executor_.is_cuda_graph_buckets_enabled()) {
+        return static_cast<int>(max_active_slot + 1);
+    }
     static const std::vector<int> buckets = {1, 2, 4, 8, 16};
     for (int b : buckets) {
         if (static_cast<size_t>(b) > max_active_slot) return b;
@@ -127,6 +130,8 @@ StepResult ContinuousBatchScheduler::step() {
     StepResult res;
 
     // 1. Admit pending requests into free slots
+    // 1. Admission of pending requests with Phase 1 Prefill
+    bool admitted_any = false;
     while (!pending_queue_.empty()) {
         int free_slot = find_available_slot();
         if (free_slot < 0) break;
@@ -157,9 +162,112 @@ StepResult ContinuousBatchScheduler::step() {
             }
         }
 
-        req->current_pos = matched_tokens;
-        int64_t total_tokens_needed = static_cast<int64_t>(req->prompt_tokens.size()) + req->max_new_tokens;
+        int64_t prompt_len = static_cast<int64_t>(req->prompt_tokens.size());
+        int64_t total_tokens_needed = prompt_len + req->max_new_tokens;
         executor_.paged_kv_ensure_tokens(free_slot, total_tokens_needed);
+
+        const auto& mg = executor_.model_graph();
+        uint32_t in_tid = mg.inputs[0];
+        uint32_t out_tid = mg.outputs[0];
+
+        int64_t prefill_len = prompt_len - matched_tokens;
+        const int32_t* prefill_input_ptr = nullptr;
+        int64_t prefill_pos = 0;
+        int64_t effective_s = 0;
+
+        if (prefill_len > 0) {
+            prefill_input_ptr = req->prompt_tokens.data() + matched_tokens;
+            prefill_pos = matched_tokens;
+            effective_s = prefill_len;
+        } else {
+            // Full prefix cache hit: evaluate last prompt token to sample first decode token
+            prefill_input_ptr = req->prompt_tokens.data() + prompt_len - 1;
+            prefill_pos = prompt_len - 1;
+            effective_s = 1;
+        }
+
+        std::unordered_map<std::string, int64_t> p_env;
+        p_env["b"] = 1;
+        p_env["s"] = effective_s;
+        p_env["pos"] = prefill_pos;
+        p_env["slot"] = free_slot;
+
+        const auto& in_t = mg.tensors.at(in_tid);
+        if (in_t.ne.size() > 0 && in_t.ne[0] && in_t.ne[0]->type == DimType::SYMBOL) {
+            int64_t sym_idx = in_t.ne[0]->val;
+            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(mg.symbol_table.size())) {
+                p_env[mg.symbol_table[sym_idx]] = effective_s;
+            }
+        }
+        if (in_t.ne.size() > 1 && in_t.ne[1] && in_t.ne[1]->type == DimType::SYMBOL) {
+            int64_t sym_idx = in_t.ne[1]->val;
+            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(mg.symbol_table.size())) {
+                p_env[mg.symbol_table[sym_idx]] = 1;
+            }
+        }
+
+        for (const auto& sym : mg.symbol_table) {
+            if (p_env.find(sym) == p_env.end()) {
+                if (sym.find("b") != std::string::npos || sym.find("batch") != std::string::npos) {
+                    p_env[sym] = 1;
+                } else {
+                    p_env[sym] = effective_s;
+                }
+            }
+        }
+
+        executor_.prepare(p_env, true);
+        executor_.set_input(in_tid, prefill_input_ptr, effective_s * sizeof(int32_t));
+        executor_.run(1);
+
+        // Register newly computed full pages into RadixTree
+        if (prefix_caching_enabled_ && radix_tree_ && prefill_len > 0) {
+            size_t tokens_per_page = radix_tree_->tokens_per_page();
+            size_t start_page = matched_tokens / tokens_per_page;
+            size_t total_full_pages = prompt_len / tokens_per_page;
+            if (total_full_pages > start_page) {
+                size_t num_new_pages = total_full_pages - start_page;
+                std::vector<std::unordered_map<uint32_t, uint64_t>> page_k(num_new_pages);
+                std::vector<std::unordered_map<uint32_t, uint64_t>> page_v(num_new_pages);
+                for (size_t p = 0; p < num_new_pages; ++p) {
+                    executor_.paged_kv_extract_page_handles(free_slot, start_page + p, page_k[p], page_v[p]);
+                }
+                radix_tree_->insert_prefix(req->prompt_tokens, start_page, page_k, page_v);
+            }
+        }
+
+        // Sample first token from prefill logits
+        const float* logits_data = static_cast<const float*>(executor_.get_output_data(out_tid));
+        size_t total_elements = executor_.get_tensor_size_bytes(out_tid) / sizeof(float);
+        size_t vocab_size = total_elements / effective_s;
+        const float* last_logits = logits_data + (effective_s - 1) * vocab_size;
+        int32_t first_tok = sample_next_token(last_logits, vocab_size, req->temperature);
+
+        req->generated_tokens.push_back(first_tok);
+        req->current_pos = prompt_len;
+        res.new_tokens.push_back({req->request_id, first_tok});
+
+        bool hit_eos = (req->eos_token_id >= 0 && first_tok == req->eos_token_id);
+        bool hit_max = (static_cast<int>(req->generated_tokens.size()) >= req->max_new_tokens);
+        if (hit_eos || hit_max) {
+            req->finished = true;
+            req->finish_reason = hit_eos ? "stop" : "length";
+            res.completed_request_ids.push_back(req->request_id);
+            if (radix_tree_) {
+                for (auto& node : req->matched_radix_nodes) {
+                    radix_tree_->release_node(node);
+                }
+                req->matched_radix_nodes.clear();
+            }
+            executor_.paged_kv_free_slot(free_slot);
+            active_slots_[free_slot] = nullptr;
+        }
+
+        admitted_any = true;
+    }
+
+    if (admitted_any) {
+        return res;
     }
 
     // 2. Select bucket based on highest active slot index
@@ -174,32 +282,33 @@ StepResult ContinuousBatchScheduler::step() {
     int bucket_b = select_batch_bucket(static_cast<size_t>(max_slot));
     bucket_b = std::min<int>(bucket_b, static_cast<int>(max_batch_size_));
 
-    // 3. Prepare batch inputs
+    // 3. Prepare batch inputs (decode step, s = 1)
     std::vector<int32_t> batch_tokens(bucket_b, 0);
+    int64_t current_pos = 0;
     for (int b = 0; b < bucket_b; ++b) {
         auto req = active_slots_[b];
-        if (req != nullptr) {
-            if (req->current_pos < static_cast<int64_t>(req->prompt_tokens.size())) {
-                batch_tokens[b] = req->prompt_tokens[req->current_pos];
-            } else if (!req->generated_tokens.empty()) {
-                batch_tokens[b] = req->generated_tokens.back();
-            } else if (!req->prompt_tokens.empty()) {
-                batch_tokens[b] = req->prompt_tokens.back();
-            }
+        if (req != nullptr && !req->generated_tokens.empty()) {
+            batch_tokens[b] = req->generated_tokens.back();
+            current_pos = std::max(current_pos, req->current_pos);
         }
+    }
+
+    for (int b = 0; b < bucket_b; ++b) {
+        if (!executor_.is_paged_slot_allocated(b)) {
+            executor_.paged_kv_alloc_slot(b);
+        }
+        executor_.paged_kv_ensure_tokens(b, current_pos + 1);
     }
 
     // 4. Configure executor symbol environment and inputs
     const auto& mg = executor_.model_graph();
-    if (mg.inputs.empty() || mg.outputs.empty()) {
-        throw std::runtime_error("ContinuousBatchScheduler: Model graph has no inputs or outputs");
-    }
     uint32_t in_tid = mg.inputs[0];
     uint32_t out_tid = mg.outputs[0];
 
     std::unordered_map<std::string, int64_t> symbol_env;
     symbol_env["b"] = bucket_b;
     symbol_env["s"] = 1;
+    symbol_env["pos"] = current_pos;
 
     // Check input tensor dynamic dimension symbols
     const auto& in_t = mg.tensors.at(in_tid);
@@ -242,29 +351,6 @@ StepResult ContinuousBatchScheduler::step() {
         auto req = active_slots_[b];
         if (req == nullptr) continue;
 
-        if (req->current_pos < static_cast<int64_t>(req->prompt_tokens.size()) - 1) {
-            // Still ingesting prompt tokens
-            req->current_pos++;
-            continue;
-        }
-
-        // Just finished prompt prefill? Register newly computed full pages into RadixTree!
-        if (prefix_caching_enabled_ && radix_tree_ && req->generated_tokens.empty()) {
-            size_t tokens_per_page = radix_tree_->tokens_per_page();
-            size_t start_page = req->prefix_tokens_matched / tokens_per_page;
-            size_t total_full_pages = req->prompt_tokens.size() / tokens_per_page;
-            if (total_full_pages > start_page) {
-                size_t num_new_pages = total_full_pages - start_page;
-                std::vector<std::unordered_map<uint32_t, uint64_t>> page_k(num_new_pages);
-                std::vector<std::unordered_map<uint32_t, uint64_t>> page_v(num_new_pages);
-                for (size_t p = 0; p < num_new_pages; ++p) {
-                    executor_.paged_kv_extract_page_handles(b, start_page + p, page_k[p], page_v[p]);
-                }
-                radix_tree_->insert_prefix(req->prompt_tokens, start_page, page_k, page_v);
-            }
-        }
-
-        // Sampling next generated token
         const float* row_logits = logits_base + b * vocab_size;
         int32_t next_tok = sample_next_token(row_logits, vocab_size, req->temperature);
         req->generated_tokens.push_back(next_tok);
@@ -292,6 +378,14 @@ StepResult ContinuousBatchScheduler::step() {
             // Free slot physical memory immediately! (unmapped and returned to warm pool)
             executor_.paged_kv_free_slot(b);
             active_slots_[b] = nullptr;
+        }
+    }
+
+    if (active_count() == 0) {
+        for (size_t i = 0; i < active_slots_.size(); ++i) {
+            if (executor_.is_paged_slot_allocated(static_cast<int>(i))) {
+                executor_.paged_kv_free_slot(static_cast<int>(i));
+            }
         }
     }
 

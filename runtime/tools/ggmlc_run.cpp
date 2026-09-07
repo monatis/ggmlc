@@ -401,7 +401,7 @@ int main(int argc, char** argv) {
                       << "  Paged KV:     Driver-VMM cuMemMap (Zero-Copy Physical Allocation)\n"
                       << "  Prefix Cache: " << (enable_prefix_cache ? "Paged Radix Tree (Zero-Compute Sharing)" : "Disabled") << "\n"
                       << "  Warm Pool:    " << warm_blocks << " blocks" << (gpu_utilization > 0.0f ? " (Upfront Pre-allocation)" : " (Elastic Recycling)") << "\n"
-                      << "  CUDA Graphs:  Multi-Bucket (B in {1, 2, 4, 8, 16})\n"
+                      << "  CUDA Graphs:  " << (use_cuda_graph ? "Multi-Bucket (B in {1, 2, 4, 8, 16})" : "Disabled") << "\n"
                       << "================================================================================\n";
             ggmlc::ModelExecutor executor(model_graph, device_name);
             executor.init_paged_kv_cache(max_batch, 2048);
@@ -422,7 +422,11 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                std::vector<int32_t> p_tokens = tokenizer.encode(line, 0, false, false);
+                std::string formatted = line;
+                if (model_graph.has_chat_template()) {
+                    formatted = tokenizer.apply_chat_template(line, system_text, true);
+                }
+                std::vector<int32_t> p_tokens = tokenizer.encode(formatted, 0, false, false);
                 if (p_tokens.empty()) p_tokens.push_back(0);
                 uint64_t req_id = scheduler.add_request(p_tokens, max_tokens, temperature, tokenizer.eos_token_id());
                 std::cout << "[Request #" << req_id << " Queued] (" << p_tokens.size() << " prompt tokens)\n";
@@ -430,7 +434,17 @@ int main(int argc, char** argv) {
                 while (scheduler.has_work()) {
                     auto res = scheduler.step();
                     for (const auto& pair : res.new_tokens) {
-                        std::cout << tokenizer.decode_token(pair.second, true) << std::flush;
+                        int32_t tok = pair.second;
+                        if (tokenizer.eos_token_id() >= 0 && tok == tokenizer.eos_token_id()) {
+                            continue;
+                        }
+                        if (tokenizer.is_special_token(tok)) {
+                            if (show_special) {
+                                std::cout << tokenizer.decode({tok}, false) << std::flush;
+                            }
+                            continue;
+                        }
+                        std::cout << tokenizer.decode_token(tok, true) << std::flush;
                     }
                     if (!res.completed_request_ids.empty()) {
                         std::cout << "\n[Request Completed]\n";

@@ -529,6 +529,13 @@ void ModelExecutor::paged_kv_free_slot(int slot_id) {
     slot.prefix_hash.clear();
 }
 
+bool ModelExecutor::is_paged_slot_allocated(int slot_id) const {
+    if (!paged_kv_enabled_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) {
+        return false;
+    }
+    return paged_slots_[slot_id].active;
+}
+
 void ModelExecutor::paged_kv_ensure_tokens(int slot_id, int64_t total_tokens) {
     if (!paged_kv_enabled_ || !vmm_mgr_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
     auto& slot = paged_slots_[slot_id];
@@ -658,10 +665,10 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
         struct ggml_tensor* v_cache = kv_cache_v_[op_id];
 
         // Slot offsets
-        refs.k_slot->view_offs = pos * k_cache->nb[1];
+        refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
         refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
 
-        refs.v_slot->view_offs = pos * v_cache->nb[1];
+        refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
         refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
 
         // Active sequence length
@@ -721,8 +728,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
-    // Fast path: if decode graph is already cached, mutate in-place and return immediately (0.0 ms overhead)
-    if (is_decode_step && decode_graph_cached_) {
+    // Fast path: if decode graph is already cached AND all other symbols (e.g. batch size) match, mutate in-place
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_;
+    if (can_use_cached_decode) {
+        for (const auto& pair : symbol_env) {
+            if (pair.first == "pos") continue;
+            auto it = last_symbol_env_.find(pair.first);
+            if (it == last_symbol_env_.end() || it->second != pair.second) {
+                can_use_cached_decode = false;
+                break;
+            }
+        }
+    }
+    if (can_use_cached_decode) {
         set_decode_pos(symbol_env.at("pos"));
         last_symbol_env_ = symbol_env;
         return;
@@ -1152,16 +1170,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     int64_t num_kv_heads = k->ne[2];
                     int64_t batch = k->ne[3];
 
+                    int64_t slot_idx = symbol_env.count("slot") > 0 ? symbol_env.at("slot") : 0;
+                    size_t base_slot_offset_k = slot_idx * k_cache->nb[3];
+                    size_t base_slot_offset_v = slot_idx * v_cache->nb[3];
+
                     // View slot in cache for new tokens at offset pos
                     struct ggml_tensor* k_slot = ggml_view_4d(
                         ctx_, k_cache, head_dim, s_q, num_kv_heads, batch,
                         k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
-                        pos * k_cache->nb[1]
+                        base_slot_offset_k + pos * k_cache->nb[1]
                     );
                     struct ggml_tensor* v_slot = ggml_view_4d(
                         ctx_, v_cache, head_dim, s_q, num_kv_heads, batch,
                         v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
-                        pos * v_cache->nb[1]
+                        base_slot_offset_v + pos * v_cache->nb[1]
                     );
 
                     // Copy new k and v into cache
@@ -1173,12 +1195,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     struct ggml_tensor* k_active = ggml_view_4d(
                         ctx_, k_cache, head_dim, s_kv, num_kv_heads, batch,
                         k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
-                        0
+                        base_slot_offset_k
                     );
                     struct ggml_tensor* v_active = ggml_view_4d(
                         ctx_, v_cache, head_dim, s_kv, num_kv_heads, batch,
                         v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
-                        0
+                        base_slot_offset_v
                     );
 
                     if (s_q == 1) {
@@ -1195,6 +1217,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             refs.v_slot = v_slot;
                             refs.k_active = k_active;
                             refs.v_active = v_active;
+                            refs.slot_base_offset_k = base_slot_offset_k;
+                            refs.slot_base_offset_v = base_slot_offset_v;
                             decode_attn_views_[op.id] = refs;
                         }
                     } else {
