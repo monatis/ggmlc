@@ -45,6 +45,13 @@ public:
     void evict_prefix_page(const std::string& prefix_hash);
     size_t prefix_cache_size() const;
 
+    // Warm Pool & Upfront Allocation Management
+    void configure_pool(size_t max_warm_pages, size_t prealloc_pages = 0);
+    size_t warm_pool_pages() const;
+    size_t free_pool_pages() const;
+    size_t max_warm_pages() const;
+    void drain_warm_pool();
+
     // Telemetry & Accounting
     size_t total_reserved_va_bytes() const;
     size_t total_mapped_physical_bytes() const;

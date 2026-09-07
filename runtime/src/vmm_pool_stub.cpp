@@ -33,6 +33,12 @@ size_t VMMBlockManager::total_reserved_va_bytes() const { return 0; }
 size_t VMMBlockManager::total_mapped_physical_bytes() const { return 0; }
 size_t VMMBlockManager::total_allocated_pages() const { return 0; }
 
+void VMMBlockManager::configure_pool(size_t, size_t) {}
+size_t VMMBlockManager::warm_pool_pages() const { return 0; }
+size_t VMMBlockManager::free_pool_pages() const { return 0; }
+size_t VMMBlockManager::max_warm_pages() const { return 0; }
+void VMMBlockManager::drain_warm_pool() {}
+
 void VMMBlockManager::reset() {}
 
 } // namespace ggmlc

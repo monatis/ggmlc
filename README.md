@@ -37,6 +37,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
 7. **Hardware-Accelerated Persistent KV Cache**: Dedicated zero-copy device key/value buffers with dual-phase prefill and single-token decode ($S=1$), delivering constant $O(1)$ inter-token decode latency (~15.6–16.3 ms/tok on CUDA, up to 64.1 tok/s) across arbitrary sequence lengths (32, 64, 128, 256+ tokens), outperforming `llama.cpp`.
 8. **High-Throughput Agent Serving & Driver-VMM Paged KV Cache**: GPU MMU virtual memory paging (`cuMemMap`) allocates physical 2 MB pages on demand with **zero bandwidth penalty** (41.77 GB/s), pointer invariance across dynamic expansions, immediate physical VRAM reclamation, and multi-bucket CUDA graphs ($B \in \{1, 2, 4, 8, 16\}$) for iteration-level continuous batching.
+9. **Radix Tree Automated Prefix Caching & Warm Block Pool**: Token-sequence prefix matching via CPU trie directly maps cached physical pages into contiguous virtual slots via `cuMemMap`, skipping prefill for shared prompt prefixes with **zero custom attention kernels**, while elastic warm-pool recycling minimizes OS driver syscalls.
 
 ---
 

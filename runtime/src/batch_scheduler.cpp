@@ -13,11 +13,18 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(ModelExecutor& executor, size
         executor_.init_paged_kv_cache(max_batch_size_, 2048);
     }
     executor_.set_enable_cuda_graph_buckets(true);
+    radix_tree_ = std::make_unique<PagedRadixTree>(executor_.get_tokens_per_page());
 }
 
 ContinuousBatchScheduler::~ContinuousBatchScheduler() {
     for (size_t i = 0; i < active_slots_.size(); ++i) {
         if (active_slots_[i]) {
+            if (radix_tree_) {
+                for (auto& node : active_slots_[i]->matched_radix_nodes) {
+                    radix_tree_->release_node(node);
+                }
+                active_slots_[i]->matched_radix_nodes.clear();
+            }
             executor_.paged_kv_free_slot(static_cast<int>(i));
             active_slots_[i] = nullptr;
         }
@@ -128,10 +135,29 @@ StepResult ContinuousBatchScheduler::step() {
         pending_queue_.pop_front();
 
         req->slot_id = free_slot;
-        req->current_pos = 0;
         active_slots_[free_slot] = req;
 
         executor_.paged_kv_alloc_slot(free_slot);
+
+        size_t matched_tokens = 0;
+        if (prefix_caching_enabled_ && radix_tree_) {
+            auto match = radix_tree_->match_prefix(req->prompt_tokens);
+            if (match.matched_pages > 0) {
+                matched_tokens = match.matched_tokens;
+                req->prefix_tokens_matched = matched_tokens;
+                req->matched_radix_nodes = match.matched_nodes;
+                for (auto& node : match.matched_nodes) {
+                    radix_tree_->retain_node(node);
+                }
+                // Map the pre-existing physical pages directly into slot's VA window
+                executor_.paged_kv_map_existing_pages(free_slot, 0, match.page_k_handles, match.page_v_handles);
+
+                total_prefix_cache_hits_++;
+                total_prefix_tokens_saved_ += matched_tokens;
+            }
+        }
+
+        req->current_pos = matched_tokens;
         int64_t total_tokens_needed = static_cast<int64_t>(req->prompt_tokens.size()) + req->max_new_tokens;
         executor_.paged_kv_ensure_tokens(free_slot, total_tokens_needed);
     }
@@ -222,6 +248,22 @@ StepResult ContinuousBatchScheduler::step() {
             continue;
         }
 
+        // Just finished prompt prefill? Register newly computed full pages into RadixTree!
+        if (prefix_caching_enabled_ && radix_tree_ && req->generated_tokens.empty()) {
+            size_t tokens_per_page = radix_tree_->tokens_per_page();
+            size_t start_page = req->prefix_tokens_matched / tokens_per_page;
+            size_t total_full_pages = req->prompt_tokens.size() / tokens_per_page;
+            if (total_full_pages > start_page) {
+                size_t num_new_pages = total_full_pages - start_page;
+                std::vector<std::unordered_map<uint32_t, uint64_t>> page_k(num_new_pages);
+                std::vector<std::unordered_map<uint32_t, uint64_t>> page_v(num_new_pages);
+                for (size_t p = 0; p < num_new_pages; ++p) {
+                    executor_.paged_kv_extract_page_handles(b, start_page + p, page_k[p], page_v[p]);
+                }
+                radix_tree_->insert_prefix(req->prompt_tokens, start_page, page_k, page_v);
+            }
+        }
+
         // Sampling next generated token
         const float* row_logits = logits_base + b * vocab_size;
         int32_t next_tok = sample_next_token(row_logits, vocab_size, req->temperature);
@@ -239,7 +281,15 @@ StepResult ContinuousBatchScheduler::step() {
             req->finish_reason = hit_eos ? "stop" : "length";
             res.completed_request_ids.push_back(req->request_id);
 
-            // Free slot physical memory immediately!
+            // Release matched radix tree nodes
+            if (radix_tree_) {
+                for (auto& node : req->matched_radix_nodes) {
+                    radix_tree_->release_node(node);
+                }
+                req->matched_radix_nodes.clear();
+            }
+
+            // Free slot physical memory immediately! (unmapped and returned to warm pool)
             executor_.paged_kv_free_slot(b);
             active_slots_[b] = nullptr;
         }

@@ -25,6 +25,11 @@ struct VMMBlockManager::Impl {
     std::unordered_set<uint64_t> active_va_reservations;
     std::unordered_map<uint64_t, uint64_t> mapped_pages; // va_offset -> handle
 
+    // Warm Pool & Upfront Allocation
+    std::vector<uint64_t> free_pages_pool;
+    size_t max_warm_pages = 64; // Default: 64 * 2MB = 128 MB warm pool
+    size_t prealloc_pages = 0;
+
     // Prefix Caching
     std::unordered_map<std::string, uint64_t> prefix_page_table;
 
@@ -50,9 +55,15 @@ struct VMMBlockManager::Impl {
         mapped_pages.clear();
         total_mapped_bytes = 0;
 
-        // 3. Release all physical handles
+        // 3. Release warm pool handles
+        for (uint64_t handle : free_pages_pool) {
+            cuMemRelease(static_cast<CUmemGenericAllocationHandle>(handle));
+        }
+        free_pages_pool.clear();
+
+        // 4. Release all physical handles
         for (const auto& pair : handle_refcounts) {
-            CUmemGenericAllocationHandle handle = pair.first;
+            CUmemGenericAllocationHandle handle = static_cast<CUmemGenericAllocationHandle>(pair.first);
             cuMemRelease(handle);
         }
         handle_refcounts.clear();
@@ -175,6 +186,15 @@ uint64_t VMMBlockManager::alloc_physical_page() {
     if (!impl_ || !impl_->initialized) return 0;
     std::lock_guard<std::mutex> lock(impl_->mtx);
 
+    // 1. Fast-path: pop from warm free pool in O(1) without OS/driver syscall
+    if (!impl_->free_pages_pool.empty()) {
+        uint64_t handle = impl_->free_pages_pool.back();
+        impl_->free_pages_pool.pop_back();
+        impl_->handle_refcounts[handle] = 1;
+        return handle;
+    }
+
+    // 2. Allocate fresh physical page from driver
     CUmemGenericAllocationHandle handle = 0;
     CUresult res = cuMemCreate(&handle, impl_->page_size, &impl_->alloc_prop, 0);
     if (res != CUDA_SUCCESS) {
@@ -182,7 +202,7 @@ uint64_t VMMBlockManager::alloc_physical_page() {
         return 0;
     }
 
-    impl_->handle_refcounts[handle] = 1;
+    impl_->handle_refcounts[static_cast<uint64_t>(handle)] = 1;
     return static_cast<uint64_t>(handle);
 }
 
@@ -203,8 +223,13 @@ void VMMBlockManager::release_physical_page(uint64_t page_handle) {
 
     it->second--;
     if (it->second <= 0) {
-        cuMemRelease(static_cast<CUmemGenericAllocationHandle>(page_handle));
         impl_->handle_refcounts.erase(it);
+        // Recycle handle into warm free pool if within configured capacity
+        if (impl_->free_pages_pool.size() < impl_->max_warm_pages) {
+            impl_->free_pages_pool.push_back(page_handle);
+        } else {
+            cuMemRelease(static_cast<CUmemGenericAllocationHandle>(page_handle));
+        }
     }
 }
 
@@ -308,7 +333,48 @@ size_t VMMBlockManager::total_mapped_physical_bytes() const {
 }
 
 size_t VMMBlockManager::total_allocated_pages() const {
-    return impl_ ? impl_->handle_refcounts.size() : 0;
+    if (!impl_) return 0;
+    return impl_->handle_refcounts.size() + impl_->free_pages_pool.size();
+}
+
+void VMMBlockManager::configure_pool(size_t max_warm_pages, size_t prealloc_pages) {
+    if (!impl_ || !impl_->initialized) return;
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+
+    impl_->max_warm_pages = max_warm_pages;
+    impl_->prealloc_pages = prealloc_pages;
+
+    // Pre-allocate up to prealloc_pages if requested (e.g. --gpu-utilization)
+    while (impl_->free_pages_pool.size() < prealloc_pages) {
+        CUmemGenericAllocationHandle handle = 0;
+        CUresult res = cuMemCreate(&handle, impl_->page_size, &impl_->alloc_prop, 0);
+        if (res != CUDA_SUCCESS) {
+            fprintf(stderr, "[VMM] cuMemCreate failed during upfront pre-allocation\n");
+            break;
+        }
+        impl_->free_pages_pool.push_back(static_cast<uint64_t>(handle));
+    }
+}
+
+size_t VMMBlockManager::warm_pool_pages() const {
+    return impl_ ? impl_->free_pages_pool.size() : 0;
+}
+
+size_t VMMBlockManager::free_pool_pages() const {
+    return impl_ ? impl_->free_pages_pool.size() : 0;
+}
+
+size_t VMMBlockManager::max_warm_pages() const {
+    return impl_ ? impl_->max_warm_pages : 0;
+}
+
+void VMMBlockManager::drain_warm_pool() {
+    if (!impl_) return;
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+    for (uint64_t handle : impl_->free_pages_pool) {
+        cuMemRelease(static_cast<CUmemGenericAllocationHandle>(handle));
+    }
+    impl_->free_pages_pool.clear();
 }
 
 void VMMBlockManager::reset() {

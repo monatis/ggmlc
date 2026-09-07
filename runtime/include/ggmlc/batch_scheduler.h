@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggmlc/executor.h"
+#include "ggmlc/radix_tree.h"
 #include <vector>
 #include <deque>
 #include <memory>
@@ -20,6 +21,10 @@ struct GenerationRequest {
     int eos_token_id = -1;
     bool finished = false;
     std::string finish_reason;
+
+    // Radix Tree Prefix Caching
+    std::vector<std::shared_ptr<RadixNode>> matched_radix_nodes;
+    size_t prefix_tokens_matched = 0;
 };
 
 struct StepResult {
@@ -44,6 +49,13 @@ public:
     size_t pending_count() const;
     size_t max_batch_size() const { return max_batch_size_; }
 
+    // Prefix Caching
+    void enable_prefix_caching(bool enable) { prefix_caching_enabled_ = enable; }
+    bool is_prefix_caching_enabled() const { return prefix_caching_enabled_; }
+    PagedRadixTree* radix_tree() { return radix_tree_.get(); }
+    size_t total_prefix_cache_hits() const { return total_prefix_cache_hits_; }
+    size_t total_prefix_tokens_saved() const { return total_prefix_tokens_saved_; }
+
     // Retrieve request information
     std::shared_ptr<GenerationRequest> get_request(uint64_t request_id) const;
 
@@ -52,6 +64,12 @@ private:
     size_t max_batch_size_;
     int default_eos_token_id_;
     uint64_t next_request_id_ = 1;
+
+    // Prefix Caching
+    std::unique_ptr<PagedRadixTree> radix_tree_;
+    bool prefix_caching_enabled_ = true;
+    size_t total_prefix_cache_hits_ = 0;
+    size_t total_prefix_tokens_saved_ = 0;
 
     std::deque<std::shared_ptr<GenerationRequest>> pending_queue_;
     std::vector<std::shared_ptr<GenerationRequest>> active_slots_;

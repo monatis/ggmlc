@@ -73,6 +73,22 @@ public:
     void paged_kv_free_slot(int slot_id);
     void paged_kv_ensure_tokens(int slot_id, int64_t total_tokens);
     size_t get_paged_active_vram_bytes() const;
+    void configure_vmm_pool(size_t max_warm_pages, size_t prealloc_pages = 0);
+    size_t get_tokens_per_page() const { return tokens_per_page_; }
+    void set_tokens_per_page(size_t tpp) { tokens_per_page_ = tpp; }
+    void paged_kv_map_existing_pages(
+        int slot_id,
+        size_t start_page_idx,
+        const std::vector<std::unordered_map<uint32_t, uint64_t>>& page_k_handles,
+        const std::vector<std::unordered_map<uint32_t, uint64_t>>& page_v_handles
+    );
+    void paged_kv_extract_page_handles(
+        int slot_id,
+        size_t page_idx,
+        std::unordered_map<uint32_t, uint64_t>& out_k,
+        std::unordered_map<uint32_t, uint64_t>& out_v
+    ) const;
+    VMMBlockManager* vmm_block_manager() { return vmm_mgr_.get(); }
 
     // CUDA Graph execution
     void set_enable_cuda_graph(bool enable);
@@ -157,6 +173,7 @@ private:
     bool paged_kv_enabled_ = false;
     size_t paged_max_batch_ = 1;
     size_t paged_max_ctx_ = 2048;
+    size_t tokens_per_page_ = 0;
     std::unique_ptr<VMMBlockManager> vmm_mgr_;
     std::unordered_map<uint32_t, uint64_t> vmm_k_va_windows_; // op_id -> va_base
     std::unordered_map<uint32_t, uint64_t> vmm_v_va_windows_; // op_id -> va_base

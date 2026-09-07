@@ -422,8 +422,13 @@ void ModelExecutor::init_paged_kv_cache(size_t max_batch, size_t max_ctx) {
         enum ggml_type kv_type = (k_t.type == GGML_TYPE_F32) ? GGML_TYPE_F16 : k_t.type;
         size_t elem_sz = ggml_type_size(kv_type);
 
-        size_t raw_slot_bytes = head_dim * max_ctx * num_kv_heads * elem_sz;
+        size_t bytes_per_token = head_dim * num_kv_heads * elem_sz;
         size_t page_sz = vmm_mgr_->page_size();
+        if (tokens_per_page_ == 0) {
+            tokens_per_page_ = (bytes_per_token > 0) ? std::min<size_t>(1024, page_sz / bytes_per_token) : 1024;
+        }
+
+        size_t raw_slot_bytes = head_dim * max_ctx * num_kv_heads * elem_sz;
         size_t slot_bytes = ((raw_slot_bytes + page_sz - 1) / page_sz) * page_sz;
         size_t total_window = max_batch * slot_bytes;
 
@@ -564,6 +569,81 @@ void ModelExecutor::paged_kv_ensure_tokens(int slot_id, int64_t total_tokens) {
 
 size_t ModelExecutor::get_paged_active_vram_bytes() const {
     return vmm_mgr_ ? vmm_mgr_->total_mapped_physical_bytes() : 0;
+}
+
+void ModelExecutor::configure_vmm_pool(size_t max_warm_pages, size_t prealloc_pages) {
+    if (vmm_mgr_) {
+        vmm_mgr_->configure_pool(max_warm_pages, prealloc_pages);
+    }
+}
+
+void ModelExecutor::paged_kv_map_existing_pages(
+    int slot_id,
+    size_t start_page_idx,
+    const std::vector<std::unordered_map<uint32_t, uint64_t>>& page_k_handles,
+    const std::vector<std::unordered_map<uint32_t, uint64_t>>& page_v_handles
+) {
+    if (!paged_kv_enabled_ || !vmm_mgr_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
+    auto& slot = paged_slots_[slot_id];
+    size_t page_sz = vmm_mgr_->page_size();
+
+    for (size_t p = 0; p < page_k_handles.size(); ++p) {
+        size_t page_idx = start_page_idx + p;
+        const auto& k_layer_map = page_k_handles[p];
+        const auto& v_layer_map = page_v_handles[p];
+
+        for (const auto& pair : vmm_slot_bytes_) {
+            uint32_t op_id = pair.first;
+            size_t slot_bytes = pair.second;
+            uint64_t va_k_base = vmm_k_va_windows_[op_id] + slot_id * slot_bytes;
+            uint64_t va_v_base = vmm_v_va_windows_[op_id] + slot_id * slot_bytes;
+
+            auto it_k = k_layer_map.find(op_id);
+            auto it_v = v_layer_map.find(op_id);
+            if (it_k != k_layer_map.end() && it_v != v_layer_map.end()) {
+                uint64_t h_k = it_k->second;
+                uint64_t h_v = it_v->second;
+
+                vmm_mgr_->retain_physical_page(h_k);
+                vmm_mgr_->retain_physical_page(h_v);
+                vmm_mgr_->map_page(va_k_base + page_idx * page_sz, h_k);
+                vmm_mgr_->map_page(va_v_base + page_idx * page_sz, h_v);
+
+                auto& layer_pages_k = slot.mapped_pages_k[op_id];
+                auto& layer_pages_v = slot.mapped_pages_v[op_id];
+                if (page_idx < layer_pages_k.size()) {
+                    layer_pages_k[page_idx] = h_k;
+                    layer_pages_v[page_idx] = h_v;
+                } else {
+                    layer_pages_k.push_back(h_k);
+                    layer_pages_v.push_back(h_v);
+                }
+            }
+        }
+    }
+}
+
+void ModelExecutor::paged_kv_extract_page_handles(
+    int slot_id,
+    size_t page_idx,
+    std::unordered_map<uint32_t, uint64_t>& out_k,
+    std::unordered_map<uint32_t, uint64_t>& out_v
+) const {
+    out_k.clear();
+    out_v.clear();
+    if (!paged_kv_enabled_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
+    const auto& slot = paged_slots_[slot_id];
+
+    for (const auto& pair : vmm_slot_bytes_) {
+        uint32_t op_id = pair.first;
+        auto it_k = slot.mapped_pages_k.find(op_id);
+        auto it_v = slot.mapped_pages_v.find(op_id);
+        if (it_k != slot.mapped_pages_k.end() && page_idx < it_k->second.size() &&
+            it_v != slot.mapped_pages_v.end() && page_idx < it_v->second.size()) {
+            out_k[op_id] = it_k->second[page_idx];
+            out_v[op_id] = it_v->second[page_idx];
+        }
+    }
 }
 
 void ModelExecutor::set_decode_pos(int64_t pos) {

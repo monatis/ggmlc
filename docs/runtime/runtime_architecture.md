@@ -175,9 +175,22 @@ graph TD
    - Selects the optimal batch bucket on every decode step.
    - Immediately unmaps and releases physical pages when requests complete, dropping active VRAM consumption with zero memory leaks.
 
+4. **Paged Radix Tree Prefix Caching (`PagedRadixTree`)**:
+   - Token trie data structure on the host that indexes completed physical 2 MB page sequences by prompt token IDs.
+   - Incoming prompts automatically match the longest cached prefix. Matched pages are directly mapped into contiguous virtual address slots of the request's VA window via `cuMemMap`.
+   - **Zero custom attention kernels**: FlashAttention and GEMV execute unchanged on the mapped virtual window with standard contiguous strides.
+   - Skips KV prefill computation for matched tokens, reducing prompt latency by up to 90%+.
+
+5. **Dual-Mode Physical Page Pool (`VMMBlockManager`)**:
+   - **Desktop / Elastic Mode**: Dynamically allocates physical pages on demand, recycling freed pages in `free_pages_pool_` up to `--warm-blocks <N>`. Excess pages are released back to the OS via `cuMemRelease`, keeping desktop GPU VRAM available for user tasks.
+   - **Dedicated Server Mode (`--gpu-utilization <ratio>`)**: Pre-allocates $N$ physical 2 MB blocks upfront during runtime initialization (vLLM style), ensuring zero driver allocation latency during sustained server workloads.
+
 ### Serving CLI Flags
 
 - `--paged-kv`: Enables Driver-VMM virtual page mapping for dynamic on-demand KV cache allocation.
 - `--serve`: Starts continuous batching interactive server session with iteration-level request scheduling.
 - `--max-batch <N>`: Sets maximum concurrent requests in continuous batching (default: `8`).
+- `--gpu-utilization <ratio>`: Eagerly pre-allocates physical VRAM blocks upfront up to memory ratio (e.g. `0.9`).
+- `--warm-blocks <N>`: Recycles freed physical 2 MB pages in memory pool up to ceiling `N` (default: `0`).
+- `--no-prefix-cache`: Disables automated Paged Radix Tree prefix caching.
 
