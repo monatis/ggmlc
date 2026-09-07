@@ -1287,13 +1287,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_soft_max(ctx_, in0);
                 break;
             case GGML_OP_MUL_MAT: {
+                // Bypass permute/transpose on quantized weight matrices.
+                // Quantized types (e.g. Q4_0) cannot be non-contiguously permuted,
+                // so we use the original pre-transpose weight directly and let
+                // ggml_mul_mat handle the implicit transpose.
+                // This must NOT apply to F32/F16 activation tensors (e.g. K^T in attention).
                 if (!op.inputs.empty()) {
                     for (const auto& other_op : model_graph_.ops) {
                         for (uint32_t out_id_check : other_op.outputs) {
                             if (out_id_check == op.inputs[0]) {
                                 if ((other_op.opcode == GGML_OP_PERMUTE || other_op.opcode == GGML_OP_TRANSPOSE) && !other_op.inputs.empty()) {
                                     struct ggml_tensor* orig_w = ggml_tensors_[other_op.inputs[0]];
-                                    if (orig_w && in1 && orig_w->ne[0] == in1->ne[0]) {
+                                    bool orig_is_quantized = orig_w && (orig_w->type != GGML_TYPE_F32 && orig_w->type != GGML_TYPE_F16);
+                                    if (orig_is_quantized && orig_w && in1 && orig_w->ne[0] == in1->ne[0]) {
                                         in0 = orig_w;
                                     }
                                 }
