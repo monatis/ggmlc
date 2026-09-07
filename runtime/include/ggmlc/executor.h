@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include "ggml.h"
 #include "ggml-backend.h"
+#include "ggml-alloc.h"
 #include "ggmlc/types.h"
 #include "ggmlc/cuda_graph.h"
 #include "ggmlc/vmm_pool.h"
@@ -125,6 +126,7 @@ private:
 
     // Compute: dynamic activations, inputs, outputs
     ggml_backend_buffer_t buffer_ = nullptr;
+    ggml_gallocr_t galloc_ = nullptr;
     struct ggml_context* ctx_ = nullptr;
     struct ggml_cgraph* cgraph_ = nullptr;
     std::unordered_map<uint32_t, struct ggml_tensor*> compute_tensors_;

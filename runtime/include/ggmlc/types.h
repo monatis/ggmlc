@@ -127,6 +127,61 @@ struct SerializedModelGraph {
     std::unordered_map<std::string, double> metadata_float;
     std::unordered_map<std::string, std::vector<std::string>> metadata_str_arr;
 
+    SerializedModelGraph() = default;
+    SerializedModelGraph(const SerializedModelGraph& other) {
+        name = other.name;
+        symbol_table = other.symbol_table;
+        inputs = other.inputs;
+        outputs = other.outputs;
+        parameters = other.parameters;
+        tensors = other.tensors;
+        ops = other.ops;
+        data_buffer = other.data_buffer;
+        metadata_str = other.metadata_str;
+        metadata_int = other.metadata_int;
+        metadata_float = other.metadata_float;
+        metadata_str_arr = other.metadata_str_arr;
+
+        if (!data_buffer.empty() && !other.data_buffer.empty()) {
+            ptrdiff_t diff = data_buffer.data() - other.data_buffer.data();
+            for (auto& pair : tensors) {
+                if (pair.second.data_ptr) {
+                    pair.second.data_ptr += diff;
+                }
+            }
+        }
+    }
+
+    SerializedModelGraph(SerializedModelGraph&& other) noexcept = default;
+
+    SerializedModelGraph& operator=(const SerializedModelGraph& other) {
+        if (this == &other) return *this;
+        name = other.name;
+        symbol_table = other.symbol_table;
+        inputs = other.inputs;
+        outputs = other.outputs;
+        parameters = other.parameters;
+        tensors = other.tensors;
+        ops = other.ops;
+        data_buffer = other.data_buffer;
+        metadata_str = other.metadata_str;
+        metadata_int = other.metadata_int;
+        metadata_float = other.metadata_float;
+        metadata_str_arr = other.metadata_str_arr;
+
+        if (!data_buffer.empty() && !other.data_buffer.empty()) {
+            ptrdiff_t diff = data_buffer.data() - other.data_buffer.data();
+            for (auto& pair : tensors) {
+                if (pair.second.data_ptr) {
+                    pair.second.data_ptr += diff;
+                }
+            }
+        }
+        return *this;
+    }
+
+    SerializedModelGraph& operator=(SerializedModelGraph&& other) noexcept = default;
+
     bool has_tokenizer() const {
         return metadata_str_arr.count("tokenizer.ggml.tokens") > 0 ||
                metadata_str.count("tokenizer.ggml.model") > 0;

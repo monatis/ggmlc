@@ -87,30 +87,24 @@ def quantize_q4_0(data: np.ndarray) -> bytes:
     n_blocks = flat.size // BLOCK_SIZE
     flat_blocks = flat.reshape(n_blocks, BLOCK_SIZE)
 
-    out = bytearray()
-    for block in flat_blocks:
-        max_val = float(np.max(np.abs(block)))
-        scale = max_val / -8.0 if max_val > 0 else 0.0
-        scale_fp16 = np.float16(scale)
-        scale_bytes = scale_fp16.tobytes()
+    max_val = np.max(np.abs(flat_blocks), axis=1)
+    scale = np.where(max_val > 0, max_val / -8.0, 0.0)
+    scale_fp16 = scale.astype(np.float16)
 
-        # Quantize nibbles
-        if scale != 0:
-            id_scale = 1.0 / scale
-            # Quantize to [-8, 7] and offset by 8 to [0, 15] for unsigned nibble storage
-            q_vals = np.clip(np.round(block * id_scale) + 8, 0, 15).astype(np.uint8)
-        else:
-            q_vals = np.full(BLOCK_SIZE, 8, dtype=np.uint8)
+    safe_scale = np.where(scale != 0, scale, 1.0)[:, None]
+    q_vals = np.where(
+        scale[:, None] != 0,
+        np.clip(np.round(flat_blocks / safe_scale) + 8, 0, 15),
+        8,
+    ).astype(np.uint8)
 
-        # Pack 32 nibbles into 16 bytes: byte i contains (q[i] & 0x0F) | ((q[i+16] & 0x0F) << 4)
-        low_nibbles = q_vals[:16] & 0x0F
-        high_nibbles = (q_vals[16:] & 0x0F) << 4
-        packed = (low_nibbles | high_nibbles).astype(np.uint8)
+    low_nibbles = q_vals[:, :16] & 0x0F
+    high_nibbles = (q_vals[:, 16:] & 0x0F) << 4
+    packed = (low_nibbles | high_nibbles).astype(np.uint8)
 
-        out.extend(scale_bytes)
-        out.extend(packed.tobytes())
-
-    return bytes(out)
+    scale_bytes = scale_fp16.view(np.uint8).reshape(n_blocks, 2)
+    block_data = np.hstack([scale_bytes, packed])
+    return block_data.tobytes()
 
 
 def dequantize_q4_0(raw_bytes: bytes, shape: tuple[int, ...]) -> np.ndarray:

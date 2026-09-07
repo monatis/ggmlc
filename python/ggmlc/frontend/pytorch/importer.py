@@ -151,28 +151,49 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             continue
 
         target_str = str(node.target)
-        if "sym_size" in target_str or "sym_numel" in target_str:
-            # Symbolic scalar query node (e.g. B, S = x.shape)
+        if (
+            "sym_size" in target_str
+            or "sym_numel" in target_str
+            or "chunk" in target_str
+            or "split" in target_str
+        ):
+            # Symbolic scalar query node or multi-output container (handled via getitem)
             continue
 
         if "getitem" in target_str or node.target is operator.getitem:
             parent = node.args[0]
             if isinstance(parent, Node):
                 parent_target_str = str(parent.target)
-                if "split" in parent_target_str and isinstance(node.args[1], int):
+                if (
+                    "split" in parent_target_str or "chunk" in parent_target_str
+                ) and isinstance(node.args[1], int):
                     idx = int(node.args[1])
                     split_input = parent.args[0]
-                    split_size = parent.args[1]
                     dim = (
                         int(parent.args[2])
                         if len(parent.args) > 2 and parent.args[2] is not None
                         else 0
                     )
-                    if isinstance(split_size, (list, tuple)):
-                        start = sum(split_size[:idx])
-                        end = start + split_size[idx]
+                    val = node.meta.get("val")
+                    shape = (
+                        _torch_shape_to_shape(val.shape)
+                        if isinstance(val, torch.Tensor)
+                        else Shape([])
+                    )
+                    dtype = (
+                        DType.from_torch(val.dtype) if isinstance(val, torch.Tensor) else DType.F32
+                    )
+                    if isinstance(val, torch.Tensor) and dim < 0:
+                        dim = len(val.shape) + dim
+                    if "chunk" in parent_target_str:
+                        sz = val.shape[dim] if isinstance(val, torch.Tensor) else 1
+                        start = idx * sz
+                        end = start + sz
+                    elif isinstance(parent.args[1], (list, tuple)):
+                        start = sum(parent.args[1][:idx])
+                        end = start + parent.args[1][idx]
                     else:
-                        sz = int(split_size)
+                        sz = int(parent.args[1])
                         start = idx * sz
                         end = (idx + 1) * sz
                     val = node.meta.get("val")
@@ -431,10 +452,83 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             name_to_tensor[node.name] = curr_tensor
             continue
 
+        if "lerp" in target_str:
+            # lerp(a, b, w) -> a + w * (b - a)
+            def _get_or_create_tensor(arg, default_name):
+                if isinstance(arg, Node):
+                    return node_to_tensor[arg]
+                dt = (
+                    DType.F32
+                    if isinstance(arg, float)
+                    else (DType.I64 if isinstance(arg, int) else DType.BOOL)
+                )
+                np_val = np.array(arg, dtype=np.float32 if dt == DType.F32 else np.int64)
+                c_t = g.add_tensor(
+                    name=default_name,
+                    shape=Shape([]),
+                    dtype=dt,
+                    storage=StorageClass.CONSTANT,
+                    data=np_val,
+                )
+                g.parameters.append(c_t.id)
+                return c_t
+
+            a_t = _get_or_create_tensor(node.args[0], f"const_{node.name}_a")
+            b_t = _get_or_create_tensor(node.args[1], f"const_{node.name}_b")
+            w_t = _get_or_create_tensor(node.args[2], f"const_{node.name}_w")
+
+            val = node.meta.get("val")
+            shape = _torch_shape_to_shape(val.shape) if isinstance(val, torch.Tensor) else a_t.shape
+            dtype = DType.from_torch(val.dtype) if isinstance(val, torch.Tensor) else a_t.dtype
+
+            diff_t = g.add_tensor(
+                name=f"{node.name}_diff",
+                shape=shape,
+                dtype=dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.SUB,
+                inputs=[b_t.id, a_t.id],
+                outputs=[diff_t.id],
+                name=f"{node.name}_sub",
+            )
+
+            scaled_t = g.add_tensor(
+                name=f"{node.name}_scaled",
+                shape=shape,
+                dtype=dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.MUL,
+                inputs=[diff_t.id, w_t.id],
+                outputs=[scaled_t.id],
+                name=f"{node.name}_mul",
+            )
+
+            out_t = g.add_tensor(
+                name=node.name,
+                shape=shape,
+                dtype=dtype,
+                storage=StorageClass.ACTIVATION,
+            )
+            g.add_op(
+                opcode=OpCode.ADD,
+                inputs=[a_t.id, scaled_t.id],
+                outputs=[out_t.id],
+                name=node.name,
+            )
+
+            node_to_tensor[node] = out_t
+            name_to_tensor[node.name] = out_t
+            continue
+
         if any(
             target_str.endswith(f".{op}.{sfx}")
             for op in (
                 "cumsum",
+                "linspace",
                 "ge",
                 "gt",
                 "ne",
@@ -463,6 +557,11 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                     seq_len = val.shape[-1]
                     arr = np.tile(np.arange(1, seq_len + 1, dtype=np.int64), (val.shape[0], 1))
                     data = arr
+                elif "linspace" in target_str:
+                    start = float(node.args[0])
+                    end = float(node.args[1])
+                    steps = int(node.args[2])
+                    data = np.linspace(start, end, steps, dtype=np.float32)
                 elif "ne" in target_str or "ge" in target_str:
                     data = np.ones(val.shape, dtype=np.int64 if dtype == DType.I64 else np.int32)
                 elif "zeros" in target_str:

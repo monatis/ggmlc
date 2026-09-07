@@ -73,8 +73,9 @@ def quantize_graph_parameters(
 
         if is_param and tensor.data is not None and has_f32 and is_multi_d:
             arr = np.array(tensor.data, dtype=np.float32)
+            row_size = dims[0] if isinstance(graph, GGMLExecutionGraph) else (dims[-1] if dims else 1)
             valid_size = arr.size >= min_elements_to_quantize and (
-                target_dtype == DType.F16 or arr.size % 32 == 0
+                target_dtype == DType.F16 or (arr.size % 32 == 0 and row_size % 32 == 0)
             )
             if valid_size:
                 orig_tensor_bytes = arr.nbytes
