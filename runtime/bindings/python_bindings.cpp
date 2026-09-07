@@ -4,10 +4,13 @@
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/array.h>
 
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
+#include "ggmlc/vmm_pool.h"
+#include "ggmlc/batch_scheduler.h"
 #include "gguf.h"
 
 namespace nb = nanobind;
@@ -172,7 +175,96 @@ NB_MODULE(_runtime, m) {
         .def("init_kv_cache", &ggmlc::ModelExecutor::init_kv_cache, "max_ctx"_a = 2048)
         .def("reset_kv_cache", &ggmlc::ModelExecutor::reset_kv_cache)
         .def("has_kv_cache", &ggmlc::ModelExecutor::has_kv_cache)
+        .def("init_paged_kv_cache", &ggmlc::ModelExecutor::init_paged_kv_cache, "max_batch"_a = 8, "max_ctx"_a = 2048)
+        .def("is_paged_kv_cache_enabled", &ggmlc::ModelExecutor::is_paged_kv_cache_enabled)
+        .def("paged_kv_alloc_slot", &ggmlc::ModelExecutor::paged_kv_alloc_slot, "slot_id"_a, "prefix_hash"_a = "")
+        .def("paged_kv_free_slot", &ggmlc::ModelExecutor::paged_kv_free_slot, "slot_id"_a)
+        .def("paged_kv_ensure_tokens", &ggmlc::ModelExecutor::paged_kv_ensure_tokens, "slot_id"_a, "total_tokens"_a)
+        .def("get_paged_active_vram_bytes", &ggmlc::ModelExecutor::get_paged_active_vram_bytes)
+        .def("configure_vmm_pool", &ggmlc::ModelExecutor::configure_vmm_pool, "max_warm_pages"_a = 64, "prealloc_pages"_a = 0)
+        .def_prop_ro("tokens_per_page", &ggmlc::ModelExecutor::get_tokens_per_page)
+        .def("set_tokens_per_page", &ggmlc::ModelExecutor::set_tokens_per_page, "tokens_per_page"_a)
         .def("set_enable_cuda_graph", &ggmlc::ModelExecutor::set_enable_cuda_graph, "enable"_a)
         .def("is_cuda_graph_enabled", &ggmlc::ModelExecutor::is_cuda_graph_enabled)
-        .def("is_cuda_graph_captured", &ggmlc::ModelExecutor::is_cuda_graph_captured);
+        .def("is_cuda_graph_captured", &ggmlc::ModelExecutor::is_cuda_graph_captured)
+        .def("set_enable_cuda_graph_buckets", &ggmlc::ModelExecutor::set_enable_cuda_graph_buckets, "enable"_a)
+        .def("is_cuda_graph_buckets_enabled", &ggmlc::ModelExecutor::is_cuda_graph_buckets_enabled)
+        .def("is_cuda_graph_bucket_captured", &ggmlc::ModelExecutor::is_cuda_graph_bucket_captured, "batch_size"_a);
+
+    // VMMBlockManager
+    nb::class_<ggmlc::VMMBlockManager>(m, "NativeVMMBlockManager")
+        .def(nb::init<>())
+        .def_static("is_supported_on_device", &ggmlc::VMMBlockManager::is_supported_on_device, "device_id"_a = 0)
+        .def("init", &ggmlc::VMMBlockManager::init, "device_id"_a = 0)
+        .def("is_initialized", &ggmlc::VMMBlockManager::is_initialized)
+        .def_prop_ro("page_size", &ggmlc::VMMBlockManager::page_size)
+        .def("reserve_virtual_window", &ggmlc::VMMBlockManager::reserve_virtual_window, "window_bytes"_a)
+        .def("free_virtual_window", &ggmlc::VMMBlockManager::free_virtual_window, "va_ptr"_a, "window_bytes"_a)
+        .def("alloc_physical_page", &ggmlc::VMMBlockManager::alloc_physical_page)
+        .def("retain_physical_page", &ggmlc::VMMBlockManager::retain_physical_page, "page_handle"_a)
+        .def("release_physical_page", &ggmlc::VMMBlockManager::release_physical_page, "page_handle"_a)
+        .def("map_page", &ggmlc::VMMBlockManager::map_page, "va_offset"_a, "page_handle"_a)
+        .def("unmap_page", &ggmlc::VMMBlockManager::unmap_page, "va_offset"_a)
+        .def("get_prefix_page", &ggmlc::VMMBlockManager::get_prefix_page, "prefix_hash"_a)
+        .def("register_prefix_page", &ggmlc::VMMBlockManager::register_prefix_page, "prefix_hash"_a, "page_handle"_a)
+        .def("evict_prefix_page", &ggmlc::VMMBlockManager::evict_prefix_page, "prefix_hash"_a)
+        .def_prop_ro("prefix_cache_size", &ggmlc::VMMBlockManager::prefix_cache_size)
+        .def("configure_pool", &ggmlc::VMMBlockManager::configure_pool, "max_warm_pages"_a = 64, "prealloc_pages"_a = 0)
+        .def_prop_ro("warm_pool_pages", &ggmlc::VMMBlockManager::warm_pool_pages)
+        .def_prop_ro("free_pool_pages", &ggmlc::VMMBlockManager::free_pool_pages)
+        .def_prop_ro("max_warm_pages", &ggmlc::VMMBlockManager::max_warm_pages)
+        .def("drain_warm_pool", &ggmlc::VMMBlockManager::drain_warm_pool)
+        .def_prop_ro("total_reserved_va_bytes", &ggmlc::VMMBlockManager::total_reserved_va_bytes)
+        .def_prop_ro("total_mapped_physical_bytes", &ggmlc::VMMBlockManager::total_mapped_physical_bytes)
+        .def_prop_ro("total_allocated_pages", &ggmlc::VMMBlockManager::total_allocated_pages)
+        .def("reset", &ggmlc::VMMBlockManager::reset);
+
+    // Paged Radix Tree
+    nb::class_<ggmlc::PrefixMatchResult>(m, "PrefixMatchResult")
+        .def_ro("matched_tokens", &ggmlc::PrefixMatchResult::matched_tokens)
+        .def_ro("matched_pages", &ggmlc::PrefixMatchResult::matched_pages);
+
+    nb::class_<ggmlc::PagedRadixTree>(m, "PagedRadixTree")
+        .def(nb::init<size_t>(), "tokens_per_page"_a = 1024)
+        .def("match_prefix", &ggmlc::PagedRadixTree::match_prefix, "prompt_tokens"_a)
+        .def_prop_ro("tokens_per_page", &ggmlc::PagedRadixTree::tokens_per_page)
+        .def_prop_ro("total_cached_pages", &ggmlc::PagedRadixTree::total_cached_pages)
+        .def_prop_ro("total_nodes", &ggmlc::PagedRadixTree::total_nodes)
+        .def("reset", &ggmlc::PagedRadixTree::reset);
+
+    // Continuous Batching Scheduler
+    nb::class_<ggmlc::GenerationRequest>(m, "GenerationRequest")
+        .def_ro("request_id", &ggmlc::GenerationRequest::request_id)
+        .def_ro("prompt_tokens", &ggmlc::GenerationRequest::prompt_tokens)
+        .def_ro("generated_tokens", &ggmlc::GenerationRequest::generated_tokens)
+        .def_ro("slot_id", &ggmlc::GenerationRequest::slot_id)
+        .def_ro("current_pos", &ggmlc::GenerationRequest::current_pos)
+        .def_ro("max_new_tokens", &ggmlc::GenerationRequest::max_new_tokens)
+        .def_ro("temperature", &ggmlc::GenerationRequest::temperature)
+        .def_ro("eos_token_id", &ggmlc::GenerationRequest::eos_token_id)
+        .def_ro("finished", &ggmlc::GenerationRequest::finished)
+        .def_ro("finish_reason", &ggmlc::GenerationRequest::finish_reason)
+        .def_ro("prefix_tokens_matched", &ggmlc::GenerationRequest::prefix_tokens_matched);
+
+    nb::class_<ggmlc::StepResult>(m, "StepResult")
+        .def_ro("new_tokens", &ggmlc::StepResult::new_tokens)
+        .def_ro("completed_request_ids", &ggmlc::StepResult::completed_request_ids);
+
+    nb::class_<ggmlc::ContinuousBatchScheduler>(m, "ContinuousBatchScheduler")
+        .def(nb::init<ggmlc::ModelExecutor&, size_t, int>(), "executor"_a, "max_batch_size"_a = 8, "eos_token_id"_a = 0)
+        .def("add_request", &ggmlc::ContinuousBatchScheduler::add_request,
+             "prompt_tokens"_a, "max_new_tokens"_a = 32, "temperature"_a = 0.0f, "eos_token_id"_a = -1)
+        .def("step", [](ggmlc::ContinuousBatchScheduler& self) {
+            nb::gil_scoped_release release;
+            return self.step();
+        })
+        .def("has_work", &ggmlc::ContinuousBatchScheduler::has_work)
+        .def("active_count", &ggmlc::ContinuousBatchScheduler::active_count)
+        .def("pending_count", &ggmlc::ContinuousBatchScheduler::pending_count)
+        .def("max_batch_size", &ggmlc::ContinuousBatchScheduler::max_batch_size)
+        .def("get_request", &ggmlc::ContinuousBatchScheduler::get_request, "request_id"_a)
+        .def("enable_prefix_caching", &ggmlc::ContinuousBatchScheduler::enable_prefix_caching, "enable"_a)
+        .def("is_prefix_caching_enabled", &ggmlc::ContinuousBatchScheduler::is_prefix_caching_enabled)
+        .def_prop_ro("total_prefix_cache_hits", &ggmlc::ContinuousBatchScheduler::total_prefix_cache_hits)
+        .def_prop_ro("total_prefix_tokens_saved", &ggmlc::ContinuousBatchScheduler::total_prefix_tokens_saved);
 }

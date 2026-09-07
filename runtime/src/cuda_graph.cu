@@ -14,6 +14,9 @@ struct CUDAGraphManager::Impl {
     cudaStream_t stream = nullptr;
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t instance = nullptr;
+    std::unordered_map<int, cudaGraph_t> bucket_graphs;
+    std::unordered_map<int, cudaGraphExec_t> bucket_instances;
+    int capturing_bucket = -1;
     bool is_capturing = false;
 
     ~Impl() {
@@ -29,6 +32,15 @@ struct CUDAGraphManager::Impl {
             cudaGraphDestroy(graph);
             graph = nullptr;
         }
+        for (auto& pair : bucket_instances) {
+            if (pair.second) cudaGraphExecDestroy(pair.second);
+        }
+        bucket_instances.clear();
+        for (auto& pair : bucket_graphs) {
+            if (pair.second) cudaGraphDestroy(pair.second);
+        }
+        bucket_graphs.clear();
+        capturing_bucket = -1;
         is_capturing = false;
     }
 };
@@ -103,6 +115,67 @@ bool CUDAGraphManager::end_capture_and_instantiate() {
         return false;
     }
     return true;
+}
+
+bool CUDAGraphManager::begin_capture_bucket(int batch_size) {
+    if (!impl_ || !impl_->stream) return false;
+    impl_->capturing_bucket = batch_size;
+    cudaError_t err = cudaStreamBeginCapture(impl_->stream, cudaStreamCaptureModeRelaxed);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[CUDA_GRAPH] begin_capture_bucket(%d) failed: %s\n", batch_size, cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+bool CUDAGraphManager::end_capture_and_instantiate_bucket(int batch_size) {
+    if (!impl_ || !impl_->stream || impl_->capturing_bucket != batch_size) return false;
+    impl_->capturing_bucket = -1;
+
+    cudaGraph_t graph = nullptr;
+    cudaError_t err = cudaStreamEndCapture(impl_->stream, &graph);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[CUDA_GRAPH] end_capture_bucket(%d) failed: %s\n", batch_size, cudaGetErrorString(err));
+        return false;
+    }
+
+    cudaGraphExec_t instance = nullptr;
+    err = cudaGraphInstantiate(&instance, graph, nullptr, nullptr, 0);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[CUDA_GRAPH] instantiate_bucket(%d) failed: %s\n", batch_size, cudaGetErrorString(err));
+        cudaGraphDestroy(graph);
+        return false;
+    }
+
+    // Clean up any existing instance for this bucket
+    if (impl_->bucket_instances.count(batch_size) && impl_->bucket_instances[batch_size]) {
+        cudaGraphExecDestroy(impl_->bucket_instances[batch_size]);
+    }
+    if (impl_->bucket_graphs.count(batch_size) && impl_->bucket_graphs[batch_size]) {
+        cudaGraphDestroy(impl_->bucket_graphs[batch_size]);
+    }
+
+    impl_->bucket_graphs[batch_size] = graph;
+    impl_->bucket_instances[batch_size] = instance;
+    return true;
+}
+
+bool CUDAGraphManager::launch_bucket(int batch_size) {
+    if (!impl_ || !impl_->stream) return false;
+    auto it = impl_->bucket_instances.find(batch_size);
+    if (it == impl_->bucket_instances.end() || !it->second) return false;
+
+    cudaError_t err = cudaGraphLaunch(it->second, impl_->stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[CUDA_GRAPH] launch_bucket(%d) failed: %s\n", batch_size, cudaGetErrorString(err));
+        return false;
+    }
+    cudaStreamSynchronize(impl_->stream);
+    return true;
+}
+
+bool CUDAGraphManager::is_bucket_captured(int batch_size) const {
+    return impl_ && impl_->bucket_instances.find(batch_size) != impl_->bucket_instances.end();
 }
 
 bool CUDAGraphManager::update_executable(struct ggml_cgraph* cgraph, ggml_backend_t backend) {

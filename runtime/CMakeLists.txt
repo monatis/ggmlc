@@ -1,15 +1,17 @@
 if (GGMLC_ENABLE_CUDA)
-    set(GGML_BACKEND_LIBS ggml ggml-base ggml-cpu ggml-cuda)
+    set(GGML_BACKEND_LIBS ggml ggml-base ggml-cpu ggml-cuda cuda)
     add_compile_definitions(GGML_USE_CUDA)
-    set(CUDA_GRAPH_SOURCES src/cuda_graph.cu)
+    set(CUDA_GRAPH_SOURCES src/cuda_graph.cu src/vmm_pool.cu)
 else()
     set(GGML_BACKEND_LIBS ggml_lib)
-    set(CUDA_GRAPH_SOURCES src/cuda_graph_stub.cpp)
+    set(CUDA_GRAPH_SOURCES src/cuda_graph_stub.cpp src/vmm_pool_stub.cpp)
 endif()
 
 add_library(ggmlc_runtime STATIC
     src/loader.cpp
     src/executor.cpp
+    src/radix_tree.cpp
+    src/batch_scheduler.cpp
     src/stdlib_kernels.cpp
     src/pipeline/image.cpp
     src/pipeline/tokenizer.cpp
@@ -33,6 +35,8 @@ target_link_libraries(ggmlc-run PRIVATE
 add_library(ggmlc_runtime_shared SHARED
     src/loader.cpp
     src/executor.cpp
+    src/radix_tree.cpp
+    src/batch_scheduler.cpp
     src/stdlib_kernels.cpp
     src/pipeline/image.cpp
     src/pipeline/tokenizer.cpp
@@ -62,6 +66,8 @@ if (Python_FOUND)
             bindings/python_bindings.cpp
             src/loader.cpp
             src/executor.cpp
+            src/radix_tree.cpp
+            src/batch_scheduler.cpp
             src/stdlib_kernels.cpp
             src/pipeline/image.cpp
             src/pipeline/tokenizer.cpp
