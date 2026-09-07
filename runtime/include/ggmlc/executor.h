@@ -9,6 +9,7 @@
 #include "ggml-backend.h"
 #include "ggmlc/types.h"
 #include "ggmlc/cuda_graph.h"
+#include "ggmlc/vmm_pool.h"
 
 namespace ggmlc {
 
@@ -35,6 +36,7 @@ public:
 
     // Current configured execution device
     const std::string& device() const { return device_; }
+    const SerializedModelGraph& model_graph() const { return model_graph_; }
 
     // Prepare execution context for given dynamic symbol values and optional memory arena reuse
     void prepare(const std::unordered_map<std::string, int64_t>& symbol_env = {}, bool enable_arena_reuse = true);
@@ -61,13 +63,26 @@ public:
     // KV Cache management for autoregressive attention ops
     void init_kv_cache(int64_t max_ctx = 2048);
     void reset_kv_cache();
-    bool has_kv_cache() const { return kv_cache_buffer_ != nullptr; }
+    bool has_kv_cache() const { return kv_cache_buffer_ != nullptr || paged_kv_enabled_; }
     void set_decode_pos(int64_t pos);
+
+    // VMM Paged KV Cache management (Driver-level virtual memory mapping)
+    void init_paged_kv_cache(size_t max_batch = 8, size_t max_ctx = 2048);
+    bool is_paged_kv_cache_enabled() const { return paged_kv_enabled_; }
+    void paged_kv_alloc_slot(int slot_id, const std::string& prefix_hash = "");
+    void paged_kv_free_slot(int slot_id);
+    void paged_kv_ensure_tokens(int slot_id, int64_t total_tokens);
+    size_t get_paged_active_vram_bytes() const;
 
     // CUDA Graph execution
     void set_enable_cuda_graph(bool enable);
     bool is_cuda_graph_enabled() const { return enable_cuda_graph_; }
     bool is_cuda_graph_captured() const;
+
+    // Multi-bucket CUDA Graph execution (B in {1, 2, 4, 8, 16})
+    void set_enable_cuda_graph_buckets(bool enable);
+    bool is_cuda_graph_buckets_enabled() const { return enable_cuda_graph_buckets_; }
+    bool is_cuda_graph_bucket_captured(int batch_size) const;
 
 private:
     void init_weights();
@@ -134,8 +149,28 @@ private:
 
     // CUDA Graph Management
     bool enable_cuda_graph_ = false;
+    bool enable_cuda_graph_buckets_ = false;
     std::unique_ptr<CUDAGraphManager> cuda_graph_mgr_;
     bool cuda_graph_needs_update_ = false;
+
+    // VMM Paged KV Cache Management
+    bool paged_kv_enabled_ = false;
+    size_t paged_max_batch_ = 1;
+    size_t paged_max_ctx_ = 2048;
+    std::unique_ptr<VMMBlockManager> vmm_mgr_;
+    std::unordered_map<uint32_t, uint64_t> vmm_k_va_windows_; // op_id -> va_base
+    std::unordered_map<uint32_t, uint64_t> vmm_v_va_windows_; // op_id -> va_base
+    std::unordered_map<uint32_t, size_t> vmm_slot_bytes_;     // op_id -> bytes per slot
+
+    struct PagedSlotState {
+        int slot_id = -1;
+        bool active = false;
+        std::string prefix_hash;
+        int64_t current_tokens = 0;
+        std::unordered_map<uint32_t, std::vector<uint64_t>> mapped_pages_k; // op_id -> handles
+        std::unordered_map<uint32_t, std::vector<uint64_t>> mapped_pages_v; // op_id -> handles
+    };
+    std::vector<PagedSlotState> paged_slots_;
 };
 
 } // namespace ggmlc

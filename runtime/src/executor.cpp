@@ -108,6 +108,9 @@ ModelExecutor::~ModelExecutor() {
         ggml_free(ctx_kv_cache_);
         ctx_kv_cache_ = nullptr;
     }
+    if (vmm_mgr_) {
+        vmm_mgr_->reset();
+    }
     if (backend_) {
         ggml_backend_free(backend_);
         backend_ = nullptr;
@@ -331,6 +334,15 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
 }
 
 void ModelExecutor::reset_kv_cache() {
+    if (paged_kv_enabled_) {
+        for (int i = 0; i < static_cast<int>(paged_slots_.size()); ++i) {
+            paged_kv_free_slot(i);
+        }
+        decode_graph_cached_ = false;
+        decode_attn_views_.clear();
+        decode_rope_arange_tensors_.clear();
+        return;
+    }
     for (const auto& pair : kv_cache_k_) {
         if (pair.second) {
             ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
@@ -344,6 +356,214 @@ void ModelExecutor::reset_kv_cache() {
     decode_graph_cached_ = false;
     decode_attn_views_.clear();
     decode_rope_arange_tensors_.clear();
+}
+
+void ModelExecutor::init_paged_kv_cache(size_t max_batch, size_t max_ctx) {
+    if (paged_kv_enabled_) return;
+    paged_max_batch_ = max_batch;
+    paged_max_ctx_ = max_ctx;
+
+    if (!is_cuda_) {
+        init_kv_cache(max_ctx);
+        return;
+    }
+
+    vmm_mgr_ = std::make_unique<VMMBlockManager>();
+    if (!vmm_mgr_->init(0)) {
+        fprintf(stderr, "[PAGED_KV] VMM initialization failed on device 0, falling back to standard KV cache\n");
+        init_kv_cache(max_ctx);
+        return;
+    }
+
+    if (!weights_loaded_) {
+        init_weights();
+    }
+
+    std::vector<const SerializedOp*> attn_ops;
+    for (const auto& op : model_graph_.ops) {
+        if (op.opcode == GGML_OP_FLASH_ATTN_EXT) {
+            attn_ops.push_back(&op);
+        }
+    }
+    if (attn_ops.empty()) return;
+
+    paged_slots_.resize(max_batch);
+    for (size_t i = 0; i < max_batch; ++i) {
+        paged_slots_[i].slot_id = static_cast<int>(i);
+        paged_slots_[i].active = false;
+        paged_slots_[i].current_tokens = 0;
+    }
+
+    size_t ctx_meta_size = (attn_ops.size() * 2 + 32) * ggml_tensor_overhead() + 2 * 1024 * 1024;
+    struct ggml_init_params params = {
+        /* .mem_size   = */ ctx_meta_size,
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc   = */ true,
+    };
+    ctx_kv_cache_ = ggml_init(params);
+    if (!ctx_kv_cache_) {
+        throw std::runtime_error("Failed to initialize ggml_context for Paged KV cache");
+    }
+
+    std::unordered_map<std::string, int64_t> dummy_env;
+    dummy_env["s"] = 1;
+    for (const auto& sym : model_graph_.symbol_table) {
+        dummy_env[sym] = 1;
+    }
+
+    for (const auto* op : attn_ops) {
+        uint32_t k_id = op->inputs[1];
+        uint32_t v_id = op->inputs.size() > 2 ? op->inputs[2] : k_id;
+        const auto& k_t = model_graph_.tensors.at(k_id);
+        const auto& v_t = model_graph_.tensors.at(v_id);
+
+        int64_t head_dim = k_t.ne[0]->evaluate(dummy_env, model_graph_.symbol_table);
+        int64_t num_kv_heads = k_t.ne[2]->evaluate(dummy_env, model_graph_.symbol_table);
+        enum ggml_type kv_type = (k_t.type == GGML_TYPE_F32) ? GGML_TYPE_F16 : k_t.type;
+        size_t elem_sz = ggml_type_size(kv_type);
+
+        size_t raw_slot_bytes = head_dim * max_ctx * num_kv_heads * elem_sz;
+        size_t page_sz = vmm_mgr_->page_size();
+        size_t slot_bytes = ((raw_slot_bytes + page_sz - 1) / page_sz) * page_sz;
+        size_t total_window = max_batch * slot_bytes;
+
+        uint64_t va_k = vmm_mgr_->reserve_virtual_window(total_window);
+        uint64_t va_v = vmm_mgr_->reserve_virtual_window(total_window);
+
+        vmm_k_va_windows_[op->id] = va_k;
+        vmm_v_va_windows_[op->id] = va_v;
+        vmm_slot_bytes_[op->id] = slot_bytes;
+
+        struct ggml_tensor* g_k = ggml_new_tensor_4d(ctx_kv_cache_, kv_type, head_dim, max_ctx, num_kv_heads, max_batch);
+        struct ggml_tensor* g_v = ggml_new_tensor_4d(ctx_kv_cache_, kv_type, head_dim, max_ctx, num_kv_heads, max_batch);
+
+        g_k->nb[3] = slot_bytes;
+        g_v->nb[3] = slot_bytes;
+        g_k->data = reinterpret_cast<void*>(va_k);
+        g_v->data = reinterpret_cast<void*>(va_v);
+        g_k->buffer = weight_buffer_;
+        g_v->buffer = weight_buffer_;
+
+        std::string k_name = "kv_cache_k_" + std::to_string(op->id);
+        std::string v_name = "kv_cache_v_" + std::to_string(op->id);
+        ggml_set_name(g_k, k_name.c_str());
+        ggml_set_name(g_v, v_name.c_str());
+
+        kv_cache_k_[op->id] = g_k;
+        kv_cache_v_[op->id] = g_v;
+    }
+
+    paged_kv_enabled_ = true;
+    kv_cache_enabled_ = true;
+}
+
+void ModelExecutor::paged_kv_alloc_slot(int slot_id, const std::string& prefix_hash) {
+    if (!paged_kv_enabled_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
+    auto& slot = paged_slots_[slot_id];
+    slot.active = true;
+    slot.prefix_hash = prefix_hash;
+    slot.current_tokens = 0;
+
+    if (!prefix_hash.empty() && vmm_mgr_) {
+        for (const auto& pair : vmm_slot_bytes_) {
+            uint32_t op_id = pair.first;
+            size_t slot_bytes = pair.second;
+            std::string key_k = prefix_hash + "_k_op" + std::to_string(op_id);
+            std::string key_v = prefix_hash + "_v_op" + std::to_string(op_id);
+            uint64_t shared_k = vmm_mgr_->get_prefix_page(key_k);
+            uint64_t shared_v = vmm_mgr_->get_prefix_page(key_v);
+            if (shared_k && shared_v) {
+                uint64_t va_k_base = vmm_k_va_windows_[op_id] + slot_id * slot_bytes;
+                uint64_t va_v_base = vmm_v_va_windows_[op_id] + slot_id * slot_bytes;
+                vmm_mgr_->retain_physical_page(shared_k);
+                vmm_mgr_->retain_physical_page(shared_v);
+                vmm_mgr_->map_page(va_k_base, shared_k);
+                vmm_mgr_->map_page(va_v_base, shared_v);
+                slot.mapped_pages_k[op_id].push_back(shared_k);
+                slot.mapped_pages_v[op_id].push_back(shared_v);
+            }
+        }
+    }
+}
+
+void ModelExecutor::paged_kv_free_slot(int slot_id) {
+    if (!paged_kv_enabled_ || !vmm_mgr_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
+    auto& slot = paged_slots_[slot_id];
+    if (!slot.active && slot.mapped_pages_k.empty()) return;
+
+    size_t page_sz = vmm_mgr_->page_size();
+
+    for (const auto& pair : vmm_slot_bytes_) {
+        uint32_t op_id = pair.first;
+        size_t slot_bytes = pair.second;
+        uint64_t va_k_base = vmm_k_va_windows_[op_id] + slot_id * slot_bytes;
+        uint64_t va_v_base = vmm_v_va_windows_[op_id] + slot_id * slot_bytes;
+
+        auto it_k = slot.mapped_pages_k.find(op_id);
+        if (it_k != slot.mapped_pages_k.end()) {
+            for (size_t i = 0; i < it_k->second.size(); ++i) {
+                vmm_mgr_->unmap_page(va_k_base + i * page_sz);
+                vmm_mgr_->release_physical_page(it_k->second[i]);
+            }
+            it_k->second.clear();
+        }
+
+        auto it_v = slot.mapped_pages_v.find(op_id);
+        if (it_v != slot.mapped_pages_v.end()) {
+            for (size_t i = 0; i < it_v->second.size(); ++i) {
+                vmm_mgr_->unmap_page(va_v_base + i * page_sz);
+                vmm_mgr_->release_physical_page(it_v->second[i]);
+            }
+            it_v->second.clear();
+        }
+    }
+    slot.mapped_pages_k.clear();
+    slot.mapped_pages_v.clear();
+    slot.current_tokens = 0;
+    slot.active = false;
+    slot.prefix_hash.clear();
+}
+
+void ModelExecutor::paged_kv_ensure_tokens(int slot_id, int64_t total_tokens) {
+    if (!paged_kv_enabled_ || !vmm_mgr_ || slot_id < 0 || static_cast<size_t>(slot_id) >= paged_slots_.size()) return;
+    auto& slot = paged_slots_[slot_id];
+
+    size_t page_sz = vmm_mgr_->page_size();
+
+    for (const auto& pair : vmm_slot_bytes_) {
+        uint32_t op_id = pair.first;
+        size_t slot_bytes = pair.second;
+        uint64_t va_k_base = vmm_k_va_windows_[op_id] + slot_id * slot_bytes;
+        uint64_t va_v_base = vmm_v_va_windows_[op_id] + slot_id * slot_bytes;
+
+        struct ggml_tensor* g_k = kv_cache_k_[op_id];
+        size_t elem_sz = ggml_type_size(g_k->type);
+        int64_t head_dim = g_k->ne[0];
+        int64_t num_kv_heads = g_k->ne[2];
+        size_t bytes_per_token = head_dim * num_kv_heads * elem_sz;
+
+        size_t needed_bytes = static_cast<size_t>(total_tokens) * bytes_per_token;
+        auto& layer_pages_k = slot.mapped_pages_k[op_id];
+        auto& layer_pages_v = slot.mapped_pages_v[op_id];
+        size_t current_mapped = layer_pages_k.size() * page_sz;
+
+        while (current_mapped < needed_bytes && current_mapped < slot_bytes) {
+            uint64_t h_k = vmm_mgr_->alloc_physical_page();
+            uint64_t h_v = vmm_mgr_->alloc_physical_page();
+
+            vmm_mgr_->map_page(va_k_base + current_mapped, h_k);
+            vmm_mgr_->map_page(va_v_base + current_mapped, h_v);
+
+            layer_pages_k.push_back(h_k);
+            layer_pages_v.push_back(h_v);
+            current_mapped += page_sz;
+        }
+    }
+    slot.current_tokens = total_tokens;
+}
+
+size_t ModelExecutor::get_paged_active_vram_bytes() const {
+    return vmm_mgr_ ? vmm_mgr_->total_mapped_physical_bytes() : 0;
 }
 
 void ModelExecutor::set_decode_pos(int64_t pos) {
@@ -1305,12 +1525,63 @@ bool ModelExecutor::is_cuda_graph_captured() const {
     return cuda_graph_mgr_ && cuda_graph_mgr_->is_captured();
 }
 
+void ModelExecutor::set_enable_cuda_graph_buckets(bool enable) {
+    enable_cuda_graph_buckets_ = enable;
+    if (enable && is_cuda_ && !cuda_graph_mgr_) {
+        cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
+        if (backend_) {
+            cuda_graph_mgr_->init(backend_);
+        }
+    }
+}
+
+bool ModelExecutor::is_cuda_graph_bucket_captured(int batch_size) const {
+    return cuda_graph_mgr_ && cuda_graph_mgr_->is_bucket_captured(batch_size);
+}
+
 void ModelExecutor::run(int n_threads) {
     if (!ctx_ || !cgraph_ || !backend_) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
     if (ggml_backend_is_cpu(backend_)) {
         ggml_backend_cpu_set_n_threads(backend_, n_threads);
+    }
+
+    if (is_cuda_ && enable_cuda_graph_buckets_) {
+        if (!cuda_graph_mgr_) {
+            cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
+        }
+        if (!cuda_graph_mgr_->is_initialized()) {
+            cuda_graph_mgr_->init(backend_);
+        }
+        if (cuda_graph_mgr_->is_initialized()) {
+            int current_batch = 1;
+            auto sym_it = last_symbol_env_.find("b");
+            if (sym_it != last_symbol_env_.end()) {
+                current_batch = static_cast<int>(sym_it->second);
+            } else if (!model_graph_.inputs.empty()) {
+                uint32_t inp_id = model_graph_.inputs[0];
+                auto it = ggml_tensors_.find(inp_id);
+                if (it != ggml_tensors_.end() && it->second) {
+                    current_batch = it->second->ne[1] > 1 ? static_cast<int>(it->second->ne[1]) : 1;
+                }
+            }
+
+            if (cuda_graph_mgr_->is_bucket_captured(current_batch)) {
+                if (cuda_graph_mgr_->launch_bucket(current_batch)) {
+                    return;
+                }
+            } else {
+                if (cuda_graph_mgr_->begin_capture_bucket(current_batch)) {
+                    ggml_backend_graph_compute_async(backend_, cgraph_);
+                    if (cuda_graph_mgr_->end_capture_and_instantiate_bucket(current_batch)) {
+                        if (cuda_graph_mgr_->launch_bucket(current_batch)) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (is_cuda_ && enable_cuda_graph_) {

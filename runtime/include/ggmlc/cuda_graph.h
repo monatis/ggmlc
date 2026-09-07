@@ -25,9 +25,15 @@ public:
     bool is_initialized() const;
     bool is_captured() const;
 
-    // Stream capture lifecycle
+    // Stream capture lifecycle (single instance)
     bool begin_capture();
     bool end_capture_and_instantiate();
+
+    // Multi-bucket execution for batch sizes B in {1, 2, 4, 8, 16}
+    bool begin_capture_bucket(int batch_size);
+    bool end_capture_and_instantiate_bucket(int batch_size);
+    bool launch_bucket(int batch_size);
+    bool is_bucket_captured(int batch_size) const;
 
     // Update executable graph with newly modified dynamic parameters / shapes
     bool update_executable(struct ggml_cgraph* cgraph, ggml_backend_t backend);

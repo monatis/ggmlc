@@ -142,3 +142,42 @@ executor.run(/*n_threads=*/1);
 uint32_t out_id = model_graph.outputs[0];
 const float* out_ptr = reinterpret_cast<const float*>(executor.get_output_data(out_id));
 ```
+
+---
+
+## 6. High-Throughput Serving, Driver-VMM Paged KV Cache & Multi-Bucket CUDA Graphs
+
+For high-concurrency LLM/SLM serving and agent swarms (where coding assistants spawn parallel subagents for planning, retrieval, and testing), `ggmlc` provides a zero-overhead continuous batching architecture.
+
+```mermaid
+graph TD
+    Client["Client Requests<br/><i>(Agent Swarms)</i>"] --> CBS["ContinuousBatchScheduler<br/><i>Iteration-Level Dynamic Admission</i>"]
+    CBS --> VMM["VMMBlockManager<br/><i>cuMemMap Virtual Paging</i>"]
+    VMM --> MMU["GPU MMU (2 MB Pages)<br/><i>Zero-Copy Virtual Window</i>"]
+    CBS --> MBG["Multi-Bucket CUDA Graphs<br/><i>B in {1, 2, 4, 8, 16}</i>"]
+    MBG --> FA["FlashAttention &amp; GEMV<br/><i>Unmodified Hardware Kernels</i>"]
+```
+
+### Core Architecture Components
+
+1. **Driver-VMM Virtual Memory Paging (`VMMBlockManager`)**:
+   - Upstream software page tables break contiguous affine tensor addressing (`nb`), requiring slow custom gather kernels.
+   - `ggmlc` maps 2 MB physical device pages into a unified 64-bit virtual memory window via the CUDA Driver VMM API (`cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemSetAccess`).
+   - Standard FlashAttention and FP16 GEMV microkernels execute over contiguous virtual addresses with **zero bandwidth penalty** (41.77 GB/s on GTX 1050, matching `cudaMalloc`).
+   - Dynamic sequence expansion takes **1.28 ms** with zero bytes copied and zero device pointer relocation.
+
+2. **Multi-Bucket CUDA Graphs**:
+   - Single-token decode is strictly $S=1$. The runtime captures discrete static CUDA graphs for discrete batch buckets ($B \in \{1, 2, 4, 8, 16\}$).
+   - Completely eliminates Windows WDDM driver queue latency (~2.2–3.1 ms per token) while maintaining pointer stability across memory expansions.
+
+3. **Iteration-Level Continuous Batch Scheduler (`ContinuousBatchScheduler`)**:
+   - Dynamically admits pending requests into free KV cache slots mid-flight.
+   - Selects the optimal batch bucket on every decode step.
+   - Immediately unmaps and releases physical pages when requests complete, dropping active VRAM consumption with zero memory leaks.
+
+### Serving CLI Flags
+
+- `--paged-kv`: Enables Driver-VMM virtual page mapping for dynamic on-demand KV cache allocation.
+- `--serve`: Starts continuous batching interactive server session with iteration-level request scheduling.
+- `--max-batch <N>`: Sets maximum concurrent requests in continuous batching (default: `8`).
+

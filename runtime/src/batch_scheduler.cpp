@@ -1,0 +1,251 @@
+#include "ggmlc/batch_scheduler.h"
+#include <cmath>
+#include <random>
+#include <algorithm>
+#include <iostream>
+
+namespace ggmlc {
+
+ContinuousBatchScheduler::ContinuousBatchScheduler(ModelExecutor& executor, size_t max_batch_size, int eos_token_id)
+    : executor_(executor), max_batch_size_(max_batch_size), default_eos_token_id_(eos_token_id) {
+    active_slots_.resize(max_batch_size_, nullptr);
+    if (!executor_.is_paged_kv_cache_enabled()) {
+        executor_.init_paged_kv_cache(max_batch_size_, 2048);
+    }
+    executor_.set_enable_cuda_graph_buckets(true);
+}
+
+ContinuousBatchScheduler::~ContinuousBatchScheduler() {
+    for (size_t i = 0; i < active_slots_.size(); ++i) {
+        if (active_slots_[i]) {
+            executor_.paged_kv_free_slot(static_cast<int>(i));
+            active_slots_[i] = nullptr;
+        }
+    }
+}
+
+uint64_t ContinuousBatchScheduler::add_request(const std::vector<int32_t>& prompt_tokens, int max_new_tokens, float temperature, int eos_token_id) {
+    auto req = std::make_shared<GenerationRequest>();
+    req->request_id = next_request_id_++;
+    req->prompt_tokens = prompt_tokens;
+    req->max_new_tokens = max_new_tokens;
+    req->temperature = temperature;
+    req->eos_token_id = (eos_token_id >= 0) ? eos_token_id : default_eos_token_id_;
+    req->current_pos = 0;
+    req->finished = false;
+
+    pending_queue_.push_back(req);
+    all_requests_[req->request_id] = req;
+    return req->request_id;
+}
+
+bool ContinuousBatchScheduler::has_work() const {
+    if (!pending_queue_.empty()) return true;
+    for (const auto& slot : active_slots_) {
+        if (slot != nullptr) return true;
+    }
+    return false;
+}
+
+size_t ContinuousBatchScheduler::active_count() const {
+    size_t count = 0;
+    for (const auto& slot : active_slots_) {
+        if (slot != nullptr) count++;
+    }
+    return count;
+}
+
+size_t ContinuousBatchScheduler::pending_count() const {
+    return pending_queue_.size();
+}
+
+std::shared_ptr<GenerationRequest> ContinuousBatchScheduler::get_request(uint64_t request_id) const {
+    auto it = all_requests_.find(request_id);
+    if (it != all_requests_.end()) return it->second;
+    return nullptr;
+}
+
+int ContinuousBatchScheduler::find_available_slot() const {
+    for (size_t i = 0; i < active_slots_.size(); ++i) {
+        if (active_slots_[i] == nullptr) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int ContinuousBatchScheduler::select_batch_bucket(size_t max_active_slot) const {
+    static const std::vector<int> buckets = {1, 2, 4, 8, 16};
+    for (int b : buckets) {
+        if (static_cast<size_t>(b) > max_active_slot) return b;
+    }
+    return static_cast<int>(buckets.back());
+}
+
+int32_t ContinuousBatchScheduler::sample_next_token(const float* logits, size_t vocab_size, float temperature) {
+    if (temperature <= 0.0f) {
+        // Greedy argmax
+        int32_t best_idx = 0;
+        float best_val = logits[0];
+        for (size_t i = 1; i < vocab_size; ++i) {
+            if (logits[i] > best_val) {
+                best_val = logits[i];
+                best_idx = static_cast<int32_t>(i);
+            }
+        }
+        return best_idx;
+    }
+
+    // Temperature-scaled softmax sampling
+    std::vector<float> probs(vocab_size);
+    float max_l = logits[0];
+    for (size_t i = 1; i < vocab_size; ++i) {
+        if (logits[i] > max_l) max_l = logits[i];
+    }
+    float sum = 0.0f;
+    for (size_t i = 0; i < vocab_size; ++i) {
+        probs[i] = std::exp((logits[i] - max_l) / temperature);
+        sum += probs[i];
+    }
+    static std::mt19937 rng(1337);
+    std::uniform_real_distribution<float> dist(0.0f, sum);
+    float r = dist(rng);
+    float accum = 0.0f;
+    for (size_t i = 0; i < vocab_size; ++i) {
+        accum += probs[i];
+        if (accum >= r) return static_cast<int32_t>(i);
+    }
+    return static_cast<int32_t>(vocab_size - 1);
+}
+
+StepResult ContinuousBatchScheduler::step() {
+    StepResult res;
+
+    // 1. Admit pending requests into free slots
+    while (!pending_queue_.empty()) {
+        int free_slot = find_available_slot();
+        if (free_slot < 0) break;
+
+        auto req = pending_queue_.front();
+        pending_queue_.pop_front();
+
+        req->slot_id = free_slot;
+        req->current_pos = 0;
+        active_slots_[free_slot] = req;
+
+        executor_.paged_kv_alloc_slot(free_slot);
+        int64_t total_tokens_needed = static_cast<int64_t>(req->prompt_tokens.size()) + req->max_new_tokens;
+        executor_.paged_kv_ensure_tokens(free_slot, total_tokens_needed);
+    }
+
+    // 2. Select bucket based on highest active slot index
+    int max_slot = -1;
+    for (int i = 0; i < static_cast<int>(active_slots_.size()); ++i) {
+        if (active_slots_[i] != nullptr) {
+            max_slot = std::max(max_slot, i);
+        }
+    }
+    if (max_slot < 0) return res;
+
+    int bucket_b = select_batch_bucket(static_cast<size_t>(max_slot));
+    bucket_b = std::min<int>(bucket_b, static_cast<int>(max_batch_size_));
+
+    // 3. Prepare batch inputs
+    std::vector<int32_t> batch_tokens(bucket_b, 0);
+    for (int b = 0; b < bucket_b; ++b) {
+        auto req = active_slots_[b];
+        if (req != nullptr) {
+            if (req->current_pos < static_cast<int64_t>(req->prompt_tokens.size())) {
+                batch_tokens[b] = req->prompt_tokens[req->current_pos];
+            } else if (!req->generated_tokens.empty()) {
+                batch_tokens[b] = req->generated_tokens.back();
+            } else if (!req->prompt_tokens.empty()) {
+                batch_tokens[b] = req->prompt_tokens.back();
+            }
+        }
+    }
+
+    // 4. Configure executor symbol environment and inputs
+    const auto& mg = executor_.model_graph();
+    if (mg.inputs.empty() || mg.outputs.empty()) {
+        throw std::runtime_error("ContinuousBatchScheduler: Model graph has no inputs or outputs");
+    }
+    uint32_t in_tid = mg.inputs[0];
+    uint32_t out_tid = mg.outputs[0];
+
+    std::unordered_map<std::string, int64_t> symbol_env;
+    symbol_env["b"] = bucket_b;
+    symbol_env["s"] = 1;
+
+    // Check input tensor dynamic dimension symbols
+    const auto& in_t = mg.tensors.at(in_tid);
+    if (in_t.ne.size() > 0 && in_t.ne[0] && in_t.ne[0]->type == DimType::SYMBOL) {
+        int64_t sym_idx = in_t.ne[0]->val;
+        if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(mg.symbol_table.size())) {
+            symbol_env[mg.symbol_table[sym_idx]] = 1;
+        }
+    }
+    if (in_t.ne.size() > 1 && in_t.ne[1] && in_t.ne[1]->type == DimType::SYMBOL) {
+        int64_t sym_idx = in_t.ne[1]->val;
+        if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(mg.symbol_table.size())) {
+            symbol_env[mg.symbol_table[sym_idx]] = bucket_b;
+        }
+    }
+
+    // Populate any remaining symbols in symbol_table
+    for (const auto& sym : mg.symbol_table) {
+        if (symbol_env.find(sym) == symbol_env.end()) {
+            if (sym.find("b") != std::string::npos || sym.find("batch") != std::string::npos) {
+                symbol_env[sym] = bucket_b;
+            } else {
+                symbol_env[sym] = 1;
+            }
+        }
+    }
+
+    executor_.prepare(symbol_env, true);
+    executor_.set_input(in_tid, batch_tokens.data(), batch_tokens.size() * sizeof(int32_t));
+
+    // 5. Run forward step
+    executor_.run(1);
+
+    // 6. Process outputs per active slot
+    const float* logits_base = static_cast<const float*>(executor_.get_output_data(out_tid));
+    size_t total_elements = executor_.get_tensor_size_bytes(out_tid) / sizeof(float);
+    size_t vocab_size = total_elements / bucket_b;
+
+    for (int b = 0; b < bucket_b; ++b) {
+        auto req = active_slots_[b];
+        if (req == nullptr) continue;
+
+        if (req->current_pos < static_cast<int64_t>(req->prompt_tokens.size()) - 1) {
+            // Still ingesting prompt tokens
+            req->current_pos++;
+            continue;
+        }
+
+        // Sampling next generated token
+        const float* row_logits = logits_base + b * vocab_size;
+        int32_t next_tok = sample_next_token(row_logits, vocab_size, req->temperature);
+        req->generated_tokens.push_back(next_tok);
+        req->current_pos++;
+
+        res.new_tokens.push_back({req->request_id, next_tok});
+
+        // Check completion
+        bool hit_eos = (req->eos_token_id >= 0 && next_tok == req->eos_token_id);
+        bool hit_max = (static_cast<int>(req->generated_tokens.size()) >= req->max_new_tokens);
+
+        if (hit_eos || hit_max) {
+            req->finished = true;
+            req->finish_reason = hit_eos ? "stop" : "length";
+            res.completed_request_ids.push_back(req->request_id);
+
+            // Free slot physical memory immediately!
+            executor_.paged_kv_free_slot(b);
+            active_slots_[b] = nullptr;
+        }
+    }
+
+    return res;
+}
+
+} // namespace ggmlc

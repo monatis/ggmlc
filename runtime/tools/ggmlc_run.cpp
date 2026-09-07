@@ -13,6 +13,7 @@
 #include "ggmlc/executor.h"
 #include "ggmlc/pipeline/image.h"
 #include "ggmlc/pipeline/tokenizer.h"
+#include "ggmlc/batch_scheduler.h"
 
 static void print_help(const char* prog_name) {
     std::cout << "================================================================================\n"
@@ -32,6 +33,10 @@ static void print_help(const char* prog_name) {
               << "  --top-p <P>                 Nucleus sampling probability (default: 0.9)\n"
               << "  --echo-prompt               Echo prompt before streaming response (for debugging)\n"
               << "  --show-special              Print special control tokens (e.g. <|im_end|>)\n\n"
+              << "High-Throughput Serving & Paging Options:\n"
+              << "  --serve                     Start continuous batching server session\n"
+              << "  --paged-kv                  Enable Driver-VMM Paged KV Cache (zero-copy VRAM mapping)\n"
+              << "  --max-batch <N>             Maximum batch size for continuous batching (default: 8)\n\n"
               << "Preprocessing Options:\n"
               << "  --image <name:file.jpg>     Preprocess and set image tensor (bicubic + normalize)\n"
               << "  --text <name:string>        Tokenize and set text input tensor (BPE/WordPiece)\n\n"
@@ -225,6 +230,9 @@ int main(int argc, char** argv) {
     int chunk_size = 128;
     bool unplanned = false;
     bool use_cuda_graph = false;
+    bool use_paged_kv = false;
+    bool is_serve_mode = false;
+    int max_batch = 8;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -306,6 +314,12 @@ int main(int argc, char** argv) {
             chunk_size = std::stoi(argv[++i]);
         } else if (arg == "--unplanned") {
             unplanned = true;
+        } else if (arg == "--paged-kv") {
+            use_paged_kv = true;
+        } else if (arg == "--serve") {
+            is_serve_mode = true;
+        } else if (arg == "--max-batch" && i + 1 < argc) {
+            max_batch = std::stoi(argv[++i]);
         }
     }
 
@@ -360,8 +374,52 @@ int main(int argc, char** argv) {
         ggmlc::pipeline::BPETokenizer tokenizer;
         bool has_tokenizer = tokenizer.init_from_gguf_file(model_path);
 
+        if (is_serve_mode) {
+            if (!has_tokenizer) {
+                std::cerr << "[ggmlc-run ERROR] Model does not contain tokenizer metadata. Cannot use '--serve'.\n";
+                return 1;
+            }
+            std::cout << "================================================================================\n"
+                      << "[ggmlc-run SERVER] High-Throughput Continuous Batching Engine\n"
+                      << "  Model:        " << model_path << "\n"
+                      << "  Device:       " << device_name << "\n"
+                      << "  Max Batch:    " << max_batch << "\n"
+                      << "  Paged KV:     Driver-VMM cuMemMap (Zero-Copy Physical Allocation)\n"
+                      << "  CUDA Graphs:  Multi-Bucket (B in {1, 2, 4, 8, 16})\n"
+                      << "================================================================================\n";
+            ggmlc::ModelExecutor executor(model_graph, device_name);
+            ggmlc::ContinuousBatchScheduler scheduler(executor, max_batch, tokenizer.eos_token_id());
+
+            std::cout << "[ggmlc-run SERVER] Ready. Submit prompt (or type 'exit' to quit):\n> " << std::flush;
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                if (line == "exit" || line == "quit") break;
+                if (line.empty()) {
+                    std::cout << "> " << std::flush;
+                    continue;
+                }
+
+                std::vector<int32_t> p_tokens = tokenizer.encode(line, 0, false, false);
+                if (p_tokens.empty()) p_tokens.push_back(0);
+                uint64_t req_id = scheduler.add_request(p_tokens, max_tokens, temperature, tokenizer.eos_token_id());
+                std::cout << "[Request #" << req_id << " Queued] (" << p_tokens.size() << " prompt tokens)\n";
+
+                while (scheduler.has_work()) {
+                    auto res = scheduler.step();
+                    for (const auto& pair : res.new_tokens) {
+                        std::cout << tokenizer.decode_token(pair.second, true) << std::flush;
+                    }
+                    if (!res.completed_request_ids.empty()) {
+                        std::cout << "\n[Request Completed]\n";
+                    }
+                }
+                std::cout << "\n> " << std::flush;
+            }
+            return 0;
+        }
+
         // ====================================================================
-        // Mode A: Autoregressive Text Generation
+        // Mode A: Autoregressive Text Generation & Interactive Chat
         // ====================================================================
         if (is_generate || !chat_text.empty() || !prompt_text.empty()) {
             if (!has_tokenizer) {
@@ -421,7 +479,13 @@ int main(int argc, char** argv) {
             }
 
             if (use_kv_cache) {
-                executor.init_kv_cache(current_tokens.size() + max_tokens + 256);
+                if (use_paged_kv) {
+                    executor.init_paged_kv_cache(max_batch, current_tokens.size() + max_tokens + 256);
+                    executor.paged_kv_alloc_slot(0);
+                    executor.paged_kv_ensure_tokens(0, current_tokens.size() + max_tokens + 256);
+                } else {
+                    executor.init_kv_cache(current_tokens.size() + max_tokens + 256);
+                }
             }
 
             int64_t prompt_len = static_cast<int64_t>(current_tokens.size());
