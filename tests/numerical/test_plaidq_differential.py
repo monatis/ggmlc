@@ -5,6 +5,20 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
+plaidq_dir = Path(__file__).resolve().parent.parent.parent / "scratch" / "plaidq"
+if str(plaidq_dir) not in sys.path:
+    sys.path.insert(0, str(plaidq_dir))
+
+try:
+    import plaidq.models_plaid_q as mpq
+    import plaidq.qwen3_trunk as qt
+    import plaidq.schedule as ps
+except ImportError:
+    pytestmark = pytest.mark.skip(reason="plaidq not installed (scratch/plaidq not available)")
+    mpq = qt = ps = None  # type: ignore[assignment]
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,14 +27,6 @@ from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
-
-plaidq_dir = Path(__file__).resolve().parent.parent.parent / "scratch" / "plaidq"
-if str(plaidq_dir) not in sys.path:
-    sys.path.insert(0, str(plaidq_dir))
-
-import plaidq.models_plaid_q as mpq
-import plaidq.qwen3_trunk as qt
-import plaidq.schedule as ps
 
 
 def _patch_plaidq_for_export():
