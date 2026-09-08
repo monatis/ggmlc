@@ -98,6 +98,7 @@ class ModelRunner:
         *args: np.ndarray,
         symbols: dict[str, int] | None = None,
         n_threads: int | None = None,
+        enable_arena_reuse: bool = True,
         **kwargs: np.ndarray,
     ) -> np.ndarray | dict[str | int, np.ndarray]:
         """Runs model inference synchronously on input tensors.
@@ -106,6 +107,7 @@ class ModelRunner:
             *args: Positional input arrays (matched to graph inputs in order).
             symbols: Optional dictionary of dynamic symbol values (e.g. {'seq_len': 32}).
             n_threads: Number of CPU execution threads (defaults to self.n_threads).
+            enable_arena_reuse: Whether to use ggml_gallocr for activation arena reuse.
             **kwargs: Named input arrays (matched to input tensor names).
 
         Returns:
@@ -150,7 +152,7 @@ class ModelRunner:
                 symbol_env[self.symbol_table[0]] = s_val
 
         # 1. Prepare context for dynamic symbols
-        self.executor.prepare(symbol_env)
+        self.executor.prepare(symbol_env, enable_arena_reuse)
 
         # 2. Bind positional inputs
         for idx, arr in enumerate(args):

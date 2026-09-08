@@ -8,9 +8,13 @@
 #include "ggml.h"
 #include "ggml-impl.h"
 #include "ggml-backend.h"
+#include "ggml-alloc.h"
 #include "ggml-cpu.h"
 #if defined(GGML_USE_CUDA)
 #include "ggml-cuda.h"
+#endif
+#if defined(GGML_USE_METAL)
+#include "ggml-metal.h"
 #endif
 #include "ggmlc/stdlib_kernels.h"
 
@@ -27,11 +31,14 @@ std::vector<std::string> ModelExecutor::get_available_devices() {
         devices.push_back("cuda");
     }
 #endif
+#if defined(GGML_USE_METAL)
+    devices.push_back("metal");
+#endif
     return devices;
 }
 
 ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::string& device)
-    : model_graph_(graph), device_(device), backend_(nullptr), buffer_(nullptr), ctx_(nullptr), cgraph_(nullptr) {
+    : model_graph_(graph), device_(device), backend_(nullptr), buffer_(nullptr), galloc_(nullptr), ctx_(nullptr), cgraph_(nullptr) {
     std::string dev_lower = device_;
     for (auto& c : dev_lower) c = std::tolower(static_cast<unsigned char>(c));
 
@@ -44,6 +51,9 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
             dev_lower = "cpu";
             device_ = "cpu";
         }
+#elif defined(GGML_USE_METAL)
+        dev_lower = "metal";
+        device_ = "metal";
 #else
         dev_lower = "cpu";
         device_ = "cpu";
@@ -65,7 +75,18 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
 #else
         throw std::runtime_error("CUDA backend was requested ('" + device + "'), but ggmlc was compiled without CUDA support.");
 #endif
-    } else {
+    }
+#if defined(GGML_USE_METAL)
+    else if (dev_lower == "metal") {
+        backend_ = ggml_backend_metal_init();
+        if (!backend_) {
+            throw std::runtime_error("Failed to initialize GGML Metal backend.");
+        }
+        device_ = "metal";
+        is_cuda_ = false;
+    }
+#endif
+    else {
         backend_ = ggml_backend_cpu_init();
         if (!backend_) {
             throw std::runtime_error("Failed to initialize GGML CPU backend.");
@@ -76,6 +97,10 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
 }
 
 ModelExecutor::~ModelExecutor() {
+    if (galloc_) {
+        ggml_gallocr_free(galloc_);
+        galloc_ = nullptr;
+    }
     if (buffer_) {
         ggml_backend_buffer_free(buffer_);
         buffer_ = nullptr;
@@ -759,6 +784,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     cuda_graph_needs_update_ = false;
 
+    if (galloc_) {
+        ggml_gallocr_free(galloc_);
+        galloc_ = nullptr;
+    }
     if (buffer_) {
         ggml_backend_buffer_free(buffer_);
         buffer_ = nullptr;
@@ -851,9 +880,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             if (ggml_can_repeat(b, a)) return {a, b};
             if (ggml_can_repeat(a, b)) {
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
-                struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, b->ne[0], b->ne[1], b->ne[2], b->ne[3]);
-                struct ggml_tensor* rep_a = ggml_repeat(ctx_, a, target_a);
-                a = ggml_cpy(ctx_, rep_a, target_a);
+                a = ggml_repeat(ctx_, a, b);
                 return {a, b};
             }
 
@@ -867,28 +894,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             if (need_repeat_a) {
                 if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
-                struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, a->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                if (ggml_can_repeat(a, target_a)) {
-                    struct ggml_tensor* rep_a = ggml_repeat(ctx_, a, target_a);
-                    a = ggml_cpy(ctx_, rep_a, target_a);
-                }
+                a = ggml_repeat_4d(ctx_, a, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
             }
             if (need_repeat_b) {
                 if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
-                struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, b->type, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
-                if (ggml_can_repeat(b, target_b)) {
-                    b = ggml_repeat(ctx_, b, target_b);
-                }
+                b = ggml_repeat_4d(ctx_, b, target_ne[0], target_ne[1], target_ne[2], target_ne[3]);
             }
             if (a->type != b->type) {
                 if (a->type == GGML_TYPE_I32 && b->type == GGML_TYPE_F32) {
                     if (!ggml_is_contiguous(a)) a = ggml_cont(ctx_, a);
-                    struct ggml_tensor* target_a = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, a->ne[0], a->ne[1], a->ne[2], a->ne[3]);
-                    a = ggml_cpy(ctx_, a, target_a);
+                    a = ggml_cast(ctx_, a, GGML_TYPE_F32);
                 } else if (b->type == GGML_TYPE_I32 && a->type == GGML_TYPE_F32) {
                     if (!ggml_is_contiguous(b)) b = ggml_cont(ctx_, b);
-                    struct ggml_tensor* target_b = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, b->ne[0], b->ne[1], b->ne[2], b->ne[3]);
-                    b = ggml_cpy(ctx_, b, target_b);
+                    b = ggml_cast(ctx_, b, GGML_TYPE_F32);
                 }
             }
             return {a, b};
@@ -908,17 +926,18 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (in_elements == out_elements) {
                     result = ggml_reshape_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 } else {
-                    struct ggml_tensor* target = ggml_new_tensor_4d(ctx_, in0->type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
-                    result = ggml_repeat(ctx_, in0, target);
+                    result = ggml_repeat_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 }
                 break;
             }
             case GGML_OP_CPY: {
-                const auto& out_ne = concrete_shapes_[out_id];
                 if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 auto out_type = model_graph_.tensors.at(out_id).type;
-                struct ggml_tensor* dst = ggml_new_tensor_4d(ctx_, out_type, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
-                result = ggml_cpy(ctx_, in0, dst);
+                if (in0->type == out_type) {
+                    result = ggml_dup(ctx_, in0);
+                } else {
+                    result = ggml_cast(ctx_, in0, out_type);
+                }
                 break;
             }
             case GGML_OP_ADD: {
@@ -1268,6 +1287,27 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 result = ggml_soft_max(ctx_, in0);
                 break;
             case GGML_OP_MUL_MAT: {
+                // Bypass permute/transpose on quantized weight matrices.
+                // Quantized types (e.g. Q4_0) cannot be non-contiguously permuted,
+                // so we use the original pre-transpose weight directly and let
+                // ggml_mul_mat handle the implicit transpose.
+                // This must NOT apply to F32/F16 activation tensors (e.g. K^T in attention).
+                if (!op.inputs.empty()) {
+                    for (const auto& other_op : model_graph_.ops) {
+                        for (uint32_t out_id_check : other_op.outputs) {
+                            if (out_id_check == op.inputs[0]) {
+                                if ((other_op.opcode == GGML_OP_PERMUTE || other_op.opcode == GGML_OP_TRANSPOSE) && !other_op.inputs.empty()) {
+                                    struct ggml_tensor* orig_w = ggml_tensors_[other_op.inputs[0]];
+                                    bool orig_is_quantized = orig_w && (orig_w->type != GGML_TYPE_F32 && orig_w->type != GGML_TYPE_F16);
+                                    if (orig_is_quantized && orig_w && in1 && orig_w->ne[0] == in1->ne[0]) {
+                                        in0 = orig_w;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
                 bool is_q = (in0->type != GGML_TYPE_F32 && in0->type != GGML_TYPE_F16);
                 bool explicit_transpose = op.attributes.count("transpose_in0") > 0;
                 bool transpose_in0 = explicit_transpose ? (op.attributes.at("transpose_in0") != 0) : (!is_q && in1 && in0->ne[0] != in1->ne[0] && in0->ne[1] == in1->ne[0]);
@@ -1308,7 +1348,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     in0 = ggml_cont(ctx_, in0);
                 }
                 result = ggml_reshape_4d(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
-                result = ggml_cont(ctx_, result);
                 break;
             }
             case GGML_OP_PERMUTE: {
@@ -1317,7 +1356,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int ax1 = op.attributes.count("axis1") ? static_cast<int>(op.attributes.at("axis1")) : 0;
                 int ax2 = op.attributes.count("axis2") ? static_cast<int>(op.attributes.at("axis2")) : 2;
                 int ax3 = op.attributes.count("axis3") ? static_cast<int>(op.attributes.at("axis3")) : 3;
-                result = ggml_cont(ctx_, ggml_permute(ctx_, in0, ax0, ax1, ax2, ax3));
+                result = ggml_permute(ctx_, in0, ax0, ax1, ax2, ax3);
+                if (ggml_nelements(result) < 10000000) {
+                    result = ggml_cont(ctx_, result);
+                }
                 break;
             }
             case GGML_OP_TRANSPOSE:
@@ -1343,8 +1385,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             case GGML_OP_ARGMAX: {
                 if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 if (in0 && in0->type != GGML_TYPE_F32) {
-                    struct ggml_tensor* target_f32 = ggml_new_tensor_4d(ctx_, GGML_TYPE_F32, in0->ne[0], in0->ne[1], in0->ne[2], in0->ne[3]);
-                    in0 = ggml_cpy(ctx_, in0, target_f32);
+                    in0 = ggml_cast(ctx_, in0, GGML_TYPE_F32);
                 }
                 result = ggml_argmax(ctx_, in0);
                 const auto& out_ne = concrete_shapes_[out_id];
@@ -1552,10 +1593,33 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
+    // Ensure all output tensors are anchored at the end of cgraph_ so that
+    // ggml_gallocr treats them as live outputs throughout execution and never
+    // frees or reuses their memory buffers for subsequent intermediate operations.
+    for (uint32_t out_id : model_graph_.outputs) {
+        if (ggml_tensors_.count(out_id)) {
+            struct ggml_tensor* out_t = ggml_tensors_[out_id];
+            ggml_set_output(out_t);
+            struct ggml_tensor* anchor = ggml_reshape_4d(ctx_, out_t, out_t->ne[0], out_t->ne[1], out_t->ne[2], out_t->ne[3]);
+            ggml_set_name(anchor, "output_anchor");
+            ggml_build_forward_expand(cgraph_, anchor);
+        }
+    }
+
     // 4. Allocate tensor storage for compute activations on backend (CPU or CUDA)
-    buffer_ = ggml_backend_alloc_ctx_tensors(ctx_, backend_);
-    if (!buffer_) {
-        throw std::runtime_error("Failed to allocate tensors via GGML backend (" + device_ + ")");
+    if (enable_arena_reuse) {
+        galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
+        if (!galloc_) {
+            throw std::runtime_error("Failed to create ggml_gallocr for backend (" + device_ + ")");
+        }
+        if (!ggml_gallocr_alloc_graph(galloc_, cgraph_)) {
+            throw std::runtime_error("Failed to allocate graph tensors via ggml_gallocr on backend (" + device_ + ")");
+        }
+    } else {
+        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_, backend_);
+        if (!buffer_) {
+            throw std::runtime_error("Failed to allocate tensors via GGML backend (" + device_ + ")");
+        }
     }
 
     // Initialize any compute-time constants that have static data
@@ -1563,6 +1627,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         uint32_t tid = pair.first;
         const auto& t = model_graph_.tensors.at(tid);
         if (t.data_ptr && t.data_size > 0) {
+            if (pair.second->buffer == nullptr) {
+                continue;
+            }
             size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(pair.second));
             size_t offset = 0;
             if (symbol_env.count("pos") > 0 && t.name.find("arange") != std::string::npos) {
@@ -1596,6 +1663,9 @@ void ModelExecutor::set_input(uint32_t tensor_id, const void* data, size_t size_
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
     struct ggml_tensor* t = it->second;
+    if (t->buffer == nullptr) {
+        throw std::runtime_error("Cannot set input for tensor " + std::to_string(tensor_id) + " because its buffer is not allocated (not part of the active compute graph).");
+    }
     size_t expected_size = ggml_nbytes(t);
     if (size_bytes != expected_size) {
         throw std::runtime_error("Input size mismatch for tensor " + std::to_string(tensor_id) +
@@ -1742,6 +1812,9 @@ void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_
         }
     }
     if (g_t != nullptr && ggml_nbytes(g_t) == size_bytes) {
+        if (g_t->buffer == nullptr) {
+            throw std::runtime_error("Cannot set state for tensor " + std::to_string(tensor_id) + " because its buffer is not allocated.");
+        }
         ggml_backend_tensor_set(g_t, data, 0, size_bytes);
     }
     persistent_states_[tensor_id].assign(reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + size_bytes);

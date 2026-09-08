@@ -1,8 +1,8 @@
 # Standalone C++ Code Generation in `ggmlc`
 
-`ggmlc` provides an Ahead-Of-Time (AOT) **C++ Code Generator** (`ggmlc.codegen`) that compiles any PyTorch or JAX neural network graph into human-readable, self-contained C++ source code supporting both **CPU** and **NVIDIA CUDA GPU** execution.
+`ggmlc` provides an Ahead-Of-Time (AOT) **C++ Code Generator** (`ggmlc.codegen`) that compiles any PyTorch or JAX neural network graph into human-readable, self-contained C++ source code supporting **CPU**, **NVIDIA CUDA GPU**, and **Apple Metal** execution.
 
-This enables deploying neural network models as standalone C++ binaries or embedding them directly into native applications (C/C++, iOS, Android, WASM, embedded devices, CUDA clusters) without requiring Python or generic runtime interpreters.
+This enables deploying neural network models as standalone C++ binaries or embedding them directly into native applications (C/C++, iOS, Android, WASM, embedded devices, CUDA clusters, Apple Silicon Macs) without requiring Python or generic runtime interpreters.
 
 ---
 
@@ -16,9 +16,9 @@ When invoking `generate_cpp_project`, `ggmlc` performs:
 
 ```
 <output_dir>/
-├── <ModelName>.h        # Model definition, GGUF weight loader, and dual CPU/CUDA build_graph()
-├── ggmlc_main.cpp       # CLI runner entry point with backend device management
-└── CMakeLists.txt       # Build system linking GGML, CUDA (optional), and Threads
+├── <ModelName>.h        # Model definition, GGUF two-stage loader, and multi-backend build_graph()
+├── ggmlc_main.cpp       # CLI runner entry point with CPU / CUDA / Metal backend device management
+└── CMakeLists.txt       # Build system linking GGML, CUDA, Metal, and Threads
 ```
 
 ```mermaid
@@ -30,10 +30,10 @@ flowchart TD
     CodeGen --> MainCpp["ggmlc_main.cpp"]
     CodeGen --> CMake["CMakeLists.txt"]
     CodeGen --> GGUF["<model_name>.gguf"]
-    HFile --> CppCompiler["C++ Compiler (GCC / Clang / MSVC / NVCC)"]
+    HFile --> CppCompiler["C++ Compiler (GCC / Clang / MSVC / Apple Clang / NVCC)"]
     MainCpp --> CppCompiler
     CMake --> CppCompiler
-    CppCompiler --> NativeBin["Standalone Executable Binary (CPU & CUDA)"]
+    CppCompiler --> NativeBin["Standalone Executable Binary (CPU, CUDA & Apple Metal)"]
 ```
 
 ---
@@ -43,8 +43,10 @@ flowchart TD
 ### A. Model Header (`<ModelName>.h`)
 The generated header defines:
 - **`struct <ModelName>::Weights`**: Typed `struct ggml_tensor*` pointers for every model parameter.
-- **`Weights::load(ggml_context* ctx, gguf_context* gguf_ctx)`**: Creates tensor descriptors from GGUF metadata.
-- **`build_graph(ggml_context* ctx, const Weights& weights, ...)`**: Constructs the computational DAG using `ggml_mul_mat`, `ggml_add`, `ggml_reshape_4d`, `ggml_permute`, and dual-backend custom fused ops (emitting native GPU operations under `#if defined(GGML_USE_CUDA)` and OpenMP multi-threaded kernels on CPU).
+- **Two-Stage GGUF Loading**:
+  - `Weights::init_tensors(ggml_context* ctx, gguf_context* gguf_ctx)`: Allocates tensor headers and descriptors in the GGML context prior to memory buffer creation.
+  - `Weights::load_data(gguf_context* gguf_ctx, const std::string& model_path, ggml_backend_t backend)`: Reads binary weights directly and uploads them to host or device VRAM via `ggml_backend_tensor_set`.
+- **`build_graph(ggml_context* ctx, const Weights& weights, ...)`**: Constructs the computational DAG using `ggml_mul_mat`, `ggml_flash_attn_ext`, `ggml_rope`, `ggml_rms_norm`, `ggml_add`, `ggml_reshape_4d`, `ggml_permute`, and multi-backend custom fused ops (emitting native GPU operations under `#if defined(GGML_USE_CUDA)`, Apple Metal under `#if defined(GGML_USE_METAL)`, and OpenMP multi-threaded kernels on CPU).
 
 #### Example Generated Header Snippet
 ```cpp
@@ -57,6 +59,9 @@ The generated header defines:
 #include "ggml-cpu.h"
 #if defined(GGML_USE_CUDA)
 #include "ggml-cuda.h"
+#endif
+#if defined(GGML_USE_METAL)
+#include "ggml-metal.h"
 #endif
 #include "gguf.h"
 

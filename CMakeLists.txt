@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(GGMLC_ENABLE_CUDA "Enable CUDA backend in ggmlc" OFF)
+option(GGMLC_ENABLE_METAL "Enable Metal backend in ggmlc" OFF)
 
 # Includes
 include_directories(
@@ -33,6 +34,14 @@ if (GGMLC_ENABLE_CUDA)
 
     add_subdirectory(third_party/ggml)
     add_compile_definitions(GGML_USE_CUDA)
+elseif (GGMLC_ENABLE_METAL)
+    set(GGML_METAL ON CACHE BOOL "Enable Metal in GGML" FORCE)
+    set(GGML_BUILD_TESTS OFF CACHE BOOL "Disable GGML tests" FORCE)
+    set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "Disable GGML examples" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static GGML libraries" FORCE)
+
+    add_subdirectory(third_party/ggml)
+    add_compile_definitions(GGML_USE_METAL)
 else()
     # GGML Library source files (CPU-only build)
     set(GGML_SOURCES
@@ -99,3 +108,9 @@ else()
 endif()
 
 add_subdirectory(runtime)
+
+# tab_completion is a downstream project in scratch/ (gitignored).
+# Build it locally only: cmake --build build-win-cuda --target tab_completion
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/tab_completion/CMakeLists.txt")
+    add_subdirectory(scratch/tab_completion)
+endif()

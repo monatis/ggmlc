@@ -83,6 +83,7 @@ ATEN_OP_MAP: dict[str, OpCode] = {
     "aten.permute.default": OpCode.PERMUTE,
     "aten.transpose.int": OpCode.TRANSPOSE,
     "aten.t.default": OpCode.TRANSPOSE,
+    "aten.numpy_T.default": OpCode.TRANSPOSE,
     "aten.slice.Tensor": OpCode.SLICE,
     "aten.cat.default": OpCode.CONCAT,
     "aten.split.Tensor": OpCode.SPLIT,

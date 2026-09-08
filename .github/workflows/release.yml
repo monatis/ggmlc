@@ -8,11 +8,35 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
+  check_main:
+    name: Verify Tag is on Main Branch
+    runs-on: ubuntu-latest
+    outputs:
+      is_main: ${{ steps.check.outputs.is_main }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: check
+        name: Check if commit is on main
+        run: |
+          git fetch origin main
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "Tag commit is on main branch."
+            echo "is_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag commit is NOT on main branch (feature branch tag). Skipping release."
+            echo "is_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build_wheels:
     name: Build Wheels on ${{ matrix.os }}
+    needs: [check_main]
+    if: needs.check_main.outputs.is_main == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -65,6 +89,8 @@ jobs:
 
   build_sdist:
     name: Build Source Distribution
+    needs: [check_main]
+    if: needs.check_main.outputs.is_main == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -89,7 +115,8 @@ jobs:
 
   publish_release:
     name: Create GitHub Release & Publish Assets
-    needs: [build_wheels, build_sdist]
+    needs: [check_main, build_wheels, build_sdist]
+    if: (needs.check_main.outputs.is_main == 'true' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -102,18 +129,9 @@ jobs:
         run: ls -la dist/
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to PyPI
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: dist/
-          skip-existing: true

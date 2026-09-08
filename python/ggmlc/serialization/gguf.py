@@ -348,6 +348,7 @@ class GGUFWriter:
 
             out.write(t["data"])
             bytes_written += len(t["data"])
+            t["data"] = b""  # Free buffer memory as it is streamed to disk
 
             if bytes_written % self.alignment != 0:
                 padding = self.alignment - (bytes_written % self.alignment)
@@ -378,34 +379,37 @@ def _build_gguf_writer(
     """Constructs and populates a GGUFWriter with metadata and tensor descriptors."""
     writer = GGUFWriter(alignment=GGUF_DEFAULT_ALIGNMENT)
 
-    # 1. Standard Metadata
-    writer.add_string("general.architecture", "ggmlc")
-    writer.add_string("general.name", graph.name)
-    writer.add_string("ggmlc.version", "1.0.0")
+    # 1. Standard and Custom Metadata (deduplicated)
+    merged_metadata: dict[str, Any] = {
+        "general.architecture": "ggmlc",
+        "general.name": graph.name,
+        "ggmlc.version": "1.0.0",
+    }
+    if extra_metadata:
+        merged_metadata.update(extra_metadata)
+
+    for k, v in merged_metadata.items():
+        if isinstance(v, str):
+            writer.add_string(k, v)
+        elif isinstance(v, bool):
+            writer.add_bool(k, v)
+        elif isinstance(v, int):
+            writer.add_int32(k, v)
+        elif isinstance(v, float):
+            writer.add_float32(k, v)
+        elif isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                continue
+            if isinstance(v[0], str):
+                writer.add_string_array(k, [str(x) for x in v])
+            elif isinstance(v[0], (float, int)):
+                writer.add_float_array(k, [float(x) for x in v])
+
     writer.add_string_array("ggmlc.symbol_table", graph.symbol_table)
 
     # 2. Graph Spec JSON Metadata
     spec_json = _graph_to_json_spec(graph)
     writer.add_string("ggmlc.graph_spec", spec_json)
-
-    # 3. Add Custom / Pipeline Metadata
-    if extra_metadata:
-        for k, v in extra_metadata.items():
-            if isinstance(v, str):
-                writer.add_string(k, v)
-            elif isinstance(v, bool):
-                writer.add_bool(k, v)
-            elif isinstance(v, int):
-                writer.add_int32(k, v)
-            elif isinstance(v, float):
-                writer.add_float32(k, v)
-            elif isinstance(v, (list, tuple)):
-                if len(v) == 0:
-                    continue
-                if isinstance(v[0], str):
-                    writer.add_string_array(k, [str(x) for x in v])
-                elif isinstance(v[0], (float, int)):
-                    writer.add_float_array(k, [float(x) for x in v])
 
     # 4. Add Tensors with data (Parameters / Constants)
     used_names: set[str] = set()

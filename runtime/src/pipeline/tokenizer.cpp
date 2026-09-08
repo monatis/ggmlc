@@ -148,10 +148,20 @@ bool BPETokenizer::init_from_gguf_ctx(const struct gguf_context* ctx) {
     int64_t key_pad = gguf_find_key(ctx, "tokenizer.ggml.padding_token_id");
     int64_t key_unk = gguf_find_key(ctx, "tokenizer.ggml.unknown_token_id");
 
-    int32_t bos = (key_bos >= 0) ? gguf_get_val_i32(ctx, key_bos) : -1;
-    int32_t eos = (key_eos >= 0) ? gguf_get_val_i32(ctx, key_eos) : -1;
-    int32_t pad = (key_pad >= 0) ? gguf_get_val_i32(ctx, key_pad) : -1;
-    int32_t unk = (key_unk >= 0) ? gguf_get_val_i32(ctx, key_unk) : 0;
+    auto safe_get_int = [](const struct gguf_context* c, int64_t kid, int32_t def) -> int32_t {
+        if (kid < 0) return def;
+        enum gguf_type type = gguf_get_kv_type(c, kid);
+        if (type == GGUF_TYPE_INT32) return gguf_get_val_i32(c, kid);
+        if (type == GGUF_TYPE_UINT32) return static_cast<int32_t>(gguf_get_val_u32(c, kid));
+        if (type == GGUF_TYPE_INT64) return static_cast<int32_t>(gguf_get_val_i64(c, kid));
+        if (type == GGUF_TYPE_UINT64) return static_cast<int32_t>(gguf_get_val_u64(c, kid));
+        return def;
+    };
+
+    int32_t bos = safe_get_int(ctx, key_bos, -1);
+    int32_t eos = safe_get_int(ctx, key_eos, -1);
+    int32_t pad = safe_get_int(ctx, key_pad, -1);
+    int32_t unk = safe_get_int(ctx, key_unk, 0);
 
     int64_t key_chat = gguf_find_key(ctx, "tokenizer.chat_template");
     std::string chat = (key_chat >= 0) ? gguf_get_val_str(ctx, key_chat) : "";
