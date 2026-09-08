@@ -1627,6 +1627,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         uint32_t tid = pair.first;
         const auto& t = model_graph_.tensors.at(tid);
         if (t.data_ptr && t.data_size > 0) {
+            if (pair.second->buffer == nullptr) {
+                continue;
+            }
             size_t sz = std::min<size_t>(t.data_size, ggml_nbytes(pair.second));
             size_t offset = 0;
             if (symbol_env.count("pos") > 0 && t.name.find("arange") != std::string::npos) {
@@ -1660,6 +1663,9 @@ void ModelExecutor::set_input(uint32_t tensor_id, const void* data, size_t size_
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
     struct ggml_tensor* t = it->second;
+    if (t->buffer == nullptr) {
+        throw std::runtime_error("Cannot set input for tensor " + std::to_string(tensor_id) + " because its buffer is not allocated (not part of the active compute graph).");
+    }
     size_t expected_size = ggml_nbytes(t);
     if (size_bytes != expected_size) {
         throw std::runtime_error("Input size mismatch for tensor " + std::to_string(tensor_id) +
@@ -1806,6 +1812,9 @@ void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_
         }
     }
     if (g_t != nullptr && ggml_nbytes(g_t) == size_bytes) {
+        if (g_t->buffer == nullptr) {
+            throw std::runtime_error("Cannot set state for tensor " + std::to_string(tensor_id) + " because its buffer is not allocated.");
+        }
         ggml_backend_tensor_set(g_t, data, 0, size_bytes);
     }
     persistent_states_[tensor_id].assign(reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + size_bytes);

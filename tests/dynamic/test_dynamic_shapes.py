@@ -1,5 +1,4 @@
 import ggmlc
-import pytest
 import torch
 from ggmlc.validation.numerical import check_numerical_accuracy
 from torch import nn
