@@ -246,6 +246,14 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name_to_tensor[node.name] = node_to_tensor[arg]
                 continue
 
+        val = node.meta.get("val")
+        # Skip scalar/SymInt/shape nodes, assertion nodes, or non-tensor outputs
+        if val is not None and not isinstance(val, (torch.Tensor, tuple, list)):
+            continue
+        if "sym_" in target_str or "assert" in target_str or "check" in target_str:
+            if not isinstance(val, (torch.Tensor, tuple, list)):
+                continue
+
         if (
             "split" in target_str
             or "assert" in target_str

@@ -148,24 +148,22 @@ def test_timesfm3_ggml_f16_parity(timesfm_base_models):
 
     runner = ModelRunner(str(gguf_path), device="cpu", n_threads=4)
 
-    for n_patches in [4, 8, 16]:
-        torch.manual_seed(42 + n_patches)
-        x = torch.randn(1, 1, n_patches, 192, dtype=torch.float32)
+    for batch_size in [1, 2, 4]:
+        for n_patches in [4, 8, 16]:
+            torch.manual_seed(42 + batch_size * 100 + n_patches)
+            x = torch.randn(batch_size, 1, n_patches, 192, dtype=torch.float32)
 
-        with torch.no_grad():
-            py_logits = clean_trunk(x).numpy()
+            with torch.no_grad():
+                py_logits = clean_trunk(x).numpy()
 
-        symbols_env = {sym: n_patches for sym in runner.symbol_table}
-        symbols_env["n"] = n_patches
-        symbols_env["s"] = n_patches
+            ggml_res = runner(x.numpy())
+            ggml_arr = ggml_res[0] if isinstance(ggml_res, (list, tuple)) else (list(ggml_res.values())[0] if isinstance(ggml_res, dict) else ggml_res)
 
-        ggml_res = runner(x.numpy(), symbols=symbols_env)
-        ggml_arr = ggml_res[0] if isinstance(ggml_res, (list, tuple)) else (list(ggml_res.values())[0] if isinstance(ggml_res, dict) else ggml_res)
+            cos_sim = np.dot(py_logits.flatten(), ggml_arr.flatten()) / (
+                np.linalg.norm(py_logits.flatten()) * np.linalg.norm(ggml_arr.flatten())
+            )
+            assert cos_sim > 0.9999, f"Low cosine similarity at B={batch_size}, N={n_patches}: {cos_sim}"
 
-        cos_sim = np.dot(py_logits.flatten(), ggml_arr.flatten()) / (
-            np.linalg.norm(py_logits.flatten()) * np.linalg.norm(ggml_arr.flatten())
-        )
-        assert cos_sim > 0.9999, f"Low cosine similarity at N={n_patches}: {cos_sim}"
 
 
 def test_timesfm3_domain_math():
