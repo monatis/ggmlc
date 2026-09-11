@@ -55,20 +55,23 @@ target_link_libraries(ggmlc_runtime_shared PUBLIC
 )
 
 # Optional Python Bindings with nanobind (targeting Python Limited API / abi3)
-find_package(Python 3.11 COMPONENTS Interpreter Development.Module QUIET)
+find_package(Python 3.11 COMPONENTS Interpreter Development.Module)
+message(STATUS "ggmlc CMake: Python_FOUND = ${Python_FOUND}, Python_EXECUTABLE = ${Python_EXECUTABLE}")
 if (Python_FOUND)
     execute_process(
         COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
         OUTPUT_VARIABLE NANOBIND_CMAKE_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
     )
+    message(STATUS "ggmlc CMake: NANOBIND_CMAKE_DIR = ${NANOBIND_CMAKE_DIR}")
     if (EXISTS "${NANOBIND_CMAKE_DIR}")
         list(APPEND CMAKE_PREFIX_PATH "${NANOBIND_CMAKE_DIR}")
     endif()
 
-    find_package(nanobind CONFIG QUIET)
+    find_package(nanobind CONFIG)
+    message(STATUS "ggmlc CMake: nanobind_FOUND = ${nanobind_FOUND}")
     if (nanobind_FOUND)
+        message(STATUS "ggmlc CMake: entering nanobind_add_module block!")
         nanobind_add_module(_runtime
             bindings/python_bindings.cpp
             src/loader.cpp
@@ -81,6 +84,11 @@ if (Python_FOUND)
             ${CUDA_GRAPH_SOURCES}
         )
         target_link_libraries(_runtime PRIVATE ${GGML_BACKEND_LIBS})
+        if (GGMLC_ENABLE_CUDA)
+            target_compile_definitions(_runtime PRIVATE GGML_USE_CUDA)
+        elseif (GGMLC_ENABLE_METAL)
+            target_compile_definitions(_runtime PRIVATE GGML_USE_METAL)
+        endif()
         
         # Set output directory to python/ggmlc for direct import
         set_target_properties(_runtime PROPERTIES
