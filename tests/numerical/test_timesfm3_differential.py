@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import math
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-
-import ggmlc
 from ggmlc.runtime.runner import ModelRunner
 
 timesfm_available = False
 try:
     from timesfm3.torch.timesfm3_forecaster import TimesFM3Forecaster
+
     timesfm_available = True
 except ImportError:
     pass
@@ -42,9 +40,15 @@ class TimesFM3CleanTrunk(torch.nn.Module):
             h_seq = layer.pre_seq_attn_ln(h)
             h_seq_flat = h_seq.view(b * v, n, d)
 
-            q = layer.seq_attn.query_proj(h_seq_flat).view(b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim)
-            k = layer.seq_attn.key_proj(h_seq_flat).view(b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim)
-            val = layer.seq_attn.value_proj(h_seq_flat).view(b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim)
+            q = layer.seq_attn.query_proj(h_seq_flat).view(
+                b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim
+            )
+            k = layer.seq_attn.key_proj(h_seq_flat).view(
+                b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim
+            )
+            val = layer.seq_attn.value_proj(h_seq_flat).view(
+                b * v, n, layer.seq_attn.num_heads, layer.seq_attn.head_dim
+            )
 
             pos = torch.arange(n, device=x.device, dtype=torch.float32).unsqueeze(0)
             q = layer.seq_attn.rotary_position_embedding(q, pos)
@@ -76,9 +80,15 @@ class TimesFM3CleanTrunk(torch.nn.Module):
                 h_var = layer.pre_var_attn_ln(h) if layer.pre_var_attn_ln is not None else h
                 h_var_flat = h_var.permute(0, 2, 1, 3).contiguous().view(b * n, v, d)
 
-                vq = layer.var_attn.query_proj(h_var_flat).view(b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim)
-                vk = layer.var_attn.key_proj(h_var_flat).view(b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim)
-                vval = layer.var_attn.value_proj(h_var_flat).view(b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim)
+                vq = layer.var_attn.query_proj(h_var_flat).view(
+                    b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim
+                )
+                vk = layer.var_attn.key_proj(h_var_flat).view(
+                    b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim
+                )
+                vval = layer.var_attn.value_proj(h_var_flat).view(
+                    b * n, v, layer.var_attn.num_heads, layer.var_attn.head_dim
+                )
 
                 if layer.var_attn.query_ln is not None:
                     vq = layer.var_attn.query_ln(vq)
@@ -92,9 +102,16 @@ class TimesFM3CleanTrunk(torch.nn.Module):
                 vval = vval.transpose(1, 2)
 
                 var_scale = math.sqrt(layer.var_attn.head_dim)
-                var_out = F.scaled_dot_product_attention(vq, vk, vval, is_causal=False, scale=var_scale)
+                var_out = F.scaled_dot_product_attention(
+                    vq, vk, vval, is_causal=False, scale=var_scale
+                )
                 var_out = var_out.transpose(1, 2).contiguous().view(b * n, v, d)
-                var_out = layer.var_attn.out_proj(var_out).view(b, n, v, d).permute(0, 2, 1, 3).contiguous()
+                var_out = (
+                    layer.var_attn.out_proj(var_out)
+                    .view(b, n, v, d)
+                    .permute(0, 2, 1, 3)
+                    .contiguous()
+                )
 
                 if layer.post_var_attn_ln is not None:
                     var_out = layer.post_var_attn_ln(var_out)
@@ -157,13 +174,18 @@ def test_timesfm3_ggml_f16_parity(timesfm_base_models):
                 py_logits = clean_trunk(x).numpy()
 
             ggml_res = runner(x.numpy())
-            ggml_arr = ggml_res[0] if isinstance(ggml_res, (list, tuple)) else (list(ggml_res.values())[0] if isinstance(ggml_res, dict) else ggml_res)
+            ggml_arr = (
+                ggml_res[0]
+                if isinstance(ggml_res, (list, tuple))
+                else (next(iter(ggml_res.values())) if isinstance(ggml_res, dict) else ggml_res)
+            )
 
             cos_sim = np.dot(py_logits.flatten(), ggml_arr.flatten()) / (
                 np.linalg.norm(py_logits.flatten()) * np.linalg.norm(ggml_arr.flatten())
             )
-            assert cos_sim > 0.9999, f"Low cosine similarity at B={batch_size}, N={n_patches}: {cos_sim}"
-
+            assert cos_sim > 0.9999, (
+                f"Low cosine similarity at B={batch_size}, N={n_patches}: {cos_sim}"
+            )
 
 
 def test_timesfm3_domain_math():

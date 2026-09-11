@@ -170,7 +170,12 @@ def load_qwen_model(
             h = self.norm(h)
             return self.lm_head(h)
 
-    return QwenWrapper(model), example_input, input_names
+    wrapped = QwenWrapper(model)
+    import gc
+
+    del model
+    gc.collect()
+    return wrapped, example_input, input_names
 
 
 def load_qwen3_model(
@@ -226,8 +231,12 @@ def load_qwen3_model(
                 h_norm = layer.input_layernorm(h)
 
                 q = layer.self_attn.q_proj(h_norm).view(bsz, seq_len, self.num_heads, self.head_dim)
-                k = layer.self_attn.k_proj(h_norm).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
-                v = layer.self_attn.v_proj(h_norm).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+                k = layer.self_attn.k_proj(h_norm).view(
+                    bsz, seq_len, self.num_kv_heads, self.head_dim
+                )
+                v = layer.self_attn.v_proj(h_norm).view(
+                    bsz, seq_len, self.num_kv_heads, self.head_dim
+                )
 
                 q = layer.self_attn.q_norm(q)
                 k = layer.self_attn.k_norm(k)
@@ -258,7 +267,6 @@ def load_qwen3_model(
             return self.lm_head(h)
 
     return Qwen3Wrapper(model), example_input, input_names
-
 
 
 def load_smollm2_model(

@@ -3,7 +3,6 @@ import torch
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.generator import verify_generation_parity_with_pytorch
-from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 from torch import nn
 from transformers import GPT2LMHeadModel
@@ -43,11 +42,13 @@ def _verify_full_model_e2e(
         if hasattr(ref_out, "last_hidden_state"):
             ref_out = ref_out.last_hidden_state
         ref_np = ref_out.detach().cpu().numpy()
+        del ref_out
 
     # 2. Export to Canonical IR
     exported = export_torch_model(model, inputs, model_name=model_name)
     assert len(exported.main_graph.nodes) > 0
     import gc
+
     del model
     gc.collect()
 
@@ -58,13 +59,17 @@ def _verify_full_model_e2e(
     # 4. Serialize to GGUF v3 binary format
     import tempfile
     from pathlib import Path
-    from ggmlc.serialization.gguf import save_to_gguf
+
     from ggmlc.runtime.runner import ModelRunner
+    from ggmlc.serialization.gguf import save_to_gguf
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_gguf = Path(tmpdir) / f"{model_name}.gguf"
         save_to_gguf(ggml_graph, tmp_gguf)
         assert tmp_gguf.exists() and tmp_gguf.stat().st_size > 0
+
+        del exported, ggml_graph
+        gc.collect()
 
         # 5. Execute in C++ Generic Runtime via ModelRunner
         inputs_dict = {
@@ -77,9 +82,7 @@ def _verify_full_model_e2e(
         actual_np = actual_raw.reshape(ref_np.shape)
 
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=atol)
-    import gc
-
-    del model, inputs, exported, ggml_graph, runner, out
+    del inputs, runner, out
     gc.collect()
     assert cmp.passed, f"Hub model verification failed for {model_name}: {cmp.message}"
 

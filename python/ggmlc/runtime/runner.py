@@ -60,22 +60,23 @@ class ModelRunner:
 
         self.n_threads = n_threads
 
+        self.py_graph = None
         if isinstance(model_source, (str, Path)):
             p = Path(model_source).resolve()
             if not p.exists():
                 raise FileNotFoundError(f"Model file not found: {p}")
-            raw_bytes = p.read_bytes()
             self.graph = _runtime.ModelLoader.load_from_file(str(p))
         elif isinstance(model_source, (bytes, bytearray)):
             raw_bytes = bytes(model_source)
             self.graph = _runtime.ModelLoader.load_from_bytes(raw_bytes)
+            try:
+                self.py_graph = deserialize_ggml_graph(raw_bytes)
+            except (ValueError, KeyError, struct.error, OSError):
+                self.py_graph = None
+            finally:
+                del raw_bytes
         else:
             raise TypeError(f"Expected file path or bytes, got {type(model_source)}")
-
-        try:
-            self.py_graph = deserialize_ggml_graph(raw_bytes)
-        except (ValueError, KeyError, struct.error, OSError):
-            self.py_graph = None
 
         self.executor = _runtime.ModelExecutor(self.graph, device)
         self.device = getattr(self.executor, "device", device)
