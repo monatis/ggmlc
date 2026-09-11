@@ -28,25 +28,21 @@ def quantize_q8_0(data: np.ndarray) -> bytes:
     n_blocks = flat.size // BLOCK_SIZE
     flat_blocks = flat.reshape(n_blocks, BLOCK_SIZE)
 
-    out = bytearray()
-    for block in flat_blocks:
-        max_val = float(np.max(np.abs(block)))
-        scale = max_val / 127.0 if max_val > 0 else 0.0
-        # Convert scale to float16 bytes
-        scale_fp16 = np.float16(scale)
-        scale_bytes = scale_fp16.tobytes()
+    max_val = np.max(np.abs(flat_blocks), axis=1)
+    scale = np.where(max_val > 0, max_val / 127.0, 0.0)
+    scale_fp16 = scale.astype(np.float16)
 
-        # Quantize integers
-        if scale > 0:
-            id_scale = 1.0 / scale
-            qs = np.clip(np.round(block * id_scale), -128, 127).astype(np.int8)
-        else:
-            qs = np.zeros(BLOCK_SIZE, dtype=np.int8)
+    safe_scale = np.where(scale != 0, scale, 1.0)[:, None]
+    qs = np.where(
+        scale[:, None] != 0,
+        np.clip(np.round(flat_blocks / safe_scale), -128, 127),
+        0,
+    ).astype(np.int8)
 
-        out.extend(scale_bytes)
-        out.extend(qs.tobytes())
-
-    return bytes(out)
+    scale_bytes = scale_fp16.view(np.uint8).reshape(n_blocks, 2)
+    qs_bytes = qs.view(np.uint8).reshape(n_blocks, BLOCK_SIZE)
+    block_data = np.hstack([scale_bytes, qs_bytes])
+    return block_data.tobytes()
 
 
 def dequantize_q8_0(raw_bytes: bytes, shape: tuple[int, ...]) -> np.ndarray:
@@ -55,14 +51,12 @@ def dequantize_q8_0(raw_bytes: bytes, shape: tuple[int, ...]) -> np.ndarray:
     total_blocks = len(raw_bytes) // block_bytes
     total_elements = np.prod(shape)
 
-    out = np.empty(total_blocks * BLOCK_SIZE, dtype=np.float32)
-    for b in range(total_blocks):
-        offset = b * block_bytes
-        scale_fp16 = np.frombuffer(raw_bytes[offset : offset + 2], dtype=np.float16)[0]
-        scale = float(scale_fp16)
-        qs = np.frombuffer(raw_bytes[offset + 2 : offset + 34], dtype=np.int8)
-        out[b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE] = qs.astype(np.float32) * scale
+    raw_arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(total_blocks, block_bytes)
+    scale_fp16 = raw_arr[:, :2].copy().view(np.float16).reshape(total_blocks, 1)
+    scale = scale_fp16.astype(np.float32)
 
+    qs = raw_arr[:, 2:].view(np.int8).astype(np.float32)
+    out = (qs * scale).flatten()
     return out[:total_elements].reshape(shape)
 
 
