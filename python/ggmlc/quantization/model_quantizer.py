@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Union
 import numpy as np
 
 from ggmlc.ir.dtype import DType
@@ -10,12 +9,12 @@ from ggmlc.ir.graph import Graph
 from ggmlc.ir.tensor import StorageClass, Tensor
 from ggmlc.quantization.policies import QuantizationPolicy, get_quantization_policy
 from ggmlc.quantization.quantize import quantize_q4_0, quantize_q8_0
-from ggmlc.quantization.roles import TensorRole, classify_tensor_role
+from ggmlc.quantization.roles import classify_tensor_role
 
 
 def quantize_graph_parameters(
     graph: Graph,
-    target_dtype: Union[DType, QuantizationPolicy, str] = DType.Q4_0,
+    target_dtype: DType | QuantizationPolicy | str = DType.Q4_0,
     min_elements_to_quantize: int = 128,
 ) -> tuple[Graph, dict[str, int | float | dict]]:
     """Quantizes parameter weights in the graph using role-based dynamic quantization.
@@ -89,7 +88,13 @@ def quantize_graph_parameters(
             getattr(tensor, "ggml_type", None) == GGMLType.GGML_TYPE_F32
         )
 
-        if is_param and tensor.data is not None and has_f32 and is_multi_d and resolved_dtype != DType.F32:
+        if (
+            is_param
+            and tensor.data is not None
+            and has_f32
+            and is_multi_d
+            and resolved_dtype != DType.F32
+        ):
             arr = np.array(tensor.data, dtype=np.float32)
             row_size = (
                 dims[0] if isinstance(graph, GGMLExecutionGraph) else (dims[-1] if dims else 1)
@@ -99,9 +104,13 @@ def quantize_graph_parameters(
             # Inner dimension must be divisible by 32 and size >= min_elements.
             # If not aligned, fall back safely to F16.
             actual_dtype = resolved_dtype
-            if actual_dtype in (DType.Q4_0, DType.Q8_0, DType.Q4_K):
-                if arr.size < min_elements_to_quantize or arr.size % 32 != 0 or row_size % 32 != 0 or row_size < 32:
-                    actual_dtype = DType.F16
+            if actual_dtype in (DType.Q4_0, DType.Q8_0, DType.Q4_K) and (
+                arr.size < min_elements_to_quantize
+                or arr.size % 32 != 0
+                or row_size % 32 != 0
+                or row_size < 32
+            ):
+                actual_dtype = DType.F16
 
             orig_tensor_bytes = arr.nbytes
             q_bytes: bytes

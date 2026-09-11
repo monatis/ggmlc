@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
-from typing import Union
+from dataclasses import dataclass, field
 
 from ggmlc.ir.dtype import DType
 from ggmlc.quantization.roles import TensorRole
@@ -20,10 +19,7 @@ class QuantizationPolicy:
     fallback_dtype: DType = DType.Q4_0
 
     def resolve_dtype(
-        self,
-        name: str,
-        role: TensorRole,
-        dims: list[int] | tuple[int, ...] | None = None
+        self, name: str, role: TensorRole, dims: list[int] | tuple[int, ...] | None = None
     ) -> DType:
         """Determines the target precision for a tensor under this policy."""
         # 1. 1D tensors ALWAYS remain in F32 (Strict 1D F32 Rule)
@@ -150,9 +146,7 @@ BUILTIN_POLICIES: dict[str, QuantizationPolicy] = {
 }
 
 
-def get_quantization_policy(
-    policy_spec: Union[str, QuantizationPolicy, DType]
-) -> QuantizationPolicy:
+def get_quantization_policy(policy_spec: str | QuantizationPolicy | DType) -> QuantizationPolicy:
     """Resolves a policy specification into a concrete QuantizationPolicy."""
     if isinstance(policy_spec, QuantizationPolicy):
         return policy_spec
@@ -166,7 +160,9 @@ def get_quantization_policy(
             return F16_POLICY
         return QuantizationPolicy(
             name=f"uniform_{policy_spec.name.lower()}",
-            role_map={role: policy_spec for role in TensorRole if role != TensorRole.NORMALIZATION_1D},
+            role_map={
+                role: policy_spec for role in TensorRole if role != TensorRole.NORMALIZATION_1D
+            },
             fallback_dtype=policy_spec,
         )
 
