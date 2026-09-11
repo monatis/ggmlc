@@ -753,8 +753,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
-    // Fast path: if decode graph is already cached AND all other symbols (e.g. batch size) match, mutate in-place
-    bool can_use_cached_decode = is_decode_step && decode_graph_cached_;
+    // Fast path: if CUDA graph replay is active and decode graph is cached, mutate in-place
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && is_cuda_ && enable_cuda_graph_;
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
             if (pair.first == "pos") continue;
@@ -1687,7 +1687,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
     }
 
-    if (is_decode_step) {
+    if (is_decode_step && is_cuda_ && enable_cuda_graph_) {
         decode_graph_cached_ = true;
         decode_cached_pos_ = symbol_env.at("pos");
     }
