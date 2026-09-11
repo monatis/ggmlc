@@ -175,3 +175,90 @@ python examples/benchmarks/benchmark_kv_cache.py --device both --threads 4
 python examples/benchmarks/benchmark_kv_cache.py --device cuda
 ```
 
+---
+
+## 6. Autoregressive SLM vs. Continuous Diffusion Infilling: Qwen3-0.6B & PlaidQ-0.7B
+
+To evaluate real-world hardware throughput across model scales, `Qwen/Qwen3-0.6B` (28 layers, 1024 hidden dim, 16 Q heads, 8 KV heads with native GQA, per-head QK-Norm, and 152k vocab) was compiled to GGUF (`f16` and `q4_0`) and benchmarked against **PlaidQ-0.7B** (continuous latent diffusion continually fine-tuned from Qwen3-0.6B):
+
+### A. Qwen3-0.6B Autoregressive Benchmark Across Sequence Lengths
+
+Evaluated on **NVIDIA GeForce GTX 1050 (4GB VRAM)** with CUDA Graph replay and **Intel Core i7 (4 CPU Threads)** using `ggmlc-run`:
+
+#### 1. NVIDIA CUDA GPU (with CUDA Graph & GQA)
+
+| Sequence Length | Precision | Payload Size | Total Time | Prefill Throughput | Inter-Token Latency | Decode Throughput |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | `Q4_0` | 409.0 MB | 2.47 s | 13.7 tok/s (952 ms) | **49.02 ms/tok** | **20.4 tok/s** |
+| **64 tokens** | `Q4_0` | 409.0 MB | 4.47 s | 10.0 tok/s (1298 ms) | **50.40 ms/tok** | **19.8 tok/s** |
+| **128 tokens** | `Q4_0` | 409.0 MB | 6.87 s | 12.4 tok/s (1049 ms) | **45.82 ms/tok** | **21.8 tok/s** |
+| **256 tokens** | `Q4_0` | 409.0 MB | 13.63 s | 13.2 tok/s (982 ms) | **49.59 ms/tok** | **20.2 tok/s** |
+| **32 tokens** | `FP16` | 1439.3 MB | 3.21 s | 9.8 tok/s (1333 ms) | **60.58 ms/tok** | **16.5 tok/s** |
+| **64 tokens** | `FP16` | 1439.3 MB | 5.26 s | 9.1 tok/s (1428 ms) | **60.79 ms/tok** | **16.4 tok/s** |
+| **128 tokens** | `FP16` | 1439.3 MB | 10.19 s | 8.5 tok/s (1530 ms) | **68.19 ms/tok** | **14.7 tok/s** |
+
+#### 2. CPU (4 Threads, AVX2/FMA)
+
+| Sequence Length | Precision | Payload Size | Total Time | Prefill Throughput | Inter-Token Latency | Decode Throughput |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **32 tokens** | `Q4_0` | 409.0 MB | 2.22 s | 27.8 tok/s (468 ms) | **56.46 ms/tok** | **17.7 tok/s** |
+| **64 tokens** | `Q4_0` | 409.0 MB | 4.09 s | 29.0 tok/s (448 ms) | **57.82 ms/tok** | **17.3 tok/s** |
+| **128 tokens** | `Q4_0` | 409.0 MB | 6.54 s | 33.6 tok/s (386 ms) | **48.43 ms/tok** | **20.6 tok/s** |
+| **256 tokens** | `Q4_0` | 409.0 MB | 14.33 s | 33.5 tok/s (388 ms) | **54.69 ms/tok** | **18.3 tok/s** |
+
+---
+
+### B. Comparative Architectural Analysis: Autoregressive vs. Continuous Diffusion (32-Token Hole Infilling)
+
+| Paradigm / Model | Sampling Mode | Precision | Steady-State Latency | Infill Generation Throughput | Output Quality / Usability |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Qwen3-0.6B (Autoregressive)** | Single-Token Decode ($S=1$) | `Q4_0` | **1.53 s** (warm cache) | **20.8 tok/s** | High (Grammatically & Semantically coherent) |
+| **PlaidQ-0.7B (Diffusion, Baseline)** | 1-Step ($N=1$) | `Q4_0` | **5.50 s** (1.5s compute) | **5.8 tok/s** | Mode collapse / Repetitive degenerate tokens |
+| **PlaidQ-0.7B (Diffusion, Optimized)** | 1-Step ($N=1$) | `Q4_0` | **1.16 s** (0.55s compute) | **27.5 tok/s** | Mode collapse / Repetitive degenerate tokens |
+| **PlaidQ-0.7B (Diffusion, Baseline)** | 8-Step ($N=8$) | `Q4_0` | **11.21 s** (7.2s compute) | **2.9 tok/s** | High (Usable algorithms) |
+| **PlaidQ-0.7B (Diffusion, Optimized)** | 8-Step ($N=8$) | `Q4_0` | **3.69 s** (3.39s compute) | **8.7 tok/s** | High (Usable algorithms, **3.0x speedup**) |
+| **PlaidQ-0.7B (Diffusion, Baseline)** | 16-Step ($N=16$) | `Q4_0` | **19.49 s** (15.5s compute) | **1.6 tok/s** | Highest quality diffusion output |
+| **PlaidQ-0.7B (Diffusion, Optimized)** | 16-Step ($N=16$) | `Q4_0` | **6.58 s** (6.28s compute) | **4.9 tok/s** | Highest quality diffusion output (**3.0x speedup**) |
+
+---
+
+### C. Architectural Analysis: Why CUDA vs. CPU Behavior Differs Between SmolLM2-135M and Qwen3-0.6B
+
+#### 1. Why CUDA Outperformed CPU by 1.6x on SmolLM2-135M:
+- **SmolLM2-135M Parameters & Dimensions**: 30 layers, hidden dim 576, intermediate dim 1536, vocab 49,152. Total FP16 payload is **270 MB** (~80 MB Q4_0).
+- **Small Projection Dimensions**: The `lm_head` projection ($576 \times 49152$) is relatively small (~28M weights). On GPU, GEMV memory streaming executes in **~1.5 ms**, easily fitting inside L2/VRAM cache hierarchies.
+- **CUDA Graph Elimination of WDDM Overhead**: With `CUDAGraphManager` eliminating driver launch latency (~8 ms), GPU decode dropped to **12.6 ms/tok (79.2 tok/s)**, outperforming 4 CPU threads (**15.4 ms/tok, 64.8 tok/s**).
+
+#### 2. Why CPU Matches or Slightly Outperforms GPU on Qwen3-0.6B Prefill and Decodes Near Parity:
+- **Massive Vocabulary & Output Head Explosion**:
+  - `Qwen3-0.6B` features a **151,936-token vocabulary** (3.1x larger than SmolLM2).
+  - The `lm_head` alone is $1024 \times 151936 = \mathbf{155.6\text{ million weights}}$ (**over 25% of the entire model payload**).
+  - In `Q4_0`, `lm_head` is ~80 MB of quantized 4-bit blocks.
+- **Pascal Architecture Dequantization Bottleneck**:
+  - On entry-level consumer GPUs (e.g. GTX 1050, Compute Capability 6.1 Pascal), there are **no Tensor Cores or DP4A INT4 hardware units**. Every INT4 block must be dequantized to FP32 in software registers across 5 SMs (640 CUDA cores).
+  - The massive 152k-row reduction creates substantial register and shared memory pressure during prompt prefill.
+- **AVX2 / FMA CPU Microkernels (`GGML_LLAMAFILE=ON`)**:
+  - On the host CPU (Intel Core i7 with 4 cores / 8 threads), `llamafile` AVX2/FMA assembly kernels execute parallel INT4 block dequantization and FMA across 4 wide vector units with large 12–16 MB L3 cache.
+  - During prompt prefill, the CPU processes the prompt sequence at **28–34 tok/s**, whereas Pascal GPU without Tensor Cores processes the 152k output head at **10–14 tok/s**.
+- **Steady-State Single-Token Decode ($S = 1$)**:
+  - In single-token decode, GPU reaches **48 ms/tok (20.8 tok/s)** vs CPU **54 ms/tok (18.3 tok/s)**, where GPU memory bus bandwidth (~70 GB/s GDDR5) edges out CPU dual-channel DDR4 (~25–30 GB/s practical).
+
+---
+
+### D. Implemented PlaidQ Optimizations & Benchmark Gains
+
+1. **Static 256-Canvas CUDA Graph Capture**:
+   - Initialized `executor_->set_enable_cuda_graph(true)` for CUDA execution in `TabCompletionEngine`.
+   - Because the 256-canvas dimensions (`z: [256, 16]`, `gamma: [1]`, `x_selfcond: [256, 16]`) are completely static, the entire 28-layer bidirectional transformer is captured into a single static `cudaGraph_t`.
+   - Slashes driver dispatch overhead from ~400 launches per step down to a single `cudaGraphLaunch` per step.
+2. **OpenMP Multithreading & Hole-Selective Softmax Sampler**:
+   - `compute_x_reconst_from_logits` now selectively computes Softmax and `probs @ E` only for active hole positions `[ctx.prefix_len, ctx.prefix_len + ctx.hole_len)`, skipping 224 redundant prefix/suffix tokens.
+   - Vectorized and parallelized with `#pragma omp parallel for` across available CPU cores.
+   - Slashes sampler and reconstruction latency from **~250 ms down to 41–47 ms** per step.
+3. **Measured Impact**:
+   - 8-step DDIM latency slashed from **11.2 s down to 3.69 s** (**3.0x faster**, 8.7 tok/s).
+   - 16-step DDIM latency slashed from **19.5 s down to 6.58 s** (**3.0x faster**, 4.9 tok/s).
+   - Single-step infilling latency dropped from **5.5 s down to 1.16 s** (27.5 tok/s).
+
+
+

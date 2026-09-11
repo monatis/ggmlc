@@ -17,6 +17,10 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include
 )
 
+if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(GGML_NATIVE OFF CACHE BOOL "Disable native in GGML on Apple Clang" FORCE)
+endif()
+
 if (GGMLC_ENABLE_CUDA)
     enable_language(CUDA)
     set(GGML_CUDA ON CACHE BOOL "Enable CUDA in GGML" FORCE)
@@ -36,6 +40,7 @@ if (GGMLC_ENABLE_CUDA)
     add_compile_definitions(GGML_USE_CUDA)
 elseif (GGMLC_ENABLE_METAL)
     set(GGML_METAL ON CACHE BOOL "Enable Metal in GGML" FORCE)
+    set(GGML_NATIVE OFF CACHE BOOL "Disable native in GGML on Apple Clang" FORCE)
     set(GGML_BUILD_TESTS OFF CACHE BOOL "Disable GGML tests" FORCE)
     set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "Disable GGML examples" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static GGML libraries" FORCE)
@@ -109,8 +114,11 @@ endif()
 
 add_subdirectory(runtime)
 
-# tab_completion is a downstream project in scratch/ (gitignored).
-# Build it locally only: cmake --build build-win-cuda --target tab_completion
+# Downstream showcase projects in scratch/
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/tab_completion/CMakeLists.txt")
     add_subdirectory(scratch/tab_completion)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/timesfm/CMakeLists.txt")
+    add_subdirectory(scratch/timesfm)
 endif()

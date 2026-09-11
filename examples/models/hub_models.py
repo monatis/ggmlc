@@ -170,7 +170,103 @@ def load_qwen_model(
             h = self.norm(h)
             return self.lm_head(h)
 
-    return QwenWrapper(model), example_input, input_names
+    wrapped = QwenWrapper(model)
+    import gc
+
+    del model
+    gc.collect()
+    return wrapped, example_input, input_names
+
+
+def load_qwen3_model(
+    variant: str = "Qwen/Qwen3-0.6B",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Hugging Face Qwen3 checkpoint with QK-Norm and GQA."""
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(variant, dtype=torch.float32).eval()
+    input_ids = torch.randint(0, 1000, (1, seq_len), dtype=torch.int32)
+    example_input = (input_ids,)
+    input_names = ["input_ids"]
+
+    class Qwen3Wrapper(nn.Module):
+        def __init__(self, base_model):
+            super().__init__()
+            self.embed_tokens = base_model.model.embed_tokens
+            self.layers = base_model.model.layers
+            self.norm = base_model.model.norm
+            self.lm_head = base_model.lm_head
+            self.num_heads = base_model.config.num_attention_heads
+            self.num_kv_heads = base_model.config.num_key_value_heads
+            self.head_dim = getattr(base_model.config, "head_dim", 128)
+            self.kv_groups = self.num_heads // self.num_kv_heads
+
+            dim = self.head_dim
+            base = 1000000.0
+            if hasattr(base_model.config, "rope_parameters") and base_model.config.rope_parameters:
+                base = base_model.config.rope_parameters.get("rope_theta", 1000000.0)
+            inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+            self.register_buffer("inv_freq", inv_freq)
+
+        def forward(self, input_ids):
+            h = self.embed_tokens(input_ids)
+            bsz, seq_len, _ = h.shape
+            pos = torch.arange(0, seq_len, dtype=torch.float32, device=h.device)
+            freqs = pos.unsqueeze(-1) * self.inv_freq.unsqueeze(0)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos().unsqueeze(0).unsqueeze(1)
+            sin = emb.sin().unsqueeze(0).unsqueeze(1)
+
+            def rotate_half(x):
+                x1 = x[..., : x.shape[-1] // 2]
+                x2 = x[..., x.shape[-1] // 2 :]
+                return torch.cat((-x2, x1), dim=-1)
+
+            def apply_rope(x):
+                return (x * cos) + (rotate_half(x) * sin)
+
+            for layer in self.layers:
+                residual = h
+                h_norm = layer.input_layernorm(h)
+
+                q = layer.self_attn.q_proj(h_norm).view(bsz, seq_len, self.num_heads, self.head_dim)
+                k = layer.self_attn.k_proj(h_norm).view(
+                    bsz, seq_len, self.num_kv_heads, self.head_dim
+                )
+                v = layer.self_attn.v_proj(h_norm).view(
+                    bsz, seq_len, self.num_kv_heads, self.head_dim
+                )
+
+                q = layer.self_attn.q_norm(q)
+                k = layer.self_attn.k_norm(k)
+
+                q = q.transpose(1, 2)
+                k = k.transpose(1, 2)
+                v = v.transpose(1, 2)
+
+                q = apply_rope(q)
+                k = apply_rope(k)
+
+                attn_out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, is_causal=True, enable_gqa=True
+                )
+                attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+                attn_out = layer.self_attn.o_proj(attn_out)
+                h = residual + attn_out
+
+                residual = h
+                h_norm = layer.post_attention_layernorm(h)
+                mlp_out = layer.mlp.down_proj(
+                    torch.nn.functional.silu(layer.mlp.gate_proj(h_norm))
+                    * layer.mlp.up_proj(h_norm)
+                )
+                h = residual + mlp_out
+
+            h = self.norm(h)
+            return self.lm_head(h)
+
+    return Qwen3Wrapper(model), example_input, input_names
 
 
 def load_smollm2_model(
