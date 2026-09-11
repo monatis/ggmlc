@@ -246,6 +246,15 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 name_to_tensor[node.name] = node_to_tensor[arg]
                 continue
 
+        val = node.meta.get("val")
+        # Skip scalar/SymInt/shape nodes, assertion nodes, or non-tensor outputs
+        if val is not None and not isinstance(val, (torch.Tensor, tuple, list)):
+            continue
+        if (
+            "sym_" in target_str or "assert" in target_str or "check" in target_str
+        ) and not isinstance(val, (torch.Tensor, tuple, list)):
+            continue
+
         if (
             "split" in target_str
             or "assert" in target_str
@@ -546,6 +555,7 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 "__and__",
                 "bitwise_and",
                 "logical_and",
+                "softplus",
             )
             for sfx in ("default", "Scalar", "Tensor")
         ):
@@ -562,6 +572,15 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                     end = float(node.args[1])
                     steps = int(node.args[2])
                     data = np.linspace(start, end, steps, dtype=np.float32)
+                elif "softplus" in target_str:
+                    in_node = node.args[0]
+                    if in_node in node_to_tensor and node_to_tensor[in_node].data is not None:
+                        in_data = node_to_tensor[in_node].data
+                        data = np.where(in_data > 20.0, in_data, np.log1p(np.exp(in_data))).astype(
+                            np.float32
+                        )
+                    else:
+                        data = np.ones(val.shape, dtype=np.float32)
                 elif "ne" in target_str or "ge" in target_str:
                     data = np.ones(val.shape, dtype=np.int64 if dtype == DType.I64 else np.int32)
                 elif "zeros" in target_str:

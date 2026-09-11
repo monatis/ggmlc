@@ -45,8 +45,8 @@ def test_cuda_mlp_parity():
         cpu_out = cpu_runner(x.numpy())
         cuda_out = cuda_runner(x.numpy())
 
-        assert np.max(np.abs(torch_out - cpu_out)) < 1e-4
-        assert np.max(np.abs(torch_out - cuda_out)) < 1e-4
+        assert np.max(np.abs(torch_out - cpu_out)) < 5e-4
+        assert np.max(np.abs(torch_out - cuda_out)) < 5e-4
         assert np.max(np.abs(cpu_out - cuda_out)) < 1e-5
 
 

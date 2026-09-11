@@ -97,7 +97,8 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DGGMLC_ENABLE_METAL=ON
+            -DGGMLC_ENABLE_METAL=ON \
+            -DGGML_NATIVE=OFF
 
       - name: Configure CMake (Windows CUDA)
         if: runner.os == 'Windows' && matrix.backend == 'cuda'

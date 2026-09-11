@@ -282,7 +282,7 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
     if (kv_cache_buffer_) return;
     kv_cache_max_ctx_ = max_ctx;
 
-    // Only enable KV cache if model supports positional offsets (RoPE or explicit pos symbol).
+    // Only enable KV cache if model supports positional offsets (RoPE, explicit pos symbol, or arange constant tensors).
     // Models with absolute position embeddings hardcoded to input length (e.g. GPT-2)
     // require full sequence evaluation during autoregressive decode.
     bool has_rope = false;
@@ -299,7 +299,14 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
             break;
         }
     }
-    if (!has_rope && !has_pos_sym) return;
+    bool has_arange_tensor = false;
+    for (const auto& pair : model_graph_.tensors) {
+        if (pair.second.name.find("arange") != std::string::npos && pair.second.data_ptr) {
+            has_arange_tensor = true;
+            break;
+        }
+    }
+    if (!has_rope && !has_pos_sym && !has_arange_tensor) return;
 
     std::vector<const SerializedOp*> attn_ops;
     for (const auto& op : model_graph_.ops) {
@@ -573,18 +580,11 @@ void ModelExecutor::paged_kv_ensure_tokens(int slot_id, int64_t total_tokens) {
         uint64_t va_k_base = vmm_k_va_windows_[op_id] + slot_id * slot_bytes;
         uint64_t va_v_base = vmm_v_va_windows_[op_id] + slot_id * slot_bytes;
 
-        struct ggml_tensor* g_k = kv_cache_k_[op_id];
-        size_t elem_sz = ggml_type_size(g_k->type);
-        int64_t head_dim = g_k->ne[0];
-        int64_t num_kv_heads = g_k->ne[2];
-        size_t bytes_per_token = head_dim * num_kv_heads * elem_sz;
-
-        size_t needed_bytes = static_cast<size_t>(total_tokens) * bytes_per_token;
         auto& layer_pages_k = slot.mapped_pages_k[op_id];
         auto& layer_pages_v = slot.mapped_pages_v[op_id];
         size_t current_mapped = layer_pages_k.size() * page_sz;
 
-        while (current_mapped < needed_bytes && current_mapped < slot_bytes) {
+        while (current_mapped < slot_bytes) {
             uint64_t h_k = vmm_mgr_->alloc_physical_page();
             uint64_t h_v = vmm_mgr_->alloc_physical_page();
 
@@ -753,8 +753,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
-    // Fast path: if decode graph is already cached AND all other symbols (e.g. batch size) match, mutate in-place
-    bool can_use_cached_decode = is_decode_step && decode_graph_cached_;
+    // Fast path: if CUDA graph replay is active and decode graph is cached, mutate in-place
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && is_cuda_ && enable_cuda_graph_;
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
             if (pair.first == "pos") continue;
@@ -779,6 +779,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     decode_graph_cached_ = false;
     decode_attn_views_.clear();
     decode_rope_arange_tensors_.clear();
+    dynamic_causal_masks_.clear();
     if (cuda_graph_mgr_) {
         cuda_graph_mgr_->reset();
     }
@@ -1170,7 +1171,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!ggml_is_contiguous(q)) q = ggml_cont(ctx_, q);
                 if (!ggml_is_contiguous(k)) k = ggml_cont(ctx_, k);
                 if (v && !ggml_is_contiguous(v)) v = ggml_cont(ctx_, v);
-                if (mask && !ggml_is_contiguous(mask)) mask = ggml_cont(ctx_, mask);
+                if (mask) {
+                    if (!ggml_is_contiguous(mask)) mask = ggml_cont(ctx_, mask);
+                    if (mask->type != GGML_TYPE_F16) mask = ggml_cast(ctx_, mask, GGML_TYPE_F16);
+                }
 
                 float scale = 1.0f / sqrtf((float)q->ne[0]);
                 if (op.float_attributes.count("scale")) {
@@ -1227,7 +1231,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
                             ctx_, q, k_active, v_active, nullptr, scale, 0.0f, 0.0f
                         );
-                        // Permute from [head_dim, num_heads, s_q, batch] to [head_dim, s_q, num_heads, batch]
                         result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
 
                         if (is_decode_step) {
@@ -1241,41 +1244,61 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             decode_attn_views_[op.id] = refs;
                         }
                     } else {
-                        struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
-                        struct ggml_tensor* scores = ggml_mul_mat(ctx_, k_active, q_scaled);
-
-                        if (s_q > 1) {
-                            scores = ggml_diag_mask_inf(ctx_, scores, static_cast<int>(pos));
-                        } else if (mask) {
-                            if (ggml_can_repeat(mask, scores)) {
-                                mask = ggml_repeat(ctx_, mask, scores);
-                            }
-                            scores = ggml_add(ctx_, scores, mask);
+                        // Prefill with s_q > 1 using causal mask
+                        struct ggml_tensor* mask_t = nullptr;
+                        if (is_causal) {
+                            mask_t = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, s_kv, s_q, 1, 1);
+                            dynamic_causal_masks_.push_back({mask_t, pos, s_q, s_kv});
+                        } else {
+                            mask_t = mask;
                         }
-
-                        struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
-                        struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v_active));
-                        result = ggml_mul_mat(ctx_, v_t, probs);
+                        struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                            ctx_, q, k_active, v_active, mask_t, scale, 0.0f, 0.0f
+                        );
+                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
                     }
                 } else {
-                    // 1. Q_scaled = Q * scale
-                    struct ggml_tensor* q_scaled = (std::abs(scale - 1.0f) < 1e-6f) ? q : ggml_scale(ctx_, q, scale);
-                    // 2. scores = mul_mat(K, Q_scaled) -> ne = [S_k, S_q, H, B]
-                    struct ggml_tensor* scores = ggml_mul_mat(ctx_, k, q_scaled);
-                    // 3. causal mask or explicit mask
-                    if (is_causal) {
-                        scores = ggml_diag_mask_inf(ctx_, scores, 0);
-                    } else if (mask) {
-                        if (ggml_can_repeat(mask, scores)) {
-                            mask = ggml_repeat(ctx_, mask, scores);
+                    auto is_fattn_supported = [](int64_t hd) {
+                        return (hd == 40 || hd == 64 || hd == 72 || hd == 80 ||
+                                hd == 96 || hd == 112 || hd == 128 || hd == 192 || hd == 256);
+                    };
+                    if (!is_fattn_supported(q->ne[0])) {
+                        struct ggml_tensor* kq = ggml_mul_mat(ctx_, k, q);
+                        struct ggml_tensor* kq_scaled = ggml_scale(ctx_, kq, scale);
+                        if (is_causal) {
+                            kq_scaled = ggml_diag_mask_inf(ctx_, kq_scaled, 0);
                         }
-                        scores = ggml_add(ctx_, scores, mask);
+                        if (mask) {
+                            if (mask->type != kq_scaled->type) {
+                                mask = ggml_cast(ctx_, mask, kq_scaled->type);
+                            }
+                            kq_scaled = ggml_add(ctx_, kq_scaled, mask);
+                        }
+                        struct ggml_tensor* kq_soft = ggml_soft_max(ctx_, kq_scaled);
+                        struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
+                        result = ggml_mul_mat(ctx_, v_t, kq_soft);
+                    } else {
+                        int64_t s_q = q->ne[1];
+                        int64_t s_k = k->ne[1];
+                        if (is_causal && s_q > 1) {
+                            struct ggml_tensor* mask_t = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, s_k, s_q, 1, 1);
+                            dynamic_causal_masks_.push_back({mask_t, 0, s_q, s_k});
+                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                                ctx_, q, k, v, mask_t, scale, 0.0f, 0.0f
+                            );
+                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        } else if (is_causal && s_q == 1) {
+                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                                ctx_, q, k, v, nullptr, scale, 0.0f, 0.0f
+                            );
+                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        } else {
+                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                                ctx_, q, k, v, mask, scale, 0.0f, 0.0f
+                            );
+                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        }
                     }
-                    // 4. softmax over S_k (dim 0)
-                    struct ggml_tensor* probs = ggml_soft_max(ctx_, scores);
-                    // 5. context = mul_mat(transpose(V), probs) -> ne = [D, S_q, H, B]
-                    struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
-                    result = ggml_mul_mat(ctx_, v_t, probs);
                 }
                 break;
             }
@@ -1647,7 +1670,24 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    if (is_decode_step) {
+    // Initialize dynamic causal masks for Flash Attention
+    for (const auto& minfo : dynamic_causal_masks_) {
+        if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
+        size_t s_kv = static_cast<size_t>(minfo.s_kv);
+        size_t s_q = static_cast<size_t>(minfo.s_q);
+        int64_t pos = minfo.pos;
+        std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
+        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(-10000.0f);
+        for (size_t i = 0; i < s_q; ++i) {
+            for (size_t j = 0; j < s_kv; ++j) {
+                mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+            }
+        }
+        ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+    }
+
+    if (is_decode_step && is_cuda_ && enable_cuda_graph_) {
         decode_graph_cached_ = true;
         decode_cached_pos_ = symbol_env.at("pos");
     }

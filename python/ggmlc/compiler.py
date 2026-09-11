@@ -122,8 +122,7 @@ def compile(
 
     # 4. Apply Block Quantization (Optional)
     if quantize is not None:
-        target_dtype = DType.from_str(str(quantize)) if isinstance(quantize, str) else quantize
-        ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=target_dtype)
+        ggml_graph, _ = quantize_graph_parameters(ggml_graph, target_dtype=quantize)
 
     # 5. Extract metadata from pipeline and tasks if provided
     combined_metadata: dict[str, Any] = dict(extra_metadata or {})

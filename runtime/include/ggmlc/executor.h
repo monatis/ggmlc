@@ -162,6 +162,13 @@ private:
     bool decode_graph_cached_ = false;
     int64_t decode_cached_pos_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> decode_attn_views_;
+    struct MaskInitInfo {
+        struct ggml_tensor* mask_tensor = nullptr;
+        int64_t pos = 0;
+        int64_t s_q = 0;
+        int64_t s_kv = 0;
+    };
+    std::vector<MaskInitInfo> dynamic_causal_masks_;
     std::vector<std::pair<struct ggml_tensor*, uint32_t>> decode_rope_arange_tensors_;
 
     std::unordered_map<std::string, int64_t> last_symbol_env_;

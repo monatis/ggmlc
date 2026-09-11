@@ -3,7 +3,6 @@ import torch
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.generator import verify_generation_parity_with_pytorch
-from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
 from torch import nn
 from transformers import GPT2LMHeadModel
@@ -43,35 +42,47 @@ def _verify_full_model_e2e(
         if hasattr(ref_out, "last_hidden_state"):
             ref_out = ref_out.last_hidden_state
         ref_np = ref_out.detach().cpu().numpy()
+        del ref_out
 
     # 2. Export to Canonical IR
     exported = export_torch_model(model, inputs, model_name=model_name)
     assert len(exported.main_graph.nodes) > 0
+    import gc
+
+    del model
+    gc.collect()
 
     # 3. Lower to GGML dialect
     ggml_graph = lower_to_ggml(exported.main_graph)
     assert len(ggml_graph.nodes) > 0
 
     # 4. Serialize to GGUF v3 binary format
-    ser_bytes = serialize_ggml_graph(ggml_graph)
-    assert len(ser_bytes) > 0
+    import tempfile
+    from pathlib import Path
 
-    # 5. Execute in C++ Generic Runtime via fast in-memory ModelRunner
     from ggmlc.runtime.runner import ModelRunner
+    from ggmlc.serialization.gguf import save_to_gguf
 
-    inputs_dict = {
-        name: tensor_val.numpy() for name, tensor_val in zip(input_names, inputs, strict=False)
-    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_gguf = Path(tmpdir) / f"{model_name}.gguf"
+        save_to_gguf(ggml_graph, tmp_gguf)
+        assert tmp_gguf.exists() and tmp_gguf.stat().st_size > 0
 
-    runner = ModelRunner(ser_bytes, device="cpu")
-    out = runner(inputs_dict)
-    actual_raw = next(iter(out.values())) if isinstance(out, dict) else out
-    actual_np = actual_raw.reshape(ref_np.shape)
+        del exported, ggml_graph
+        gc.collect()
+
+        # 5. Execute in C++ Generic Runtime via ModelRunner
+        inputs_dict = {
+            name: tensor_val.numpy() for name, tensor_val in zip(input_names, inputs, strict=False)
+        }
+
+        runner = ModelRunner(tmp_gguf, device="cpu")
+        out = runner(inputs_dict)
+        actual_raw = next(iter(out.values())) if isinstance(out, dict) else out
+        actual_np = actual_raw.reshape(ref_np.shape)
 
     cmp = check_numerical_accuracy(ref_np, actual_np, atol=atol)
-    import gc
-
-    del model, inputs, exported, ggml_graph, ser_bytes, runner, out
+    del inputs, runner, out
     gc.collect()
     assert cmp.passed, f"Hub model verification failed for {model_name}: {cmp.message}"
 
