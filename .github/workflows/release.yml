@@ -79,7 +79,7 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: 'PATH="/usr/local/cuda-12.4/bin:$PATH" CUDA_PATH="/usr/local/cuda-12.4" CUDAToolkit_ROOT="/usr/local/cuda-12.4" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80 -DGGML_CUDA_NO_VMM=ON"'
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair --exclude libcuda.so.1 --exclude libcuda.so --exclude libcublas.so.12 --exclude libcublasLt.so.12 --exclude libcudart.so.12 --exclude libgomp.so.1 -w {dest_dir} {wheel}"
           CIBW_ENVIRONMENT_WINDOWS: 'NVCC_PREPEND_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH" CMAKE_GENERATOR="Ninja" CMAKE_ARGS="-DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80 -DCMAKE_CUDA_FLAGS=\"-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH\""'
-          CIBW_ENVIRONMENT_MACOS: 'CMAKE_BUILD_TYPE="Release"'
+          CIBW_ENVIRONMENT_MACOS: 'CMAKE_BUILD_TYPE="Release" CMAKE_ARGS="-DGGML_NATIVE=OFF"'
 
       - name: Upload Wheels Artifact
         uses: actions/upload-artifact@v4
