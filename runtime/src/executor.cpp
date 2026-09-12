@@ -97,6 +97,11 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
 }
 
 ModelExecutor::~ModelExecutor() {
+    if (cpu_threadpool_) {
+        ggml_backend_cpu_set_threadpool(backend_, nullptr);
+        ggml_threadpool_free(cpu_threadpool_);
+        cpu_threadpool_ = nullptr;
+    }
     if (galloc_) {
         ggml_gallocr_free(galloc_);
         galloc_ = nullptr;
@@ -1758,6 +1763,21 @@ void ModelExecutor::run(int n_threads) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
     if (ggml_backend_is_cpu(backend_)) {
+        if (n_threads < 1 || n_threads > GGML_MAX_N_THREADS) {
+            throw std::invalid_argument("CPU thread count must be between 1 and " + std::to_string(GGML_MAX_N_THREADS));
+        }
+        if (!cpu_threadpool_ || cpu_threadpool_n_threads_ != n_threads) {
+            auto params = ggml_threadpool_params_default(n_threads);
+            auto new_pool = ggml_threadpool_new(&params);
+            if (!new_pool) {
+                throw std::runtime_error("Failed to create CPU thread pool");
+            }
+            // Detach the previous pool before freeing it; the backend borrows it.
+            ggml_backend_cpu_set_threadpool(backend_, new_pool);
+            if (cpu_threadpool_) ggml_threadpool_free(cpu_threadpool_);
+            cpu_threadpool_ = new_pool;
+            cpu_threadpool_n_threads_ = n_threads;
+        }
         ggml_backend_cpu_set_n_threads(backend_, n_threads);
     }
 
