@@ -234,7 +234,10 @@ class BenchmarkSuite:
                         break
                 if matched_act is not None:
                     res = check_numerical_accuracy(r_arr, matched_act, atol=tol)
-                    max_diff = max(max_diff, float(res.max_abs_diff))
+                    cur_diff = float(res.max_abs_diff)
+                    if np.isnan(cur_diff):
+                        cur_diff = float("inf")
+                    max_diff = max(max_diff, cur_diff)
                     if not res.passed:
                         all_passed = False
                 else:

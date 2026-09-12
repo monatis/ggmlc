@@ -684,6 +684,12 @@ def _lower_op(
                     ):
                         attrs["is_causal"] = 1
                         in_ids = in_ids[:3]
+            if len(in_ids) > 3:
+                import numpy as np
+                mask_id = in_ids[3]
+                mask_t = c_graph.tensors.get(mask_id)
+                if mask_t and mask_t.data is not None and np.issubdtype(mask_t.data.dtype, np.floating):
+                    mask_t.data = np.clip(mask_t.data, -32768.0, 0.0)
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ROPE:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ROPE, in_ids, out_ids, attrs, op.name)
