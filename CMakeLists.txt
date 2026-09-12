@@ -90,10 +90,13 @@ else()
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86/repack.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile/sgemm.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/amx/amx.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/amx/mmq.cpp
         )
         include_directories(
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/arch/x86
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/llamafile
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml/src/ggml-cpu/amx
         )
     endif()
 
