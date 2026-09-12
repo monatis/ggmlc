@@ -8,6 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(GGMLC_ENABLE_CUDA "Enable CUDA backend in ggmlc" OFF)
 option(GGMLC_ENABLE_METAL "Enable Metal backend in ggmlc" OFF)
+option(GGMLC_BUILD_EXAMPLES "Build downstream application examples" ON)
 
 # Includes
 include_directories(
@@ -114,11 +115,7 @@ endif()
 
 add_subdirectory(runtime)
 
-# Downstream showcase projects in scratch/
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/tab_completion/CMakeLists.txt")
-    add_subdirectory(scratch/tab_completion)
-endif()
-
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scratch/timesfm/CMakeLists.txt")
-    add_subdirectory(scratch/timesfm)
+# Downstream showcase application examples
+if (GGMLC_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
+    add_subdirectory(examples)
 endif()

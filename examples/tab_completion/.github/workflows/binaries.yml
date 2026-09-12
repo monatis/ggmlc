@@ -1,4 +1,4 @@
-name: Release Standalone Binaries
+name: Release Tab Completion Standalone Binaries
 
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
           fi
 
   build_binaries:
-    name: Build Binaries (${{ matrix.name }})
+    name: Build tab_completion (${{ matrix.name }})
     needs: [check_main]
     if: needs.check_main.outputs.is_main == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
@@ -45,14 +45,17 @@ jobs:
           - name: macos-arm64-metal
             os: macos-14
             backend: metal
+            artifact_name: tab_completion-macos-arm64-metal
 
           - name: windows-x86_64-cuda-sm86_sm89
             os: windows-2022
             backend: cuda
+            artifact_name: tab_completion-windows-x86_64-cuda-sm86_sm89
 
           - name: linux-x86_64-cuda-sm86_sm89
             os: ubuntu-22.04
             backend: cuda
+            artifact_name: tab_completion-linux-x86_64-cuda-sm86_sm89
 
     steps:
       - name: Checkout repository
@@ -94,17 +97,14 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DGGMLC_ENABLE_METAL=ON \
-            -DGGML_NATIVE=OFF \
-            -DGGMLC_BUILD_EXAMPLES=ON
+            -DENABLE_METAL=ON
 
       - name: Configure CMake (Windows CUDA)
         if: runner.os == 'Windows' && matrix.backend == 'cuda'
         run: |
           cmake -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DGGMLC_ENABLE_CUDA=ON `
-            -DGGMLC_BUILD_EXAMPLES=ON `
+            -DENABLE_CUDA=ON `
             -DCMAKE_CUDA_ARCHITECTURES="86;89" `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
@@ -114,39 +114,35 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DGGMLC_ENABLE_CUDA=ON \
-            -DGGMLC_BUILD_EXAMPLES=ON \
+            -DENABLE_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES="86;89" \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static
 
-      # Build Targets
-      - name: Build Binaries (ggmlc-run, tab_completion, timesfm, timesfm_bench)
+      # Build Target tab_completion
+      - name: Build tab_completion
         run: |
-          cmake --build build --config Release
+          cmake --build build --target tab_completion --config Release
 
       # Package Artifacts
-      - name: Package Binaries (Unix)
+      - name: Package Binary (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          tar -czvf "dist/ggmlc-run-${{ matrix.name }}.tar.gz" -C build/runtime ggmlc-run
-          tar -czvf "dist/tab_completion-${{ matrix.name }}.tar.gz" -C build/examples/tab_completion tab_completion
-          tar -czvf "dist/timesfm-${{ matrix.name }}.tar.gz" -C build/examples/timesfm timesfm
-          tar -czvf "dist/timesfm_bench-${{ matrix.name }}.tar.gz" -C build/examples/timesfm timesfm_bench
+          BIN_PATH=$(find build -type f -name tab_completion | head -n 1)
+          BIN_DIR=$(dirname "$BIN_PATH")
+          tar -czvf "dist/${{ matrix.artifact_name }}.tar.gz" -C "$BIN_DIR" tab_completion
 
-      - name: Package Binaries (Windows)
+      - name: Package Binary (Windows)
         if: runner.os == 'Windows'
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Compress-Archive -Path build\runtime\ggmlc-run.exe -DestinationPath "dist\ggmlc-run-${{ matrix.name }}.zip"
-          Compress-Archive -Path build\examples\tab_completion\tab_completion.exe -DestinationPath "dist\tab_completion-${{ matrix.name }}.zip"
-          Compress-Archive -Path build\examples\timesfm\timesfm.exe -DestinationPath "dist\timesfm-${{ matrix.name }}.zip"
-          Compress-Archive -Path build\examples\timesfm\timesfm_bench.exe -DestinationPath "dist\timesfm_bench-${{ matrix.name }}.zip"
+          $bin = Get-ChildItem -Path build -Filter "tab_completion.exe" -Recurse | Select-Object -First 1
+          Compress-Archive -Path $bin.FullName -DestinationPath "dist\${{ matrix.artifact_name }}.zip"
 
-      - name: Upload Binary Artifacts
+      - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.name }}
+          name: ${{ matrix.artifact_name }}
           path: dist/*
 
   publish_binaries:
