@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <cstdint>
 #include "forecaster.h"
 
 namespace timesfm {

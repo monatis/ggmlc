@@ -5,6 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <unordered_map>
+#include <cstdint>
 
 #include "infilling.h"
 #include "sampler.h"

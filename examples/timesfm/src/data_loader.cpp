@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 
 namespace timesfm {
 

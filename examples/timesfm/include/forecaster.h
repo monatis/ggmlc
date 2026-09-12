@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cstdint>
 #include "export.h"
 #include "revin.h"
 #include "detrending.h"

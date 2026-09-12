@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 #include "forecaster.h"
 #include "data_loader.h"
 #include "backtest.h"
