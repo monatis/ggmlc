@@ -432,6 +432,16 @@ cmake -B build-cuda -DGGMLC_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="all" -DCM
 cmake --build build-cuda -j$(nproc)
 ```
 
+CPU-only GCC/Clang builds optimize for the build machine by default. Use
+`-DGGML_NATIVE=OFF` when building for other CPUs. Native CPU flags are not added
+when cross-compiling. Each CPU executor reuses its worker threads across inference
+calls; set `n_threads` in Python or `--threads` in the CLI for your workload.
+
+To run the native CPU regression test, configure with `-DGGMLC_BUILD_TESTS=ON`,
+build the `test-executor-cpu` target, then run `ctest --test-dir build --output-on-failure`.
+`build/runtime/test-executor-cpu --benchmark` measures a small MLP through the
+model executor, including input and output copies.
+
 #### Windows (MSVC 2022 / Ninja)
 
 ```powershell

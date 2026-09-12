@@ -9,6 +9,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(GGMLC_ENABLE_CUDA "Enable CUDA backend in ggmlc" OFF)
 option(GGMLC_ENABLE_METAL "Enable Metal backend in ggmlc" OFF)
 option(GGMLC_BUILD_EXAMPLES "Build downstream application examples" ON)
+option(GGMLC_BUILD_TESTS "Build native runtime tests" OFF)
+
+if (GGMLC_BUILD_TESTS)
+    enable_testing()
+endif()
 
 # Includes
 include_directories(
@@ -93,6 +98,17 @@ else()
     endif()
 
     add_library(ggml_lib STATIC ${GGML_SOURCES})
+    option(GGML_NATIVE "Optimize GGML for the build machine's CPU" ON)
+    if (GGML_NATIVE AND NOT CMAKE_CROSSCOMPILING AND NOT MSVC
+        AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
+        AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # Match GGML's native CPU optimization for this standalone source build.
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i.86")
+            target_compile_options(ggml_lib PRIVATE -march=native)
+        elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+            target_compile_options(ggml_lib PRIVATE -mcpu=native)
+        endif()
+    endif()
     target_compile_definitions(ggml_lib PUBLIC
         _GNU_SOURCE
         GGML_USE_CPU

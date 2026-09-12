@@ -111,6 +111,8 @@ private:
     std::string device_ = "cpu";
     bool is_cuda_ = false;
     ggml_backend_t backend_ = nullptr;
+    ggml_threadpool_t cpu_threadpool_ = nullptr;
+    int cpu_threadpool_n_threads_ = 0;
 
     // Weights: static parameters & constants (allocated & initialized once)
     ggml_backend_buffer_t weight_buffer_ = nullptr;

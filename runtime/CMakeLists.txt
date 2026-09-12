@@ -38,6 +38,12 @@ target_link_libraries(ggmlc-run PRIVATE
     ggmlc_runtime
 )
 
+if (GGMLC_BUILD_TESTS)
+    add_executable(test-executor-cpu ../tests/runtime/test_executor_cpu.cpp)
+    target_link_libraries(test-executor-cpu PRIVATE ggmlc_runtime)
+    add_test(NAME executor-cpu COMMAND test-executor-cpu)
+endif()
+
 # Shared library for C-FFI
 add_library(ggmlc_runtime_shared SHARED
     src/loader.cpp
