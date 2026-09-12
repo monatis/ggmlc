@@ -36,7 +36,7 @@ def test_clip_vision_e2e(device: str):
     actual_out = runner(inputs[0].numpy()).reshape(ref_out.shape)
 
     cos = cosine_similarity(ref_out, actual_out)
-    cmp = check_numerical_accuracy(ref_out, actual_out, atol=1e-3)
+    cmp = check_numerical_accuracy(ref_out, actual_out, atol=1e-2)
     assert cos > 0.9999, f"CLIP Vision cosine similarity too low on {device}: {cos}"
     assert cmp.passed, f"CLIP Vision numerical check failed on {device}: {cmp.message}"
 

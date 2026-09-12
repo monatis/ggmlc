@@ -854,6 +854,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 throw std::runtime_error("Failed to allocate ggml_tensor for: " + t.name);
             }
             ggml_set_name(g_t, t.name.c_str());
+            if (t.data_ptr && t.data_size > 0) {
+                ggml_set_output(g_t);
+            }
             compute_tensors_[tid] = g_t;
             ggml_tensors_[tid] = g_t;
         }
@@ -1177,8 +1180,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!ggml_is_contiguous(k)) k = ggml_cont(ctx_, k);
                 if (v && !ggml_is_contiguous(v)) v = ggml_cont(ctx_, v);
                 if (mask) {
-                    if (!ggml_is_contiguous(mask)) mask = ggml_cont(ctx_, mask);
+                    mask = ggml_clamp(ctx_, mask, ATTN_MASK_MIN_FP16, 0.0f);
                     if (mask->type != GGML_TYPE_F16) mask = ggml_cast(ctx_, mask, GGML_TYPE_F16);
+                    if (!ggml_is_contiguous(mask)) mask = ggml_cont(ctx_, mask);
                 }
 
                 float scale = 1.0f / sqrtf((float)q->ne[0]);
@@ -1253,6 +1257,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* mask_t = nullptr;
                         if (is_causal) {
                             mask_t = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, s_kv, s_q, 1, 1);
+                            ggml_set_input(mask_t);
+                            ggml_set_output(mask_t);
                             dynamic_causal_masks_.push_back({mask_t, pos, s_q, s_kv});
                         } else {
                             mask_t = mask;
@@ -1285,24 +1291,25 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     } else {
                         int64_t s_q = q->ne[1];
                         int64_t s_k = k->ne[1];
+                        struct ggml_tensor* mask_t = nullptr;
                         if (is_causal && s_q > 1) {
-                            struct ggml_tensor* mask_t = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, s_k, s_q, 1, 1);
+                            mask_t = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, s_k, s_q, 1, 1);
+                            ggml_set_input(mask_t);
+                            ggml_set_output(mask_t);
                             dynamic_causal_masks_.push_back({mask_t, 0, s_q, s_k});
-                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
-                                ctx_, q, k, v, mask_t, scale, 0.0f, 0.0f
-                            );
-                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
                         } else if (is_causal && s_q == 1) {
-                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
-                                ctx_, q, k, v, nullptr, scale, 0.0f, 0.0f
-                            );
-                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                            mask_t = nullptr;
                         } else {
-                            struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
-                                ctx_, q, k, v, mask, scale, 0.0f, 0.0f
-                            );
-                            result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                            mask_t = mask;
                         }
+
+                        if (k->type != GGML_TYPE_F16) k = ggml_cast(ctx_, k, GGML_TYPE_F16);
+                        if (v && v->type != GGML_TYPE_F16) v = ggml_cast(ctx_, v, GGML_TYPE_F16);
+
+                        struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                            ctx_, q, k, v, mask_t, scale, 0.0f, 0.0f
+                        );
+                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
                     }
                 }
                 break;
@@ -1683,7 +1690,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         int64_t pos = minfo.pos;
         std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
         ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
-        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(-10000.0f);
+        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
         for (size_t i = 0; i < s_q; ++i) {
             for (size_t j = 0; j < s_kv; ++j) {
                 mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;

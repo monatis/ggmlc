@@ -260,5 +260,18 @@ Evaluated on **NVIDIA GeForce GTX 1050 (4GB VRAM)** with CUDA Graph replay and *
    - 16-step DDIM latency slashed from **19.5 s down to 6.58 s** (**3.0x faster**, 4.9 tok/s).
    - Single-step infilling latency dropped from **5.5 s down to 1.16 s** (27.5 tok/s).
 
+---
 
+## 4. Native FlashAttention & Arena Reuse Parity
 
+### A. First-Principles Dtype-Aware Attention Mask Constant
+Rather than heuristic magic numbers, the attention mask minimum is derived from IEEE-754 precision bounds:
+- **Underflow Guarantee**: $\exp(M) = 0.0f$ requires $M \le -88.0f$ in FP32, and $M \le -20.0f$ under GPU flush-to-zero (FTZ).
+- **Overflow Ceiling**: In IEEE-754 FP16, maximum finite representable magnitude is $65504.0f$.
+- **Exact Constant**: $M = -2^{15} = \mathbf{-32768.0f}$ (`ATTN_MASK_MIN_FP16`). It provides exact representability in FP16 with zero mantissa bits, complete exponential vanishing, and $>32000$ headroom against $-\infty$ overflow under subtraction ($S_{ij} - \max(S)$).
+
+### B. Graph Allocator Lifecycle Protection (`ggml_set_output`)
+To guarantee numerical stability across repeated inference runs without redundant PCIe re-transfers:
+- Causal masks are marked with both `ggml_set_input` (non-overlapping initial placement) and `ggml_set_output` (never freed or overwritten by intermediate activations during graph execution).
+- Compute-time constants in `compute_tensors_` are similarly protected with `ggml_set_output`.
+- Ensures bitwise identical outputs across warmup and measurement iterations under `enable_arena_reuse=True`.

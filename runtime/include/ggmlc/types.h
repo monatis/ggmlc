@@ -218,5 +218,21 @@ struct SerializedModelGraph {
     }
 };
 
+// Dtype-aware attention mask safe minimums:
+// Derived from first principles to guarantee:
+// 1. exp(M - max(S)) underflows to exact 0.0f (M <= -88.0f in FP32, M <= -20.0f in FlashAttention FTZ)
+// 2. M is strictly finite in target precision (no IEEE-754 overflow to -infinity)
+// 3. Leaves at least a 2x safety headroom for negative dot-product additions (q*k/sqrt(d))
+constexpr float ATTN_MASK_MIN_FP16 = -32768.0f; // -2^15 (FP16 max finite is 65504.0f)
+constexpr float ATTN_MASK_MIN_FP32 = -1e9f;     // -10^9 (FP32 max finite is 3.4e38)
+
+inline float get_dtype_safe_mask_min(enum ggml_type type) {
+    if (type == GGML_TYPE_F16) {
+        return ATTN_MASK_MIN_FP16;
+    }
+    return ATTN_MASK_MIN_FP32;
+}
+
 } // namespace ggmlc
+
 
