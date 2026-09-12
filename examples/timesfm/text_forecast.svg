@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+  </defs>
+  <rect width="1000" height="500" fill="url(#bgGrad)" rx="10"/>
+  <text x="70" y="36" fill="#f3f4f6" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600">TimesFM 3.0: series_text</text>
+  <text x="960" y="36" text-anchor="end" fill="#9ca3af" font-family="monospace" font-size="12">Horizon: 16 | Latency: 219.4ms</text>
+  <line x1="70" y1="450.0" x2="960" y2="450.0" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="454.0" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">8.30</text>
+  <line x1="70" y1="372.00" x2="960" y2="372.00" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="376.00" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">25.02</text>
+  <line x1="70" y1="294.00" x2="960" y2="294.00" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="298.00" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">41.75</text>
+  <line x1="70" y1="216.00" x2="960" y2="216.00" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="220.00" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">58.47</text>
+  <line x1="70" y1="138.00" x2="960" y2="138.00" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="142.00" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">75.20</text>
+  <line x1="70" y1="60.00" x2="960" y2="60.00" stroke="#1f2937" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="60" y="64.00" text-anchor="end" fill="#6b7280" font-family="monospace" font-size="11">91.92</text>
+  <line x1="340.87" y1="60" x2="340.87" y2="450" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="334.87" y="76" fill="#9ca3af" font-size="11" font-family="sans-serif" text-anchor="end">History</text>
+  <text x="346.87" y="76" fill="#ea580c" font-size="11" font-family="sans-serif">Forecast</text>
+  <polygon points="379.57,308.89 418.26,293.52 456.96,278.11 495.65,262.78 534.35,247.40 573.04,231.89 611.74,216.54 650.43,201.08 689.13,185.29 727.83,169.85 766.52,155.18 805.22,139.22 843.91,123.78 882.61,108.41 921.30,93.12 960.00,77.73 960.00,80.54 921.30,96.16 882.61,111.30 843.91,126.62 805.22,142.01 766.52,158.06 727.83,172.70 689.13,188.04 650.43,203.79 611.74,219.18 573.04,234.47 534.35,250.05 495.65,265.45 456.96,280.88 418.26,296.45 379.57,311.83 " fill="#ea580c" fill-opacity="0.14"/>
+  <polygon points="379.57,309.35 418.26,294.04 456.96,278.59 495.65,263.26 534.35,247.90 573.04,232.40 611.74,217.05 650.43,201.63 689.13,185.86 727.83,170.46 766.52,155.75 805.22,139.80 843.91,124.37 882.61,109.00 921.30,93.72 960.00,78.28 960.00,79.87 921.30,95.43 882.61,110.57 843.91,125.90 805.22,141.32 766.52,157.32 727.83,172.03 689.13,187.39 650.43,203.14 611.74,218.56 573.04,233.88 534.35,249.42 495.65,264.81 456.96,280.24 418.26,295.78 379.57,311.20 " fill="#ea580c" fill-opacity="0.20"/>
+  <polygon points="379.57,309.70 418.26,294.36 456.96,278.91 495.65,263.55 534.35,248.17 573.04,232.65 611.74,217.33 650.43,201.91 689.13,186.14 727.83,170.76 766.52,156.05 805.22,140.09 843.91,124.65 882.61,109.31 921.30,94.05 960.00,78.58 960.00,79.51 921.30,95.04 882.61,110.23 843.91,125.56 805.22,140.99 766.52,156.98 727.83,171.69 689.13,187.07 650.43,202.83 611.74,218.24 573.04,233.56 534.35,249.09 495.65,264.48 456.96,279.91 418.26,295.43 379.57,310.82 " fill="#ea580c" fill-opacity="0.28"/>
+  <path d="M 70.00 432.27 L 108.70 421.08 L 147.39 403.82 L 186.09 386.10 L 224.78 371.65 L 263.48 356.26 L 302.17 344.13 L 340.87 324.54 " fill="none" stroke="#38bdf8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 340.87 324.54 L L 379.57 310.23 L 418.26 294.87 L 456.96 279.39 L 495.65 264.00 L 534.35 248.62 L 573.04 233.07 L 611.74 217.77 L 650.43 202.33 L 689.13 186.58 L 727.83 171.19 L 766.52 156.49 L 805.22 140.52 L 843.91 125.08 L 882.61 109.74 L 921.30 94.53 L 960.00 79.03 " fill="none" stroke="#ea580c" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="70" y1="484" x2="88" y2="484" stroke="#38bdf8" stroke-width="2.5"/>
+  <text x="94" y="488" fill="#9ca3af" font-family="sans-serif" font-size="11">Observed History</text>
+  <line x1="210" y1="484" x2="228" y2="484" stroke="#ea580c" stroke-width="2.5"/>
+  <text x="234" y="488" fill="#9ca3af" font-family="sans-serif" font-size="11">Forecast (q50)</text>
+  <rect x="340" y="478" width="14" height="12" fill="#ea580c" fill-opacity="0.14" stroke="#ea580c" stroke-width="0.5"/>
+  <text x="360" y="488" fill="#9ca3af" font-family="sans-serif" font-size="11">80% Interval (q10-q90)</text>
+  <rect x="510" y="478" width="14" height="12" fill="#ea580c" fill-opacity="0.28" stroke="#ea580c" stroke-width="0.5"/>
+  <text x="530" y="488" fill="#9ca3af" font-family="sans-serif" font-size="11">40% Interval (q30-q70)</text>
+</svg>

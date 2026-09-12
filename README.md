@@ -468,6 +468,21 @@ pytest -v
 
 ---
 
+## 💡 Production Application Showcase Examples
+
+`ggmlc` includes production-grade standalone C++ applications under [`examples/`](examples/), demonstrating end-to-end neural compilation, domain math, and multi-backend acceleration:
+
+1. **[Tab Completion Engine (`examples/tab_completion`)](examples/tab_completion/README.md)**:
+   - 100% offline continuous latent diffusion code autocompletion engine powered by **PlaidQ**.
+   - Pure mathematical Fill-In-The-Middle (FIM) without prompt tagging hacks.
+   - Non-causal bidirectional transformer trunk, static 256-canvas CUDA Graph capture, OpenMP parallel hole-selective sampler, and persistent JSON-RPC IDE daemon (`--daemon`).
+2. **[Google TimesFM 3.0 Foundation Forecaster (`examples/timesfm`)](examples/timesfm/README.md)**:
+   - Standalone zero-dependency C++ engine for Google TimesFM 3.0 foundation time-series forecasting.
+   - 20-layer mixing transformer with Pax-style normalization, RoPE, and dynamic sequence dimensions.
+   - Statistical domain suite: RevIN normalization, linear detrending ($R^2 \ge 0.5$), quantile monotonicity sorting, rolling backtesting engine with calibration scoring (`coverage_80`, `coverage_40`, `naive_mae_ratio`), multi-band SVG visualizer, and single-binary embedded Web Studio & REST API (`--serve`).
+
+---
+
 ## 📖 Documentation
 
 Comprehensive guides, tutorials, and API references are available in the [`docs/`](docs/) directory:

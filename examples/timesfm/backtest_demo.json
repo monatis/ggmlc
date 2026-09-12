@@ -1,0 +1,47 @@
+{
+  "total_windows": 3,
+  "context_len": 128,
+  "horizon": 64,
+  "stride": 32,
+  "avg_mae": 1.7655,
+  "avg_rmse": 2.0865,
+  "avg_smape": 1.0029,
+  "avg_crps": 1.3343,
+  "avg_coverage_80": 63.5417,
+  "total_time_ms": 290.1382,
+  "windows": [
+    {
+      "window_idx": 0,
+      "start_t": 0,
+      "cut_t": 128,
+      "end_t": 192,
+      "mae": 1.9178,
+      "rmse": 2.2909,
+      "smape": 1.1628,
+      "crps": 1.4773,
+      "coverage_80": 57.8125
+    },
+    {
+      "window_idx": 1,
+      "start_t": 32,
+      "cut_t": 160,
+      "end_t": 224,
+      "mae": 1.7709,
+      "rmse": 2.1033,
+      "smape": 0.9983,
+      "crps": 1.3559,
+      "coverage_80": 57.8125
+    },
+    {
+      "window_idx": 2,
+      "start_t": 64,
+      "cut_t": 192,
+      "end_t": 256,
+      "mae": 1.6077,
+      "rmse": 1.8654,
+      "smape": 0.8476,
+      "crps": 1.1697,
+      "coverage_80": 75.0000
+    }
+  ]
+}
