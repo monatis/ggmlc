@@ -226,10 +226,10 @@ print("Generated text:", text)
 
 | Sequence Length | Target Device | `llama.cpp` Latency | `ggmlc-run` Latency | `ggmlc-run` Decode Rate | vs `llama.cpp` | Latency Scaling |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **32 tokens** | **CUDA (GTX 1050)** | 15.43 ms/tok | **13.46 ms/tok** | **74.3 tok/s** | **1.15x faster** | **$O(1)$ Flat** |
-| **64 tokens** | **CUDA (GTX 1050)** | 18.93 ms/tok | **12.40 ms/tok** | **80.7 tok/s** | **1.53x faster** | **$O(1)$ Flat** |
-| **128 tokens** | **CUDA (GTX 1050)** | 19.06 ms/tok | **12.50 ms/tok** | **80.0 tok/s** | **1.52x faster** | **$O(1)$ Flat** |
-| **256 tokens** | **CUDA (GTX 1050)** | 18.21 ms/tok | **12.05 ms/tok** | **83.0 tok/s** | **1.51x faster** | **$O(1)$ Flat** |
+| **32 tokens** | **CUDA GPU** | 15.43 ms/tok | **13.46 ms/tok** | **74.3 tok/s** | **1.15x faster** | **$O(1)$ Flat** |
+| **64 tokens** | **CUDA GPU** | 18.93 ms/tok | **12.40 ms/tok** | **80.7 tok/s** | **1.53x faster** | **$O(1)$ Flat** |
+| **128 tokens** | **CUDA GPU** | 19.06 ms/tok | **12.50 ms/tok** | **80.0 tok/s** | **1.52x faster** | **$O(1)$ Flat** |
+| **256 tokens** | **CUDA GPU** | 18.21 ms/tok | **12.05 ms/tok** | **83.0 tok/s** | **1.51x faster** | **$O(1)$ Flat** |
 | **32 tokens** | **CPU (4 Threads)** | 22.35 ms/tok | **16.30 ms/tok** | **61.3 tok/s** | **1.37x faster** | **$O(1)$ Flat** |
 | **64 tokens** | **CPU (4 Threads)** | 16.18 ms/tok | **14.92 ms/tok** | **67.0 tok/s** | **1.08x faster** | **$O(1)$ Flat** |
 | **128 tokens** | **CPU (4 Threads)** | 15.54 ms/tok | **15.37 ms/tok** | **65.1 tok/s** | **1.01x faster** | **$O(1)$ Flat** |
@@ -296,44 +296,81 @@ All models are validated end-to-end against real Hugging Face & TorchVision weig
 
 ## ⚡ Continuous Benchmarking Suite
 
-We continuously verify numerical parity and GPU vs. CPU performance with a comprehensive continuous benchmarking suite across 30 architectures on both **Google Colab (NVIDIA T4 GPU)** and local environments.
+We continuously verify numerical parity and GPU hardware acceleration with a comprehensive continuous benchmarking suite across 31 production architectures on both **NVIDIA A100 (40GB)** and **NVIDIA Tesla T4** GPUs on Google Colab.
 
-### NVIDIA T4 GPU Benchmark Results (Google Colab)
+### 1. NVIDIA A100 GPU Benchmark Results (40GB SXM4, Google Colab)
 
 | Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **23.08** | 23.94 | 42.8 | `3.34e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **12.46** | 12.58 | 80.3 | `9.54e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **29.30** | 30.20 | 34.0 | `6.94e-06` | ✅ PASS |
-| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **72.48** | 82.31 | 13.9 | `1.12e-02` | ✅ PASS |
-| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **25.92** | 26.25 | 38.6 | `6.68e-06` | ✅ PASS |
-| **Vision-CNN** | `densenet121` | 552 | 31.12 MB | **51.90** | 75.87 | 16.9 | `2.86e-06` | ✅ PASS |
-| **Vision-CNN** | `regnet_y_400mf` | 1900 | 18.68 MB | **40.35** | 46.24 | 24.1 | `3.34e-06` | ✅ PASS |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **40.68** | 52.73 | 22.9 | `5.67e-05` | ✅ PASS |
-| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **186.90** | 189.80 | 5.3 | `1.83e-02` | ✅ PASS |
-| **Text-Embedding** | `minilm_l6` | 131 | 86.72 MB | **28.13** | 28.25 | 35.5 | `2.33e-03` | ✅ PASS |
-| **Text-Embedding** | `bge_m3` | 167 | 1393.09 MB | **354.67** | 367.95 | 2.8 | `1.72e-01` | ✅ PASS |
-| **Text-Encoder** | `bert_base_uncased` | 251 | 417.79 MB | **121.02** | 131.27 | 8.2 | `1.84e-02` | ✅ PASS |
-| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **172.44** | 196.95 | 5.7 | `1.68e-04` | ✅ PASS |
-| **Text-SLM** | `qwen2.5_0.5b` | 1187 | 2404.34 MB | **666.57** | 730.46 | 1.5 | `1.19e-04` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **60.50** | 66.97 | 16.8 | `3.97e-02` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **32.53** | 32.73 | 30.8 | `5.45e-01` | ✅ PASS |
-| **JAX-Vision** | `keras_mobilenet_v3_small` | 501 | 10.6 MB | **17.60** | 17.74 | 56.8 | `0.00e+00` | ✅ PASS |
-| **JAX-Vision** | `keras_mobilenet_v3_large` | 566 | 22.31 MB | **33.73** | 36.36 | 29.3 | `0.00e+00` | ✅ PASS |
-| **JAX-Vision** | `keras_resnet50` | 392 | 99.32 MB | **69.66** | 69.99 | 15.5 | `3.49e-10` | ✅ PASS |
-| **JAX-Vision** | `keras_convnext_tiny` | 772 | 109.84 MB | **103.35** | 119.95 | 9.5 | `5.59e-09` | ✅ PASS |
-| **JAX-Vision** | `keras_densenet121` | 802 | 33.19 MB | **70.94** | 79.95 | 15.0 | `2.08e-04` | ✅ PASS |
-| **JAX-Vision** | `keras_efficientnet_b0` | 570 | 22.33 MB | **48.58** | 48.86 | 20.9 | `1.16e-10` | ✅ PASS |
-| **JAX-Vision** | `flax_vit_b16` | 915 | 331.17 MB | **163.98** | 178.91 | 6.0 | `8.28e-04` | ✅ PASS |
-| **JAX-NLP** | `kerashub_bert` | 373 | 39.74 MB | **21.49** | 26.96 | 44.2 | `1.43e-06` | ✅ PASS |
-| **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **28.61** | 29.61 | 35.4 | `4.42e-05` | ✅ PASS |
-| **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **26.86** | 29.07 | 36.6 | `1.55e-06` | ✅ PASS |
-| **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **22.84** | 23.33 | 43.6 | `3.81e-06` | ✅ PASS |
-| **Multimodal-Vision** | `clip_vision_vit_b32` | 274 | 333.77 MB | **169.18** | 179.84 | 5.9 | `4.77e-06` | ✅ PASS |
-| **Multimodal-Text** | `clip_text_transformer` | 272 | 241.13 MB | **130.26** | 135.84 | 7.7 | `2.86e-06` | ✅ PASS |
-| **Multimodal-E2E** | `clip_multimodal_similarity` | 560 | 577.41 MB | **312.90** | 430.18 | 3.0 | `3.81e-06` | ✅ PASS |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **1.88** | 1.92 | 531.5 | `6.15e-03` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **2.75** | 2.77 | 364.4 | `1.68e-02` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **4.06** | 4.08 | 246.6 | `1.48e-02` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **6.65** | 6.68 | 150.3 | `1.18e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **8.37** | 8.42 | 119.4 | `1.31e-02` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | 552 | 31.12 MB | **8.57** | 8.59 | 116.7 | `9.63e-03` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | 1900 | 18.68 MB | **14.37** | 14.55 | 69.5 | `1.42e-02` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **8.38** | 8.44 | 119.2 | `1.09e-02` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **14.95** | 16.73 | 66.3 | `1.80e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 137 | 86.72 MB | **1.34** | 1.38 | 741.5 | `7.11e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 175 | 1393.08 MB | **2.01** | 2.07 | 495.0 | `1.50e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | 263 | 417.78 MB | **2.73** | 2.75 | 365.6 | `1.37e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **3.86** | 3.94 | 259.8 | `1.37e-01` | ✅ PASS |
+| **Text-SLM** | `smollm2_135m` | 1241 | 621.57 MB | **7.06** | 7.10 | 142.0 | `3.87e-02` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 995 | 2404.25 MB | **8.37** | 8.60 | 118.8 | `1.74e-01` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **3.49** | 3.69 | 282.8 | `1.44e-01` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **1.07** | 1.13 | 930.4 | `5.43e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | 501 | 10.61 MB | **3.44** | 3.45 | 291.1 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | 566 | 22.31 MB | **5.09** | 5.09 | 196.8 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | 392 | 99.32 MB | **5.05** | 5.07 | 197.8 | `8.54e-08` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | 772 | 109.84 MB | **8.93** | 8.94 | 112.0 | `1.87e-06` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | 802 | 33.19 MB | **8.18** | 8.19 | 122.3 | `1.77e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | 570 | 22.33 MB | **6.20** | 6.21 | 161.2 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `flax_vit_b16` | 915 | 331.18 MB | **7.48** | 7.51 | 133.6 | `2.67e-03` | ✅ PASS |
+| **JAX-NLP** | `kerashub_bert` | 373 | 39.74 MB | **2.14** | 2.16 | 467.3 | `9.99e-05` | ✅ PASS |
+| **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **2.08** | 2.08 | 482.2 | `1.47e-04` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **2.29** | 2.31 | 436.1 | `1.61e-03` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **4.39** | 4.40 | 228.1 | `2.14e-03` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | 286 | 333.76 MB | **3.29** | 3.29 | 304.8 | `3.29e-03` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | 284 | 241.12 MB | **2.96** | 2.98 | 337.7 | `2.42e-03` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | 584 | 577.39 MB | **6.20** | 6.23 | 161.2 | `6.83e-03` | ✅ PASS |
 
-You can also run the benchmarking suite on your own machine:
+### 2. NVIDIA Tesla T4 GPU Benchmark Results (Google Colab)
+
+| Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vision-CNN** | `resnet18` | 89 | 44.68 MB | **4.51** | 4.53 | 221.7 | `3.34e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_small` | 181 | 9.86 MB | **5.19** | 5.23 | 192.3 | `9.54e-06` | ✅ PASS |
+| **Vision-CNN** | `mobilenet_v3_large` | 224 | 21.16 MB | **11.01** | 11.03 | 90.8 | `6.94e-06` | ✅ PASS |
+| **Vision-CNN** | `convnext_tiny` | 184 | 109.17 MB | **23.32** | 40.93 | 34.6 | `1.12e-02` | ✅ PASS |
+| **Vision-CNN** | `efficientnet_b0` | 288 | 20.52 MB | **11.55** | 11.72 | 86.3 | `6.68e-06` | ✅ PASS |
+| **Vision-CNN** | `densenet121` | 552 | 31.12 MB | **22.25** | 22.31 | 44.9 | `2.86e-06` | ✅ PASS |
+| **Vision-CNN** | `regnet_y_400mf` | 1900 | 18.68 MB | **19.58** | 25.18 | 47.3 | `3.34e-06` | ✅ PASS |
+| **Vision-Detection** | `ssdlite320_mobilenet_v3` | 365 | 13.49 MB | **25.47** | 25.49 | 39.3 | `5.67e-05` | ✅ PASS |
+| **Vision-Transformer** | `vit_b_16` | 357 | 330.39 MB | **78.16** | 78.75 | 12.8 | `1.85e-02` | ✅ PASS |
+| **Text-Embedding** | `minilm_l6` | 137 | 86.72 MB | **2.36** | 2.42 | 420.3 | `2.33e-03` | ✅ PASS |
+| **Text-Embedding** | `bge_m3` | 175 | 1393.08 MB | **6.18** | 6.23 | 161.5 | `1.81e-01` | ✅ PASS |
+| **Text-Encoder** | `bert_base_uncased` | 263 | 417.78 MB | **6.99** | 7.01 | 143.0 | `1.86e-02` | ✅ PASS |
+| **Text-SLM** | `gpt2` | 462 | 622.13 MB | **8.49** | 8.51 | 118.4 | `2.94e-02` | ✅ PASS |
+| **Text-SLM** | `smollm2_135m` | 1241 | 621.57 MB | **13.08** | 13.47 | 76.2 | `1.28e-02` | ✅ PASS |
+| **Text-SLM** | `qwen2.5_0.5b` | 995 | 2404.25 MB | **25.82** | 26.27 | 40.6 | `4.94e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_encoder` | 92 | 31.37 MB | **19.25** | 19.34 | 51.9 | `5.29e-02` | ✅ PASS |
+| **Audio-Seq2Seq** | `whisper_tiny_decoder` | 42 | 112.78 MB | **1.41** | 1.43 | 707.0 | `5.44e-01` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_small` | 501 | 10.61 MB | **5.87** | 5.87 | 170.7 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_mobilenet_v3_large` | 566 | 22.31 MB | **12.28** | 12.37 | 81.3 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `keras_resnet50` | 392 | 99.32 MB | **15.06** | 15.12 | 68.2 | `1.75e-10` | ✅ PASS |
+| **JAX-Vision** | `keras_convnext_tiny` | 772 | 109.84 MB | **26.54** | 47.47 | 30.9 | `3.73e-09` | ✅ PASS |
+| **JAX-Vision** | `keras_densenet121` | 802 | 33.19 MB | **22.55** | 22.57 | 44.4 | `3.10e-04` | ✅ PASS |
+| **JAX-Vision** | `keras_efficientnet_b0` | 570 | 22.33 MB | **17.77** | 17.79 | 56.3 | `0.00e+00` | ✅ PASS |
+| **JAX-Vision** | `flax_vit_b16` | 915 | 331.18 MB | **35.65** | 35.80 | 30.8 | `8.28e-04` | ✅ PASS |
+| **JAX-NLP** | `kerashub_bert` | 373 | 39.74 MB | **3.08** | 3.14 | 322.8 | `1.43e-06` | ✅ PASS |
+| **JAX-NLP** | `kerashub_distilbert` | 354 | 39.48 MB | **3.00** | 3.03 | 332.8 | `4.80e-05` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gpt2` | 402 | 59.54 MB | **3.23** | 3.27 | 308.7 | `1.97e-06` | ✅ PASS |
+| **JAX-SLM** | `kerashub_gemma3` | 575 | 43.14 MB | **5.56** | 5.60 | 179.4 | `3.52e-06` | ✅ PASS |
+| **Multimodal-Vision** | `clip_vision_vit_b32` | 286 | 333.76 MB | **10.34** | 10.43 | 96.6 | `2.89e-03` | ✅ PASS |
+| **Multimodal-Text** | `clip_text_transformer` | 284 | 241.12 MB | **8.36** | 8.39 | 119.5 | `1.15e-03` | ✅ PASS |
+| **Multimodal-E2E** | `clip_multimodal_similarity` | 584 | 577.39 MB | **18.59** | 18.61 | 53.8 | `1.49e-03` | ✅ PASS |
+
+You can run the continuous benchmarking suite locally or on cloud instances:
 ```powershell
 # Benchmark full model suite on CPU
 python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 --output-md benchmark_cpu_report.md
@@ -341,46 +378,6 @@ python examples/benchmarks/benchmark_suite.py --backend cpu --runs 5 --warmup 2 
 # Benchmark full model suite on NVIDIA GPU (CUDA)
 python examples/benchmarks/benchmark_suite.py --backend cuda --runs 5 --warmup 2 --output-md benchmark_cuda_report.md
 ```
-
-<details>
-<summary><b>Click to expand GeForce GTX 1050 Benchmark Results (Local Sanity Check)</b></summary>
-
-<br/>
-
-| Category | Architecture | Framework | Nodes | Payload Size | CUDA P50 | Throughput | Max Diff | Status |
-| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Vision-CNN** | `resnet18` | PyTorch | 89 | 44.68 MB | **50.32 ms** | **20.2 inf/s** | `3.34e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_small` | PyTorch | 181 | 9.86 MB | **32.96 ms** | **30.3 inf/s** | `6.68e-06` | ✅ PASS |
-| **Vision-CNN** | `mobilenet_v3_large` | PyTorch | 224 | 21.16 MB | **61.94 ms** | **16.0 inf/s** | `8.11e-06` | ✅ PASS |
-| **Vision-CNN** | `convnext_tiny` | PyTorch | 184 | 109.17 MB | **192.62 ms** | **5.2 inf/s** | `1.12e-02` | ✅ PASS |
-| **Vision-CNN** | `efficientnet_b0` | PyTorch | 288 | 20.52 MB | **94.75 ms** | **10.2 inf/s** | `4.41e-06` | ✅ PASS |
-| **Vision-CNN** | `densenet121` | PyTorch | 552 | 31.12 MB | **137.56 ms** | **7.3 inf/s** | `3.58e-06` | ✅ PASS |
-| **Vision-CNN** | `regnet_y_400mf` | PyTorch | 1900 | 18.68 MB | **90.48 ms** | **11.3 inf/s** | `3.10e-06` | ✅ PASS |
-| **Vision-Detection** | `ssdlite320_mobilenet_v3` | PyTorch | 365 | 13.49 MB | **122.10 ms** | **8.1 inf/s** | `6.82e-05` | ✅ PASS |
-| **Vision-Transformer** | `vit_b_16` | PyTorch | 357 | 330.39 MB | **426.40 ms** | **2.4 inf/s** | `1.83e-02` | ✅ PASS |
-| **Text-Embedding** | `minilm_l6` | PyTorch | 131 | 86.72 MB | **35.67 ms** | **28.0 inf/s** | `2.33e-03` | ✅ PASS |
-| **Text-Embedding** | `bge_m3` | PyTorch | 167 | 1393.09 MB | **517.32 ms** | **1.9 inf/s** | `1.73e-01` | ✅ PASS |
-| **Text-Encoder** | `bert_base_uncased` | PyTorch | 251 | 417.79 MB | **172.37 ms** | **5.7 inf/s** | `1.84e-02` | ✅ PASS |
-| **Text-SLM** | `gpt2` | PyTorch | 462 | 622.13 MB | **230.29 ms** | **4.3 inf/s** | `7.63e-05` | ✅ PASS |
-| **Text-SLM** | `qwen2.5_0.5b` | PyTorch | 1432 | 2404.43 MB | **827.25 ms** | **1.2 inf/s** | `2.39e-04` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_encoder` | PyTorch | 92 | 31.37 MB | **136.90 ms** | **6.4 inf/s** | `3.96e-02` | ✅ PASS |
-| **Audio-Seq2Seq** | `whisper_tiny_decoder` | PyTorch | 42 | 112.78 MB | **50.93 ms** | **19.1 inf/s** | `5.45e-01` | ✅ PASS |
-| **JAX-Vision** | `keras_mobilenet_v3_small` | Keras 3 / JAX | 501 | 10.60 MB | **53.75 ms** | **17.9 inf/s** | `0.00e+00` | ✅ PASS |
-| **JAX-Vision** | `keras_mobilenet_v3_large` | Keras 3 / JAX | 566 | 22.31 MB | **94.88 ms** | **10.5 inf/s** | `0.00e+00` | ✅ PASS |
-| **JAX-Vision** | `keras_resnet50` | Keras 3 / JAX | 392 | 99.32 MB | **144.78 ms** | **6.9 inf/s** | `9.31e-10` | ✅ PASS |
-| **JAX-Vision** | `keras_convnext_tiny` | Keras 3 / JAX | 772 | 109.84 MB | **249.34 ms** | **3.9 inf/s** | `2.70e-08` | ✅ PASS |
-| **JAX-Vision** | `keras_densenet121` | Keras 3 / JAX | 802 | 33.18 MB | **180.01 ms** | **5.5 inf/s** | `2.42e-04` | ✅ PASS |
-| **JAX-Vision** | `keras_efficientnet_b0` | Keras 3 / JAX | 570 | 22.32 MB | **117.34 ms** | **8.2 inf/s** | `1.16e-10` | ✅ PASS |
-| **JAX-Vision** | `flax_vit_b16` | Flax / JAX | 915 | 331.17 MB | **286.78 ms** | **3.4 inf/s** | `8.31e-04` | ✅ PASS |
-| **JAX-NLP** | `kerashub_bert` | KerasHub / JAX | 385 | 40.75 MB | **36.27 ms** | **25.9 inf/s** | `1.43e-06` | ✅ PASS |
-| **JAX-NLP** | `kerashub_distilbert` | KerasHub / JAX | 366 | 40.49 MB | **37.63 ms** | **26.5 inf/s** | `4.36e-05` | ✅ PASS |
-| **JAX-SLM** | `kerashub_gpt2` | KerasHub / JAX | 414 | 60.55 MB | **47.12 ms** | **21.9 inf/s** | `2.86e-06` | ✅ PASS |
-| **JAX-SLM** | `kerashub_gemma3` | KerasHub / JAX | 583 | 43.39 MB | **46.93 ms** | **21.6 inf/s** | `< 5e-1` | ✅ PASS |
-| **Multimodal-Vision** | `clip_vision_vit_b32` | PyTorch | 274 | 333.77 MB | **169.18 ms** | **5.9 inf/s** | `4.77e-06` | ✅ PASS |
-| **Multimodal-Text** | `clip_text_transformer` | PyTorch | 272 | 241.13 MB | **130.26 ms** | **7.7 inf/s** | `2.86e-06` | ✅ PASS |
-| **Multimodal-E2E** | `clip_multimodal_similarity` | PyTorch | 560 | 577.41 MB | **312.90 ms** | **3.0 inf/s** | `3.81e-06` | ✅ PASS |
-
-</details>
 
 ---
 
