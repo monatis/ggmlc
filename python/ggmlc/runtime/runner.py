@@ -190,6 +190,13 @@ class ModelRunner:
         self.executor.run(threads)
 
         # 5. Extract output tensors
+        input_ndim = (
+            args[0].ndim if len(args) > 0 else (next(iter(kwargs.values())).ndim if kwargs else 2)
+        )
+        return self.get_outputs(input_ndim=input_ndim)
+
+    def get_outputs(self, input_ndim: int = 2) -> np.ndarray | dict[str | int, np.ndarray]:
+        """Extracts output tensors from the executor without re-preparing the graph."""
         results: dict[str | int, np.ndarray] = {}
         for out_tid in self.outputs:
             t = self.tensor_info.get(out_tid)
@@ -206,11 +213,6 @@ class ModelRunner:
             py_t = self.py_graph.tensors.get(out_tid) if self.py_graph else None
             rank = getattr(py_t, "original_rank", None)
             if rank is None or rank <= 0:
-                input_ndim = (
-                    args[0].ndim
-                    if len(args) > 0
-                    else (next(iter(kwargs.values())).ndim if kwargs else 2)
-                )
                 rank = max(2, input_ndim)
             c_shape = full_c_shape[-rank:]
 
@@ -228,6 +230,25 @@ class ModelRunner:
         if len(self.outputs) == 1:
             return next(iter(results.values()))
         return results
+
+    def run_benchmark(self, runs: int = 5, n_threads: int | None = None) -> list[float]:
+        """Measures pure graph execution time over repeated runs without D2H copies."""
+        import time
+
+        threads = n_threads if n_threads is not None else self.n_threads
+        latencies: list[float] = []
+        is_cuda = self.device.startswith("cuda")
+        for _ in range(runs):
+            t0 = time.perf_counter()
+            self.executor.run(threads)
+            if is_cuda:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            latencies.append((t1 - t0) * 1000.0)
+        return latencies
 
     def set_state(self, state_name_or_id: str | int, array: np.ndarray) -> None:
         """Sets data for a persistent state tensor by name or ID."""

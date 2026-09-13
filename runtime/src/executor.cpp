@@ -1167,8 +1167,40 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_ROPE: {
                 int n_dims = op.attributes.count("n_dims") ? static_cast<int>(op.attributes.at("n_dims")) : in0->ne[0];
-                int mode = op.attributes.count("mode") ? static_cast<int>(op.attributes.at("mode")) : 0;
-                result = ggml_rope(ctx_, in0, in1, n_dims, mode);
+                int mode = op.attributes.count("mode") ? static_cast<int>(op.attributes.at("mode")) : 2; // Default to GGML_ROPE_TYPE_NEOX
+                float freq_base = 10000.0f;
+                if (op.float_attributes.count("freq_base")) {
+                    freq_base = static_cast<float>(op.float_attributes.at("freq_base"));
+                } else if (op.attributes.count("freq_base")) {
+                    freq_base = static_cast<float>(op.attributes.at("freq_base"));
+                }
+                float freq_scale = 1.0f;
+                if (op.float_attributes.count("freq_scale")) {
+                    freq_scale = static_cast<float>(op.float_attributes.at("freq_scale"));
+                } else if (op.attributes.count("freq_scale")) {
+                    freq_scale = static_cast<float>(op.attributes.at("freq_scale"));
+                }
+                int n_ctx_orig = op.attributes.count("n_ctx_orig") ? static_cast<int>(op.attributes.at("n_ctx_orig")) : 0;
+                float ext_factor = op.float_attributes.count("ext_factor") ? static_cast<float>(op.float_attributes.at("ext_factor")) : 0.0f;
+                float attn_factor = op.float_attributes.count("attn_factor") ? static_cast<float>(op.float_attributes.at("attn_factor")) : 1.0f;
+                float beta_fast = op.float_attributes.count("beta_fast") ? static_cast<float>(op.float_attributes.at("beta_fast")) : 0.0f;
+                float beta_slow = op.float_attributes.count("beta_slow") ? static_cast<float>(op.float_attributes.at("beta_slow")) : 0.0f;
+
+                struct ggml_tensor* freq_factors = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
+
+                struct ggml_tensor* rope_in = in0;
+                bool permuted = false;
+                if (in1 && in0->ne[2] != in1->ne[0] && in0->ne[1] == in1->ne[0]) {
+                    rope_in = ggml_permute(ctx_, in0, 0, 2, 1, 3);
+                    permuted = true;
+                }
+
+                struct ggml_tensor* rope_res = ggml_rope_ext(
+                    ctx_, rope_in, in1, freq_factors, n_dims, mode, n_ctx_orig,
+                    freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow
+                );
+
+                result = permuted ? ggml_permute(ctx_, rope_res, 0, 2, 1, 3) : rope_res;
                 break;
             }
             case GGML_OP_FLASH_ATTN_EXT: {
