@@ -46,13 +46,32 @@ jobs:
             os: macos-14
             backend: metal
 
-          - name: windows-x86_64-cuda-sm86_sm89
+          # Windows CUDA binaries (sm86, sm89)
+          - name: windows-x86_64-cuda-sm86
             os: windows-2022
             backend: cuda
+            cuda_arch: "86"
 
-          - name: linux-x86_64-cuda-sm86_sm89
+          - name: windows-x86_64-cuda-sm89
+            os: windows-2022
+            backend: cuda
+            cuda_arch: "89"
+
+          # Linux CUDA binaries (sm80, sm86, sm89)
+          - name: linux-x86_64-cuda-sm80
             os: ubuntu-22.04
             backend: cuda
+            cuda_arch: "80"
+
+          - name: linux-x86_64-cuda-sm86
+            os: ubuntu-22.04
+            backend: cuda
+            cuda_arch: "86"
+
+          - name: linux-x86_64-cuda-sm89
+            os: ubuntu-22.04
+            backend: cuda
+            cuda_arch: "89"
 
     steps:
       - name: Checkout repository
@@ -105,7 +124,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DGGMLC_ENABLE_CUDA=ON `
             -DGGMLC_BUILD_EXAMPLES=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="86;89" `
+            -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_arch }} `
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH"
 
@@ -116,7 +135,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DGGMLC_ENABLE_CUDA=ON \
             -DGGMLC_BUILD_EXAMPLES=ON \
-            -DCMAKE_CUDA_ARCHITECTURES="86;89" \
+            -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.cuda_arch }} \
             -DCMAKE_CUDA_RUNTIME_LIBRARY=Static
 
       # Build Targets
