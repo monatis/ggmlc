@@ -348,31 +348,19 @@ class LlamaCppComparisonSuite:
                     for x in example_inputs
                 ]
 
-                # Enable CUDA Graph on GPU to eliminate host launch queue overhead
-                if self.backend == "cuda":
-                    try:
-                        runner.executor.set_enable_cuda_graph(True)
-                    except Exception:  # noqa: BLE001, S110
-                        pass
-
-                # Warmup (also triggers CUDA Graph capture)
+                # Warmup
                 for _ in range(self.warmup):
                     runner(*np_inputs)
 
             # 2. Steady-state Single-Token Decode Latency
-            # Benchmark GPU decode execution directly without synchronous 600KB Device-to-Host memcpy per token
-            # (matching how llama.cpp samples internally in C++ on the GPU)
             decode_latencies = []
+            act_np = None
             for _ in range(self.runs):
                 t_start = time.perf_counter()
-                runner.executor.run(1)
-                if self.backend == "cuda":
-                    torch.cuda.synchronize()
+                out = runner(*np_inputs)
                 t_end = time.perf_counter()
                 decode_latencies.append((t_end - t_start) * 1000.0)
-
-            # Extract output for numerical parity verification
-            act_np = runner(*np_inputs)
+                act_np = out
 
             lat_arr = np.array(decode_latencies)
             p50_lat = float(np.percentile(lat_arr, 50))
