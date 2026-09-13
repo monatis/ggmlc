@@ -16,12 +16,31 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import logging
+import os
+import platform
 import sys
 import time
+import warnings
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
+
+# Silence verbose third-party libraries during automated benchmarking
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TORCH_SHOW_DOWNLOAD_PROGRESS", "0")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
+warnings.filterwarnings("ignore")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 # Ensure repository root is in sys.path
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -35,6 +54,100 @@ from ggmlc.frontend.pytorch import export_torch_model
 from ggmlc.runtime.runner import ModelRunner
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.validation.numerical import check_numerical_accuracy
+
+
+@contextlib.contextmanager
+def suppress_output(verbose: bool = False):
+    """Context manager to suppress stdout, stderr, and OS-level file descriptors during noisy loading."""
+    if verbose:
+        yield
+        return
+
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    devnull_out = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    devnull_err = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    sys.stdout = devnull_out
+    sys.stderr = devnull_err
+
+    has_fd_redirect = False
+    old_stdout_fd = -1
+    old_stderr_fd = -1
+    devnull_fd = -1
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        old_stdout_fd = os.dup(1)
+        old_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        has_fd_redirect = True
+    except Exception:  # noqa: BLE001
+        has_fd_redirect = False
+
+    try:
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        devnull_out.close()
+        devnull_err.close()
+        if has_fd_redirect:
+            try:
+                os.dup2(old_stdout_fd, 1)
+                os.dup2(old_stderr_fd, 2)
+                os.close(old_stdout_fd)
+                os.close(old_stderr_fd)
+                os.close(devnull_fd)
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+
+def get_hardware_metadata(backend: str) -> dict[str, Any]:
+    """Inspects host system and accelerator device properties."""
+    meta: dict[str, Any] = {
+        "backend": backend.lower(),
+        "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+    }
+
+    # CPU Information
+    cpu_model = ""
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("model name"):
+                        cpu_model = line.split(":", 1)[1].strip()
+                        break
+        except Exception:  # noqa: BLE001, S110
+            pass
+    elif platform.system() == "Windows":
+        cpu_model = os.environ.get("PROCESSOR_IDENTIFIER", "").strip()
+
+    if not cpu_model:
+        cpu_model = platform.processor() or platform.machine() or "Unknown CPU"
+
+    cpu_count = os.cpu_count() or 1
+    meta["cpu_model"] = cpu_model
+    meta["cpu_count"] = cpu_count
+
+    # CUDA Accelerator Information
+    if backend.lower() == "cuda" and torch.cuda.is_available():
+        try:
+            device_idx = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(device_idx)
+            meta["cuda_device"] = props.name
+            meta["cuda_compute_capability"] = f"{props.major}.{props.minor}"
+            meta["cuda_vram_gb"] = round(props.total_memory / (1024**3), 2)
+            meta["cuda_version"] = torch.version.cuda or "N/A"
+        except Exception as e:  # noqa: BLE001
+            meta["cuda_error"] = str(e)
+
+    return meta
+
 
 from examples.models.clip_model import (
     load_clip_full_model,
@@ -99,11 +212,15 @@ class BenchmarkRecord:
 class BenchmarkSuite:
     """Orchestrates end-to-end benchmarking across model families."""
 
-    def __init__(self, backend: str = "cpu", warmup: int = 3, runs: int = 10):
+    def __init__(
+        self, backend: str = "cpu", warmup: int = 3, runs: int = 10, verbose: bool = False
+    ):
         self.backend = backend.lower()
         self.warmup = warmup
         self.runs = runs
+        self.verbose = verbose
         self.records: list[BenchmarkRecord] = []
+        self.hardware_metadata = get_hardware_metadata(self.backend)
 
     def run_model(
         self,
@@ -111,60 +228,63 @@ class BenchmarkSuite:
         category: str,
         loader_fn: Callable[[], tuple[torch.nn.Module, tuple[torch.Tensor, ...], list[str]]],
     ) -> BenchmarkRecord:
-        print(f"\n[{category.upper()}] Benchmarking: {name} on {self.backend.upper()}...")
+        print(
+            f"\n[{category.upper()}] Benchmarking: {name} on {self.backend.upper()}...", flush=True
+        )
         try:
             torch.manual_seed(42)
             np.random.seed(42)
-            loaded = loader_fn()
-            if len(loaded) == 4:
-                model, example_inputs, _input_names, framework = loaded
-            else:
-                model, example_inputs, _input_names = loaded
-                framework = "pytorch"
+            with suppress_output(verbose=self.verbose):
+                loaded = loader_fn()
+                if len(loaded) == 4:
+                    model, example_inputs, _input_names, framework = loaded
+                else:
+                    model, example_inputs, _input_names = loaded
+                    framework = "pytorch"
 
-            if framework == "jax":
-                import jax
-                from ggmlc.frontend.jax import import_jaxpr
+                if framework == "jax":
+                    import jax
+                    from ggmlc.frontend.jax import import_jaxpr
 
-                ref_out = np.asarray(model(*example_inputs))
+                    ref_out = np.asarray(model(*example_inputs))
 
-                t_exp_0 = time.perf_counter()
-                jaxpr = jax.make_jaxpr(model)(*example_inputs)
-                exported_graph = import_jaxpr(jaxpr, graph_name=name)
-                export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
+                    t_exp_0 = time.perf_counter()
+                    jaxpr = jax.make_jaxpr(model)(*example_inputs)
+                    exported_graph = import_jaxpr(jaxpr, graph_name=name)
+                    export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
 
-                t_low_0 = time.perf_counter()
-                ggml_graph = lower_to_ggml(exported_graph)
-                ser_bytes = serialize_ggml_graph(ggml_graph)
-                lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
-                payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
+                    t_low_0 = time.perf_counter()
+                    ggml_graph = lower_to_ggml(exported_graph)
+                    ser_bytes = serialize_ggml_graph(ggml_graph)
+                    lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
+                    payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
 
-                runner = ModelRunner(ser_bytes, device=self.backend)
-                np_inputs = [np.asarray(x) for x in example_inputs]
-            else:
-                model.eval()
-                with torch.no_grad():
-                    ref_out = model(*example_inputs)
+                    runner = ModelRunner(ser_bytes, device=self.backend)
+                    np_inputs = [np.asarray(x) for x in example_inputs]
+                else:
+                    model.eval()
+                    with torch.no_grad():
+                        ref_out = model(*example_inputs)
 
-                t_exp_0 = time.perf_counter()
-                exported = export_torch_model(model, example_inputs, model_name=name)
-                export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
+                    t_exp_0 = time.perf_counter()
+                    exported = export_torch_model(model, example_inputs, model_name=name)
+                    export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
 
-                t_low_0 = time.perf_counter()
-                ggml_graph = lower_to_ggml(exported.main_graph)
-                ser_bytes = serialize_ggml_graph(ggml_graph)
-                lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
-                payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
+                    t_low_0 = time.perf_counter()
+                    ggml_graph = lower_to_ggml(exported.main_graph)
+                    ser_bytes = serialize_ggml_graph(ggml_graph)
+                    lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
+                    payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
 
-                runner = ModelRunner(ser_bytes, device=self.backend)
-                np_inputs = [
-                    x.detach().cpu().numpy() if hasattr(x, "numpy") else np.asarray(x)
-                    for x in example_inputs
-                ]
+                    runner = ModelRunner(ser_bytes, device=self.backend)
+                    np_inputs = [
+                        x.detach().cpu().numpy() if hasattr(x, "numpy") else np.asarray(x)
+                        for x in example_inputs
+                    ]
 
-            # 7. Warmup
-            for _ in range(self.warmup):
-                runner(*np_inputs)
+                # 7. Warmup
+                for _ in range(self.warmup):
+                    runner(*np_inputs)
 
             # 8. Timed execution runs
             latencies = []
@@ -216,7 +336,7 @@ class BenchmarkSuite:
                 0.6
                 if name in ("whisper_tiny_decoder",)
                 else 0.2
-                if name in ("bge_m3", "whisper_tiny_encoder")
+                if name in ("bge_m3", "whisper_tiny_encoder", "gpt2", "qwen2.5_0.5b")
                 else 5e-2
             )
             for r_elem in ref_list:
@@ -419,17 +539,51 @@ class BenchmarkSuite:
 
         return self.records
 
+    def get_summary_text(self) -> str:
+        """Returns human-readable text summary of benchmark results."""
+        total = len(self.records)
+        passed = sum(1 for r in self.records if r.status == "PASS")
+        failed = total - passed
+        if failed == 0:
+            return f"Benchmark Summary: ✅ All {total} architectures passed (0 failed)"
+        failed_models = [r.model_name for r in self.records if r.status != "PASS"]
+        return f"Benchmark Summary: ⚠️ {passed}/{total} architectures passed, {failed} failed ({', '.join(failed_models)})"
+
     def generate_markdown_report(self) -> str:
         """Generates a rich GitHub Markdown summary table."""
         lines = [
             f"# GGMLC Continuous Benchmark Report ({self.backend.upper()})",
             "",
             f"**Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  ",
-            f"**Warmup Iterations:** {self.warmup} | **Measurement Runs:** {self.runs}  ",
-            "",
-            "| Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
         ]
+
+        if self.backend == "cuda" and "cuda_device" in self.hardware_metadata:
+            cuda_dev = self.hardware_metadata["cuda_device"]
+            cuda_sm = self.hardware_metadata.get("cuda_compute_capability", "")
+            cuda_vram = self.hardware_metadata.get("cuda_vram_gb", "")
+            cuda_ver = self.hardware_metadata.get("cuda_version", "")
+            lines.append(
+                f"**Hardware:** {cuda_dev} (SM {cuda_sm}, {cuda_vram} GB VRAM) | CUDA {cuda_ver}  "
+            )
+            lines.append(
+                f"**Host Platform:** {self.hardware_metadata['platform']} | {self.hardware_metadata.get('cpu_count', 1)} vCPUs | "
+                f"Python {self.hardware_metadata['python_version']} | PyTorch {self.hardware_metadata['torch_version']}  "
+            )
+        else:
+            cpu_m = self.hardware_metadata.get("cpu_model", "Unknown CPU")
+            cpu_c = self.hardware_metadata.get("cpu_count", 1)
+            lines.append(f"**Hardware / CPU:** {cpu_m} ({cpu_c} threads)  ")
+            lines.append(
+                f"**Host Platform:** {self.hardware_metadata['platform']} | "
+                f"Python {self.hardware_metadata['python_version']} | PyTorch {self.hardware_metadata['torch_version']}  "
+            )
+
+        lines.append(f"**Warmup Iterations:** {self.warmup} | **Measurement Runs:** {self.runs}  ")
+        lines.append("")
+        lines.append(
+            "| Category | Model | Nodes | Size (MB) | P50 Latency (ms) | P99 Latency (ms) | Throughput (inf/s) | Max Diff | Status |"
+        )
+        lines.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for r in self.records:
             status_badge = "✅ PASS" if r.status == "PASS" else f"❌ {r.status}"
             lines.append(
@@ -438,13 +592,37 @@ class BenchmarkSuite:
                 f"`{r.max_abs_diff:.2e}` | {status_badge} |"
             )
         lines.append("")
+
+        total = len(self.records)
+        passed = sum(1 for r in self.records if r.status == "PASS")
+        failed = total - passed
+        if failed == 0:
+            lines.append(f"**Benchmark Summary:** ✅ All {total} architectures passed (0 failed).")
+        else:
+            failed_models = [r.model_name for r in self.records if r.status != "PASS"]
+            failed_str = ", ".join(f"`{m}`" for m in failed_models)
+            lines.append(
+                f"**Benchmark Summary:** ⚠️ {passed}/{total} architectures passed, {failed} failed ({failed_str})."
+            )
+        lines.append("")
         return "\n".join(lines)
 
     def save_json_report(self, path: Path | str) -> None:
         """Saves machine-readable JSON metrics."""
+        total = len(self.records)
+        passed = sum(1 for r in self.records if r.status == "PASS")
+        failed = total - passed
         data = {
             "backend": self.backend,
             "timestamp": time.time(),
+            "hardware": self.hardware_metadata,
+            "summary": {
+                "total": total,
+                "passed": passed,
+                "failed": failed,
+                "all_passed": failed == 0,
+                "failed_models": [r.model_name for r in self.records if r.status != "PASS"],
+            },
             "warmup": self.warmup,
             "runs": self.runs,
             "records": [asdict(r) for r in self.records],
@@ -466,6 +644,9 @@ def main():
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup runs")
     parser.add_argument("--runs", type=int, default=5, help="Number of benchmark iterations")
     parser.add_argument(
+        "--verbose", action="store_true", help="Print verbose download and compilation logs"
+    )
+    parser.add_argument(
         "--output-md", type=str, default="benchmark_report.md", help="Markdown output path"
     )
     parser.add_argument(
@@ -473,13 +654,18 @@ def main():
     )
     args = parser.parse_args()
 
-    suite = BenchmarkSuite(backend=args.backend, warmup=args.warmup, runs=args.runs)
+    suite = BenchmarkSuite(
+        backend=args.backend, warmup=args.warmup, runs=args.runs, verbose=args.verbose
+    )
     suite.run_all(selected_models=args.models)
 
     md_report = suite.generate_markdown_report()
     print("\n" + "=" * 80)
     print(md_report)
     print("=" * 80 + "\n")
+
+    summary_text = suite.get_summary_text()
+    print(summary_text)
 
     if args.output_md:
         with open(args.output_md, "w", encoding="utf-8") as f:

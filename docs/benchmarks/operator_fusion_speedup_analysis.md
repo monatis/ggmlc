@@ -50,5 +50,5 @@ Our findings confirm:
 pytest tests/numerical/test_fused_ops_parity.py -v
 
 # Run full comparative A/B benchmark suite
-python benchmarks/benchmark_fused_speedup.py --iterations 3 --warmup 1
+python examples/benchmarks/benchmark_fused_speedup.py --iterations 3 --warmup 1
 ```

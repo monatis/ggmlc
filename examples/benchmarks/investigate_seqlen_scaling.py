@@ -13,13 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Add project root to sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 import torch
 from ggmlc.dialect.ggml.lowering import lower_to_ggml
 from ggmlc.frontend.pytorch import export_torch_model
-from ggmlc.ir.dtype import DType
 from ggmlc.memory.planner import plan_memory_arena
 from ggmlc.serialization.graph import serialize_ggml_graph
 from ggmlc.transforms import create_standard_optimization_pipeline
@@ -115,7 +116,9 @@ def benchmark_single_seqlen(
     print(f"  Serialized model: {len(serialized_bytes) / (1024 * 1024):.2f} MB")
 
     input_names = [exported.main_graph.tensors[tid].name for tid in exported.main_graph.inputs]
-    input_feed = {input_names[i]: dummy_inputs[i].detach().cpu().numpy() for i in range(len(dummy_inputs))}
+    input_feed = {
+        input_names[i]: dummy_inputs[i].detach().cpu().numpy() for i in range(len(dummy_inputs))
+    }
     output_ids = [exported.main_graph.outputs[0]]
 
     # 6. Verify Numerical Parity (Planned Mode)
@@ -227,7 +230,7 @@ def generate_markdown_report(results: list[SeqLenDataPoint]) -> str:
     )
 
     # Group by model
-    models = sorted(list({r.model_name for r in results}))
+    models = sorted({r.model_name for r in results})
     for model in models:
         m_results = [r in results and r for r in results if r.model_name == model]
         lines.append(f"### Model: {model.upper()}\n")
@@ -258,7 +261,7 @@ def generate_markdown_report(results: list[SeqLenDataPoint]) -> str:
         lines.append("#### Latency, Throughput & Locality Factor")
         tp_unit = "tokens/s" if model == "gpt2" else "inf/s"
         lines.append(
-            f"| Seq Length (L) | Unplanned Latency | Planned Latency | Unplanned TP | Planned TP | Latency / Token | Speedup Factor | Cosine Sim |"
+            "| Seq Length (L) | Unplanned Latency | Planned Latency | Unplanned TP | Planned TP | Latency / Token | Speedup Factor | Cosine Sim |"
         )
         lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
         for r in m_results:
@@ -319,7 +322,7 @@ def main():
                     warmup=args.warmup,
                 )
                 results.append(res)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 print(f"Error benchmarking {model_name} @ L={seq_len}: {e}")
                 import traceback
 
