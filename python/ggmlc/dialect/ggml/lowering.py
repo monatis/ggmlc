@@ -667,8 +667,6 @@ def _lower_op(
                     else:
                         break
             if data is not None:
-                import numpy as np
-
                 sq_data = np.squeeze(data)
                 if sq_data.ndim == 2 and sq_data.shape[0] == sq_data.shape[1]:
                     n = sq_data.shape[0]
@@ -685,8 +683,6 @@ def _lower_op(
                         attrs["is_causal"] = 1
                         in_ids = in_ids[:3]
             if len(in_ids) > 3:
-                import numpy as np
-
                 mask_id = in_ids[3]
                 mask_t = c_graph.tensors.get(mask_id)
                 if (
@@ -697,6 +693,17 @@ def _lower_op(
                     mask_t.data = np.clip(mask_t.data, -32768.0, 0.0)
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_FLASH_ATTN_EXT, in_ids, out_ids, attrs, op.name)
     elif opcode == OpCode.ROPE:
+        if len(in_ids) > 1:
+            pos_t = c_graph.tensors.get(in_ids[1])
+            if pos_t:
+                pos_t.dtype = DType.I32
+                if pos_t.data is not None and hasattr(pos_t.data, "astype"):
+                    pos_t.data = np.ascontiguousarray(pos_t.data.astype(np.int32))
+            g_pos_t = g_graph.tensors.get(in_ids[1])
+            if g_pos_t:
+                g_pos_t.type = int(GGMLType.GGML_TYPE_I32)
+                if g_pos_t.data is not None and hasattr(g_pos_t.data, "astype"):
+                    g_pos_t.data = np.ascontiguousarray(g_pos_t.data.astype(np.int32))
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_ROPE, in_ids, out_ids, attrs, op.name)
     else:
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_NONE, in_ids, out_ids, attrs, op.name)

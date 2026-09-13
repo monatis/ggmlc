@@ -92,6 +92,10 @@ GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
         "QuantFactory/gpt2-GGUF",
         "gpt2.Q8_0.gguf",
     ),
+    "minilm_l6": (
+        "second-state/All-MiniLM-L6-v2-Embedding-GGUF",
+        "all-MiniLM-L6-v2-Q8_0.gguf",
+    ),
 }
 
 
@@ -106,7 +110,13 @@ def get_or_download_gguf(model_name: str, explicit_path: str | Path | None = Non
         Path(f"scratch/{model_name}-f16.gguf"),
         Path(".cache/gguf") / f"{model_name}.gguf",
         Path("scratch/SmolLM2-135M-Instruct-f16.gguf") if "smol" in model_name else None,
+        Path("scratch/SmolLM2-135M-Instruct-Q8_0.gguf") if "smol" in model_name else None,
     ]
+    if model_name in GGUF_HUB_REGISTRY:
+        _, fn = GGUF_HUB_REGISTRY[model_name]
+        local_candidates.append(Path(".cache/gguf") / fn)
+        local_candidates.append(Path("scratch") / fn)
+
     for c in local_candidates:
         if c and c.exists():
             return str(c)
@@ -353,14 +363,8 @@ class LlamaCppComparisonSuite:
                     runner(*np_inputs)
 
             # 2. Steady-state Single-Token Decode Latency
-            decode_latencies = []
-            act_np = None
-            for _ in range(self.runs):
-                t_start = time.perf_counter()
-                out = runner(*np_inputs)
-                t_end = time.perf_counter()
-                decode_latencies.append((t_end - t_start) * 1000.0)
-                act_np = out
+            decode_latencies = runner.run_benchmark(runs=self.runs)
+            act_np = runner.get_outputs()
 
             lat_arr = np.array(decode_latencies)
             p50_lat = float(np.percentile(lat_arr, 50))
@@ -396,11 +400,8 @@ class LlamaCppComparisonSuite:
                         for _ in range(1):
                             seq_runner(*seq_np_in)
 
-                        t_p0 = time.perf_counter()
-                        for _ in range(self.runs):
-                            seq_runner(*seq_np_in)
-                        t_p1 = time.perf_counter()
-                        avg_ms = ((t_p1 - t_p0) / self.runs) * 1000.0
+                        latencies = seq_runner.run_benchmark(runs=self.runs)
+                        avg_ms = float(np.mean(latencies))
                         tok_s = (seq_len / (avg_ms / 1000.0)) if avg_ms > 0 else 0.0
                         prefill_throughputs[seq_len] = round(tok_s, 1)
                 except Exception:  # noqa: BLE001

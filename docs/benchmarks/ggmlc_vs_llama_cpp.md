@@ -1,11 +1,15 @@
 # GGMLC vs llama.cpp: Architectural Paradigm, Graph Structure & Performance Comparison
 
+> [!WARNING]
+> **Work in Progress (WIP)**: This report is actively being updated ahead of the upcoming `ggmlc` release. Benchmark numbers, operator fusions (including full end-to-end RoPE pattern matching and horizontal GEMV fusion), and standalone runner throughput measurements are under active development. Official numbers will be re-collected on NVIDIA A100 GPU and published alongside the next release.
+
 ## TL;DR
 
 - **Compiler IR vs. Handcrafted C++**: `ggmlc` is a neural network compiler that ingests PyTorch (`torch.export`), JAX (`jaxpr`), Flax, and Keras 3 models directly from Python source into a Canonical IR, whereas `llama.cpp` relies on imperative, handwritten C++ classes (`src/models/*.cpp`) and manual Python conversion scripts.
 - **Why `ggmlc` Graph Node Counts Are Higher (~2x)**: `ggmlc` preserves every tensor view, slice, stride permutation, and reshape as an **explicit, first-class metadata node** (`GGML_OP_VIEW`, `GGML_OP_RESHAPE`, `GGML_OP_PERMUTE`, `GGML_OP_CONCAT`). In GGML, these are **zero-overhead operations** (0 FLOPs, 0 CUDA kernel launches) that execute on the host in nanoseconds by adjusting pointer offsets without submitting GPU commands. In contrast, `llama.cpp` performs this logic implicitly in host C++ code using pointer arithmetic.
 - **Why GEMV Kernel Launches Are Cut in Half (-42.7%)**: `ggmlc`'s Horizontal Operator Fusion pass merges parallel projections ($W_q, W_k, W_v \to [W_q; W_k; W_v]$ and $W_{\text{gate}}, W_{\text{up}} \to [W_{\text{gate}}; W_{\text{up}}]$). This replaces **90 separate GPU kernel launches per token** on a 30-layer model with single contiguous GEMV dispatches followed by zero-cost view slices.
-- **Direct Live Throughput & Speedup**: On NVIDIA A100-SXM4 (40GB), `ggmlc` achieves **143.0 tok/s** on SmolLM2-135M, **117.5 tok/s** on Qwen 2.5 0.5B, **262.9 tok/s** on GPT-2, **357.5 tok/s** on BERT-Base, and **607.1 tok/s** on MiniLM-L6, with prompt prefill scaling up to **131,140 tokens/sec** ($N=256$) with 100% verified numerical parity.
+- **Operator Fusion & Graph Optimization (Active Release)**: With the addition of automated RoPE pattern matching and lowering directly to `GGML_OP_ROPE` (`ggml_rope_ext`), total graph node count drops from 1,241 down to **753 nodes** on SmolLM2-135M and **603 nodes** on Qwen 2.5 0.5B, eliminating 300+ extra CUDA kernel dispatches.
+- **Direct Live Throughput & Speedup**: Measured on NVIDIA A100-SXM4 (40GB) using the unified benchmark suite with 100% verified numerical parity across all models. Initial results are being updated with the latest fused RoPE and static graph execution.
 
 ---
 

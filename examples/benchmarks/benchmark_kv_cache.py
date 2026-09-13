@@ -11,15 +11,143 @@ across sequence lengths: 32, 64, 128, 256 tokens on CPU and NVIDIA CUDA GPU.
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
 
 
+def find_ggmlc_run_executable(explicit_path: str | None = None) -> str:
+    """Discovers standalone ggmlc-run binary across platforms (Linux/Colab/Windows)."""
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.is_file():
+            return str(p.resolve())
+        raise FileNotFoundError(f"Specified executable not found: {explicit_path}")
+
+    candidates = [
+        # Colab / Linux CMake default
+        Path("build/runtime/ggmlc-run"),
+        Path("build-cuda/runtime/ggmlc-run"),
+        Path("runtime/ggmlc-run"),
+        Path("./ggmlc-run"),
+        # Windows Ninja / CUDA / MSVC
+        Path("build-win-cuda/runtime/ggmlc-run.exe"),
+        Path("build-win/runtime/Release/ggmlc-run.exe"),
+        Path("build-win/runtime/Debug/ggmlc-run.exe"),
+        Path("./ggmlc-run.exe"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+
+    which_path = shutil.which("ggmlc-run")
+    if which_path:
+        return which_path
+
+    raise FileNotFoundError(
+        "Could not locate 'ggmlc-run' standalone binary.\n"
+        "Please build it via `cmake --build build -j` or specify path using `--executable <path>`."
+    )
+
+
+def find_or_fetch_official_gguf(explicit_path: str | None = None) -> str:
+    """Discovers existing official GGUF or fetches SmolLM2-135M from Hugging Face Hub."""
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.is_file():
+            return str(p.resolve())
+        raise FileNotFoundError(f"Specified official GGUF not found: {explicit_path}")
+
+    candidates = [
+        Path("scratch/SmolLM2-135M-Instruct-f16.gguf"),
+        Path("scratch/SmolLM2-135M-Instruct-Q8_0.gguf"),
+        Path(".cache/gguf/SmolLM2-135M-Instruct-Q8_0.gguf"),
+        Path(".cache/gguf/SmolLM2-135M-Instruct-f16.gguf"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        print("📥 Fetching official SmolLM2 GGUF from Hugging Face Hub...", flush=True)
+        downloaded = hf_hub_download(
+            repo_id="bartowski/SmolLM2-135M-Instruct-GGUF",
+            filename="SmolLM2-135M-Instruct-Q8_0.gguf",
+            cache_dir=".cache/gguf",
+        )
+        return str(Path(downloaded).resolve())
+    except Exception as e:
+        raise FileNotFoundError(
+            f"Official SmolLM2 GGUF not found and auto-download failed ({e}).\n"
+            "Please specify `--official-gguf <path>`."
+        ) from e
+
+
+def find_or_compile_ggmlc_gguf(explicit_path: str | None = None, auto_compile: bool = True) -> str:
+    """Discovers existing ggmlc GGUF or compiles SmolLM2-135M on demand."""
+    if explicit_path:
+        p = Path(explicit_path)
+        if p.is_file():
+            return str(p.resolve())
+        raise FileNotFoundError(f"Specified ggmlc GGUF not found: {explicit_path}")
+
+    candidates = [
+        Path("scratch/smollm2_chat.gguf"),
+        Path(".cache/ggmlc/smollm2_chat.gguf"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return str(c.resolve())
+
+    if not auto_compile:
+        raise FileNotFoundError(
+            "ggmlc GGUF not found. Please specify `--ggmlc-gguf <path>` or allow auto-compilation."
+        )
+
+    print("⚙️ Compiling SmolLM2-135M with native GQA and RoPE fusion for benchmark...", flush=True)
+    import ggmlc
+    import torch
+    from ggmlc.pipeline.tokenizer import BPETokenizer
+
+    from examples.models.hub_models import load_smollm2_model
+
+    target_path = Path("scratch/smollm2_chat.gguf")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    model, dummy_input, _ = load_smollm2_model(seq_len=8)
+    tokenizer = BPETokenizer.from_huggingface("HuggingFaceTB/SmolLM2-135M-Instruct")
+
+    dim_s = torch.export.Dim("s", min=1, max=2048)
+    dynamic_shapes = ({1: dim_s},)
+
+    ggmlc.compile(
+        model=model,
+        sample_inputs=dummy_input,
+        output=str(target_path),
+        dynamic_shapes=dynamic_shapes,
+        model_name="smollm2_135m",
+        quantize="f16",
+        pipeline=tokenizer,
+        tasks=["text-generation"],
+    )
+    print(
+        f"✅ Compilation finished: {target_path} ({target_path.stat().st_size / (1024 * 1024):.1f} MB)",
+        flush=True,
+    )
+    return str(target_path.resolve())
+
+
 def run_llama_cpp(
     model_path: str, prompt: str, max_tokens: int, n_threads: int, n_gpu_layers: int = 0
 ):
-    from llama_cpp import Llama
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        print("⚠️ 'llama_cpp' module not installed. Skipping llama.cpp baseline.")
+        return None
 
     llm = Llama(
         model_path=model_path,
@@ -42,7 +170,6 @@ def run_llama_cpp(
     prompt_tokens = res["usage"]["prompt_tokens"]
     gen_text = res["choices"][0]["text"]
 
-    # Decode throughput
     decode_tok_s = gen_tokens / max(total_time, 1e-6)
     ms_per_tok = (total_time * 1000.0) / max(gen_tokens, 1)
 
@@ -64,6 +191,7 @@ def run_ggmlc_run(
     max_tokens: int,
     device: str = "cpu",
     n_threads: int = 4,
+    use_cuda_graph: bool = False,
 ):
     cmd = [
         executable_path,
@@ -77,16 +205,14 @@ def run_ggmlc_run(
         "--threads",
         str(n_threads),
     ]
+    if device == "cuda" and use_cuda_graph:
+        cmd.append("--cuda-graph")
 
     res = subprocess.run(
         cmd, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace"
     )
     stdout = res.stdout
 
-    # Parse stdout metrics
-    # Summary: X tokens generated in Ys (Z tok/s overall)
-    #   Prompt Prefill : P tokens in AA ms (BB tok/s)
-    #   Token Decode   : D tokens in CC ms (DD tok/s, EE ms/tok)
     gen_tokens = max_tokens
     total_time = 0.0
     tok_s = 0.0
@@ -139,11 +265,29 @@ def main():
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--output-md", type=str, default="benchmark_kv_cache_report.md")
     parser.add_argument("--output-json", type=str, default="benchmark_kv_cache_report.json")
+    parser.add_argument(
+        "--executable", type=str, default=None, help="Path to ggmlc-run standalone binary"
+    )
+    parser.add_argument(
+        "--official-gguf", type=str, default=None, help="Path to official llama.cpp GGUF"
+    )
+    parser.add_argument("--ggmlc-gguf", type=str, default=None, help="Path to ggmlc compiled GGUF")
+    parser.add_argument(
+        "--skip-compile", action="store_true", help="Do not auto-compile ggmlc GGUF if missing"
+    )
+    parser.add_argument(
+        "--cuda-graph", action="store_true", default=True, help="Enable CUDA Graph for ggmlc-run"
+    )
     args = parser.parse_args()
 
-    official_gguf = "scratch/SmolLM2-135M-Instruct-f16.gguf"
-    ggmlc_gguf = "scratch/smollm2_chat.gguf"
-    ggmlc_run_exe = "build-win-cuda/runtime/ggmlc-run.exe"
+    ggmlc_run_exe = find_ggmlc_run_executable(args.executable)
+    print(f"🔧 Using standalone runner: {ggmlc_run_exe}")
+
+    official_gguf = find_or_fetch_official_gguf(args.official_gguf)
+    print(f"📦 Using official GGUF: {official_gguf}")
+
+    ggmlc_gguf = find_or_compile_ggmlc_gguf(args.ggmlc_gguf, auto_compile=not args.skip_compile)
+    print(f"🚀 Using ggmlc GGUF: {ggmlc_gguf}")
 
     prompt = "The capital of France is"
     seq_lengths = [32, 64, 128, 256]
@@ -165,9 +309,10 @@ def main():
                 llama_res = run_llama_cpp(
                     official_gguf, prompt, slen, n_threads=args.threads, n_gpu_layers=gpu_layers
                 )
-                print(
-                    f"[llama.cpp  {dev.upper()}] {llama_res['gen_tokens']} tok | {llama_res['total_time_s']:.2f}s | {llama_res['decode_tok_s']:.1f} tok/s | {llama_res['ms_per_tok']:.2f} ms/tok"
-                )
+                if llama_res:
+                    print(
+                        f"[llama.cpp  {dev.upper()}] {llama_res['gen_tokens']} tok | {llama_res['total_time_s']:.2f}s | {llama_res['decode_tok_s']:.1f} tok/s | {llama_res['ms_per_tok']:.2f} ms/tok"
+                    )
             except Exception as e:  # noqa: BLE001
                 print(f"[llama.cpp  {dev.upper()}] Error: {e}")
                 llama_res = None
@@ -175,7 +320,13 @@ def main():
             # 2. ggmlc-run with KV cache
             try:
                 ggmlc_res = run_ggmlc_run(
-                    ggmlc_run_exe, ggmlc_gguf, prompt, slen, device=dev, n_threads=args.threads
+                    ggmlc_run_exe,
+                    ggmlc_gguf,
+                    prompt,
+                    slen,
+                    device=dev,
+                    n_threads=args.threads,
+                    use_cuda_graph=args.cuda_graph,
                 )
                 print(
                     f"[ggmlc-run  {dev.upper()}] {ggmlc_res['gen_tokens']} tok | {ggmlc_res['total_time_s']:.2f}s | {ggmlc_res['decode_tok_s']:.1f} tok/s | {ggmlc_res['ms_per_tok']:.2f} ms/tok"

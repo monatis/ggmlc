@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode, Operation
 from ggmlc.ir.shape import Shape, StaticDim
@@ -26,6 +27,7 @@ class FusionOptions:
     enable_softmax: bool = True
     enable_horizontal_mlp: bool = True
     enable_horizontal_qkv: bool = True
+    enable_rope: bool = True
 
 
 class OperatorFusionPass(Pass):
@@ -67,6 +69,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
     if options is None:
         options = FusionOptions()
 
+    if options.enable_rope:
+        _fuse_rope_patterns(graph)
+
     if options.enable_layer_norm:
         _fuse_layer_norm_patterns(graph)
 
@@ -89,6 +94,225 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
         _fuse_horizontal_linear_patterns(graph, options)
 
     return graph
+
+
+def _fuse_rope_patterns(graph: Graph) -> None:
+    """Matches decomposed Rotary Position Embedding (RoPE) subgraphs from PyTorch:
+    x * cos + rotate_half(x) * sin -> ROPE(x, pos)
+    where rotate_half(x) = cat((-x[..., d//2:], x[..., :d//2]), dim=-1).
+    """
+    producer_map: dict[int, Operation] = {}
+    consumer_counts: dict[int, int] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_counts[in_id] = consumer_counts.get(in_id, 0) + 1
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.ADD and len(op.inputs) == 2:
+            in0_id, in1_id = op.inputs[0], op.inputs[1]
+            prod0 = producer_map.get(in0_id)
+            prod1 = producer_map.get(in1_id)
+
+            if prod0 and prod1 and prod0.opcode == OpCode.MUL and prod1.opcode == OpCode.MUL:
+                matched = False
+                for prod_cos, prod_sin in [(prod0, prod1), (prod1, prod0)]:
+                    sin_input_cands = [producer_map.get(inp) for inp in prod_sin.inputs]
+                    rot_cand = next(
+                        (p for p in sin_input_cands if p and p.opcode == OpCode.CONCAT), None
+                    )
+                    if not rot_cand or len(rot_cand.inputs) != 2:
+                        continue
+
+                    neg_cand = producer_map.get(rot_cand.inputs[0])
+                    slice1_cand = producer_map.get(rot_cand.inputs[1])
+                    if not (neg_cand and neg_cand.opcode == OpCode.NEG):
+                        neg_cand = producer_map.get(rot_cand.inputs[1])
+                        slice1_cand = producer_map.get(rot_cand.inputs[0])
+
+                    if not (
+                        neg_cand
+                        and neg_cand.opcode == OpCode.NEG
+                        and slice1_cand
+                        and slice1_cand.opcode == OpCode.SLICE
+                    ):
+                        continue
+
+                    slice2_cand = producer_map.get(neg_cand.inputs[0])
+                    if not (slice2_cand and slice2_cand.opcode == OpCode.SLICE):
+                        continue
+
+                    if slice1_cand.inputs[0] != slice2_cand.inputs[0]:
+                        continue
+                    x_id = slice1_cand.inputs[0]
+
+                    if x_id not in prod_cos.inputs:
+                        continue
+
+                    cos_id = (
+                        prod_cos.inputs[0] if prod_cos.inputs[1] == x_id else prod_cos.inputs[1]
+                    )
+                    s1_end = slice1_cand.attributes.get("end", 0)
+                    n_dims = int(s1_end * 2) if s1_end > 0 else 64
+
+                    # Trace up from cos_id to find pos and freq_base
+                    curr = producer_map.get(cos_id)
+                    while curr and curr.opcode in (OpCode.UNSQUEEZE, OpCode.VIEW, OpCode.RESHAPE):
+                        curr = producer_map.get(curr.inputs[0]) if curr.inputs else None
+
+                    pos_id = None
+                    freq_base = 10000.0
+                    if curr and curr.opcode == OpCode.COS:
+                        emb_prod = producer_map.get(curr.inputs[0])
+                        while emb_prod and emb_prod.opcode in (
+                            OpCode.CONCAT,
+                            OpCode.VIEW,
+                            OpCode.RESHAPE,
+                        ):
+                            emb_prod = (
+                                producer_map.get(emb_prod.inputs[0]) if emb_prod.inputs else None
+                            )
+                        if emb_prod and emb_prod.opcode == OpCode.MUL:
+                            for inp in emb_prod.inputs:
+                                inp_op = producer_map.get(inp)
+                                actual_t_id = (
+                                    inp_op.inputs[0]
+                                    if inp_op and inp_op.opcode == OpCode.UNSQUEEZE
+                                    else inp
+                                )
+                                t = graph.get_tensor(actual_t_id)
+                                if (
+                                    t
+                                    and t.data is not None
+                                    and t.data.ndim == 1
+                                    and len(t.data) > 1
+                                ):
+                                    arr = t.data
+                                    if len(arr) > 1 and arr[1] > 0:
+                                        freq_base = float((1.0 / arr[1]) ** (n_dims / 2.0))
+                                else:
+                                    pos_id = actual_t_id
+
+                    # If pos_id was not discovered via graph tracing, search for arange or pos symbol
+                    if pos_id is None:
+                        for t in graph.tensors.values():
+                            if t.name in ("pos", "positions", "position_ids") or "arange" in t.name:
+                                pos_id = t.id
+                                break
+
+                    # Ensure position tensor is I32 for GGML rope kernel
+                    if pos_id is not None:
+                        t_pos = graph.get_tensor(pos_id)
+                        if t_pos is not None:
+                            t_pos.dtype = DType.I32
+                            if t_pos.data is not None and hasattr(t_pos.data, "astype"):
+                                t_pos.data = np.ascontiguousarray(t_pos.data.astype(np.int32))
+
+                    ops_to_remove.add(prod_cos.id)
+                    ops_to_remove.add(prod_sin.id)
+                    ops_to_remove.add(rot_cand.id)
+                    ops_to_remove.add(neg_cand.id)
+                    ops_to_remove.add(slice1_cand.id)
+                    ops_to_remove.add(slice2_cand.id)
+                    ops_to_remove.add(op.id)
+                    # Check if x_id comes from a TRANSPOSE(pre_trans, dim0=1, dim1=2)
+                    trans_prod = producer_map.get(x_id)
+                    is_pre_trans = (
+                        trans_prod is not None
+                        and trans_prod.opcode == OpCode.TRANSPOSE
+                        and len(trans_prod.inputs) == 1
+                        and (
+                            (
+                                trans_prod.attributes.get("dim0") == 1
+                                and trans_prod.attributes.get("dim1") == 2
+                            )
+                            or (
+                                trans_prod.attributes.get("dim0") == 2
+                                and trans_prod.attributes.get("dim1") == 1
+                            )
+                        )
+                    )
+
+                    if is_pre_trans:
+                        pre_trans_id = trans_prod.inputs[0]
+                        pre_trans_t = graph.get_tensor(pre_trans_id)
+
+                        rope_out_t = graph.add_tensor(
+                            name=f"{pre_trans_t.name if pre_trans_t else 'act'}_rope_fused",
+                            shape=pre_trans_t.shape
+                            if pre_trans_t
+                            else graph.get_tensor(x_id).shape,
+                            dtype=graph.get_tensor(x_id).dtype,
+                            storage=StorageClass.ACTIVATION,
+                        )
+
+                        fused_rope_op = Operation(
+                            id=graph.new_op_id(),
+                            opcode=OpCode.ROPE,
+                            inputs=[pre_trans_id, pos_id if pos_id is not None else 0],
+                            outputs=[rope_out_t.id],
+                            attributes={
+                                "n_dims": n_dims,
+                                "mode": 2,  # GGML_ROPE_TYPE_NEOX
+                                "freq_base": freq_base,
+                                "freq_scale": 1.0,
+                            },
+                            name=f"{op.name or 'rope'}_fused",
+                        )
+                        rope_out_t.producer_id = fused_rope_op.id
+
+                        trans_op = Operation(
+                            id=graph.new_op_id(),
+                            opcode=OpCode.TRANSPOSE,
+                            inputs=[rope_out_t.id],
+                            outputs=list(op.outputs),
+                            attributes=dict(trans_prod.attributes),
+                            name=f"{op.name or 'rope'}_transposed",
+                        )
+                        out_t = graph.get_tensor(op.outputs[0])
+                        if out_t is not None:
+                            out_t.producer_id = trans_op.id
+
+                        if consumer_counts.get(x_id, 0) <= 3:
+                            ops_to_remove.add(trans_prod.id)
+
+                        new_nodes.append(fused_rope_op)
+                        new_nodes.append(trans_op)
+                    else:
+                        fused_rope_op = Operation(
+                            id=graph.new_op_id(),
+                            opcode=OpCode.ROPE,
+                            inputs=[x_id, pos_id if pos_id is not None else 0],
+                            outputs=list(op.outputs),
+                            attributes={
+                                "n_dims": n_dims,
+                                "mode": 2,  # GGML_ROPE_TYPE_NEOX
+                                "freq_base": freq_base,
+                                "freq_scale": 1.0,
+                            },
+                            name=f"{op.name or 'rope'}_fused",
+                        )
+                        out_t = graph.get_tensor(op.outputs[0])
+                        if out_t is not None:
+                            out_t.producer_id = fused_rope_op.id
+                        new_nodes.append(fused_rope_op)
+
+                    matched = True
+                    break
+
+                if matched:
+                    continue
+
+        new_nodes.append(op)
+
+    graph.nodes = [n for n in new_nodes if n.id not in ops_to_remove]
 
 
 def _fuse_layer_norm_patterns(graph: Graph) -> None:
@@ -312,9 +536,9 @@ def _fuse_rms_norm_patterns(graph: Graph) -> None:
                         x_id = prod1.inputs[0]
 
             if rstd_op is not None and x_id is not None and gamma_id is not None:
-                # Ensure tensor is 1D, 2D, or 3D where innermost dimension is ne0
+                # Ensure tensor is 1D, 2D, 3D, or 4D where innermost dimension is ne0
                 x_t = graph.get_tensor(x_id)
-                if x_t and len(x_t.shape.dims) <= 3:
+                if x_t and len(x_t.shape.dims) <= 4:
                     var_add_op = producer_map.get(rstd_op.inputs[0])
                     eps = 1e-5
                     if var_add_op and var_add_op.opcode == OpCode.ADD:
