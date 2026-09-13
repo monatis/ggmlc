@@ -277,9 +277,7 @@ def benchmark_end_to_end_model(
             ref_out = ref_out.numpy()
 
     # Parity check
-    _ = run_compiled_model_wsl(bytes_base, inputs=inputs_np, output_tensor_ids=[out_id])[
-        out_id
-    ]
+    _ = run_compiled_model_wsl(bytes_base, inputs=inputs_np, output_tensor_ids=[out_id])[out_id]
     res_fused = run_compiled_model_wsl(bytes_fused, inputs=inputs_np, output_tensor_ids=[out_id])[
         out_id
     ]
@@ -371,13 +369,19 @@ def main():
             "| Operator | Baseline GGML Latency | Fused `ggmlc-stdlib` Latency | Speedup Factor | Cosine Parity |\n"
         )
         f.write("| :--- | :--- | :--- | :--- | :--- |\n")
-        f.writelines(f"| **{r['op']}** | {r['baseline_ms']:.3f} ms | **{r['fused_ms']:.3f} ms** | **{r['speedup']:.2f}x** | **{r['cos_sim']:.6f}** |\n" for r in micro_results)
+        f.writelines(
+            f"| **{r['op']}** | {r['baseline_ms']:.3f} ms | **{r['fused_ms']:.3f} ms** | **{r['speedup']:.2f}x** | **{r['cos_sim']:.6f}** |\n"
+            for r in micro_results
+        )
         f.write("\n### End-to-End Full Model Benchmarks\n\n")
         f.write(
             "| Model | Sequence Length ($L$) | Baseline Latency | Fused `ggmlc` Latency | Speedup Factor | Cosine Parity |\n"
         )
         f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-        f.writelines(f"| **{r['model'].upper()}** | **L={r['seq_len']}** | {r['baseline_ms']:.2f} ms | **{r['fused_ms']:.2f} ms** | **{r['speedup']:.2f}x** | **{r['cos_sim']:.6f}** |\n" for r in model_results)
+        f.writelines(
+            f"| **{r['model'].upper()}** | **L={r['seq_len']}** | {r['baseline_ms']:.2f} ms | **{r['fused_ms']:.2f} ms** | **{r['speedup']:.2f}x** | **{r['cos_sim']:.6f}** |\n"
+            for r in model_results
+        )
 
     print("\n=======================================================")
     print(f"Report written to {out_doc}")
