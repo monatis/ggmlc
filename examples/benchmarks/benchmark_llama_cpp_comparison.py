@@ -5,10 +5,9 @@ Evaluates shared model architectures between ggmlc and llama.cpp:
 2. Live Steady-State Autoregressive Decode Throughput (ggmlc tok/s vs llama.cpp tok/s at S=1)
 3. Prompt Prefill Throughput across sequence lengths (N=16, 64, 128, 256)
 4. Numerical Equivalence & Parity Verification against Reference Framework
-5. Visualized Computation Graph Comparison (Side-by-side Mermaid diagrams with compute vs metadata color coding)
 
 Outputs:
-- Rich formatted Markdown comparison report with embedded diagrams
+- Clean Markdown report with live speedup comparisons and hardware metrics
 - Machine-readable JSON summary for CI tracking and Colab reporting
 """
 
@@ -54,7 +53,6 @@ from ggmlc.validation.numerical import check_numerical_accuracy
 from examples.benchmarks.graph_compare import (
     analyze_graph,
     compare_with_llamacpp,
-    generate_transformer_block_comparison_mermaid,
 )
 from examples.models.hub_models import (
     load_bert_model,
@@ -71,6 +69,63 @@ try:
     _LLAMA_CPP_AVAILABLE = True
 except ImportError:
     _LLAMA_CPP_AVAILABLE = False
+
+try:
+    from huggingface_hub import hf_hub_download
+
+    _HF_HUB_AVAILABLE = True
+except ImportError:
+    _HF_HUB_AVAILABLE = False
+
+
+# Official HuggingFace GGUF model registry for automatic live benchmarking
+GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
+    "smollm2_135m": (
+        "HuggingFaceTB/SmolLM2-135M-Instruct-GGUF",
+        "smollm2-135m-instruct-q8_0.gguf",
+    ),
+    "qwen2.5_0.5b": (
+        "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        "qwen2.5-0.5b-instruct-q8_0.gguf",
+    ),
+    "gpt2": (
+        "RichardErkhov/openai-community--gpt2-gguf",
+        "gpt2.Q8_0.gguf",
+    ),
+}
+
+
+def get_or_download_gguf(model_name: str, explicit_path: str | Path | None = None) -> str | None:
+    """Finds existing local GGUF file or automatically downloads official model from Hugging Face Hub."""
+    if explicit_path and Path(explicit_path).exists():
+        return str(explicit_path)
+
+    # 1. Search local paths
+    local_candidates = [
+        Path(f"scratch/{model_name}.gguf"),
+        Path(f"scratch/{model_name}-f16.gguf"),
+        Path(".cache/gguf") / f"{model_name}.gguf",
+        Path("scratch/SmolLM2-135M-Instruct-f16.gguf") if "smol" in model_name else None,
+    ]
+    for c in local_candidates:
+        if c and c.exists():
+            return str(c)
+
+    # 2. Download from HuggingFace Hub on demand
+    if _HF_HUB_AVAILABLE and model_name in GGUF_HUB_REGISTRY:
+        repo_id, filename = GGUF_HUB_REGISTRY[model_name]
+        try:
+            print(f"📥 Fetching official GGUF `{filename}` from `{repo_id}`...", flush=True)
+            path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                cache_dir=".cache/gguf",
+            )
+            return str(path)
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️ Could not auto-download GGUF for {model_name}: {e}", flush=True)
+
+    return None
 
 
 @contextlib.contextmanager
@@ -181,25 +236,13 @@ class LlamaCppComparisonSuite:
         self.records: list[ComparisonRecord] = []
 
     def evaluate_live_llamacpp(
-        self, model_name: str, gguf_path: str | Path | None = None
+        self, model_name: str, explicit_gguf: str | Path | None = None
     ) -> tuple[float, float, dict[int, float]]:
         """Runs live performance evaluation on official llama.cpp engine if GGUF is available."""
         if not _LLAMA_CPP_AVAILABLE:
             return 0.0, 0.0, {}
 
-        target_path = None
-        if gguf_path and Path(gguf_path).exists():
-            target_path = str(gguf_path)
-        else:
-            candidates = [
-                Path(f"scratch/{model_name}.gguf"),
-                Path("scratch/SmolLM2-135M-Instruct-f16.gguf"),
-            ]
-            for c in candidates:
-                if c.exists():
-                    target_path = str(c)
-                    break
-
+        target_path = get_or_download_gguf(model_name, explicit_gguf)
         if not target_path:
             return 0.0, 0.0, {}
 
@@ -218,7 +261,7 @@ class LlamaCppComparisonSuite:
 
                 # Measure single token decode
                 t0 = time.perf_counter()
-                llm("Hello world", max_tokens=16, temperature=0.0)
+                llm("Hello world, today is a sunny day", max_tokens=16, temperature=0.0)
                 t1 = time.perf_counter()
                 total_s = t1 - t0
                 tok_s = 16.0 / max(total_s, 1e-6)
@@ -235,7 +278,9 @@ class LlamaCppComparisonSuite:
                     prefill_map[seq_len] = round(seq_len / max(avg_s, 1e-6), 1)
 
                 return round(p50_ms, 2), round(tok_s, 1), prefill_map
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            if self.verbose:
+                print(f"⚠️ llama.cpp live evaluation skipped for {model_name}: {e}")
             return 0.0, 0.0, {}
 
     def evaluate_model(
@@ -337,7 +382,7 @@ class LlamaCppComparisonSuite:
                 except Exception:  # noqa: BLE001
                     prefill_throughputs[seq_len] = 0.0
 
-            # 4. Optional Live llama.cpp Measurement
+            # 4. Live llama.cpp Measurement (with auto-download if needed)
             ll_p50, ll_tok_s, ll_prefill = self.evaluate_live_llamacpp(name, gguf_path)
             speedup = round(decode_throughput / ll_tok_s, 2) if ll_tok_s > 0 else 1.0
 
@@ -491,7 +536,7 @@ class LlamaCppComparisonSuite:
         return self.records
 
     def generate_markdown_report(self) -> str:
-        """Generates comprehensive markdown report with comparison tables, live speedups, and Mermaid diagrams."""
+        """Generates comprehensive markdown report with comparison tables and live speedups."""
         lines = [
             "# GGMLC vs llama.cpp: Graph Structure & Performance Benchmark Report",
             "",
@@ -513,13 +558,7 @@ class LlamaCppComparisonSuite:
             f"**Platform:** {self.hardware_info['platform']} | PyTorch {self.hardware_info['torch_version']}  "
         )
         lines.append("")
-        lines.append("## 1. Visualized Computation Graph Comparison (Single Transformer Layer)")
-        lines.append("")
-        lines.append("```mermaid")
-        lines.append(generate_transformer_block_comparison_mermaid())
-        lines.append("```")
-        lines.append("")
-        lines.append("## 2. Static Computation Graph & Operator Fusion Comparison")
+        lines.append("## 1. Static Computation Graph & Operator Fusion Comparison")
         lines.append("")
         lines.append(
             "| Architecture | Model | ggmlc Nodes | llama.cpp Nodes | Node Savings | ggmlc GEMV/tok | llama.cpp GEMV/tok | Kernel Launch Reduction |"
@@ -532,7 +571,7 @@ class LlamaCppComparisonSuite:
                 f"**-{r.gemv_reduction_pct}%** |"
             )
         lines.append("")
-        lines.append("## 3. Steady-State Single-Token Decode Performance (S=1)")
+        lines.append("## 2. Steady-State Single-Token Decode Performance (S=1)")
         lines.append("")
         lines.append(
             "| Model | ggmlc Decode | llama.cpp Decode | Speedup | ggmlc Latency (ms) | Payload Size | Max Diff | Status |"
@@ -552,7 +591,7 @@ class LlamaCppComparisonSuite:
             )
         lines.append("")
 
-        lines.append("## 4. Prompt Prefill Throughput across Context Lengths (tokens/sec)")
+        lines.append("## 3. Prompt Prefill Throughput across Context Lengths (tokens/sec)")
         lines.append("")
         seq_headers = " | ".join(f"N={k}" for k in self.prefill_seq_lens)
         seq_align = " | ".join(":---:" for _ in self.prefill_seq_lens)
@@ -565,7 +604,7 @@ class LlamaCppComparisonSuite:
             lines.append(f"| `{r.model_name}` | {seq_vals} |")
         lines.append("")
 
-        lines.append("## 5. Key Architectural Insights")
+        lines.append("## 4. Key Architectural Insights")
         lines.append(
             "1. **Explicit IR Metadata Nodes vs Implicit Pointer Math:** `ggmlc` shows higher node counts because each slice, stride permutation, and view is an explicit, zero-overhead metadata node (`GGML_OP_VIEW` = 0 FLOPs, 0 CUDA launches) rather than hidden C++ pointer arithmetic."
         )
