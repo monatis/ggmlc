@@ -81,15 +81,15 @@ except ImportError:
 # Official HuggingFace GGUF model registry for automatic live benchmarking
 GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
     "smollm2_135m": (
-        "HuggingFaceTB/SmolLM2-135M-Instruct-GGUF",
-        "smollm2-135m-instruct-q8_0.gguf",
+        "bartowski/SmolLM2-135M-Instruct-GGUF",
+        "SmolLM2-135M-Instruct-Q8_0.gguf",
     ),
     "qwen2.5_0.5b": (
         "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
         "qwen2.5-0.5b-instruct-q8_0.gguf",
     ),
     "gpt2": (
-        "RichardErkhov/openai-community--gpt2-gguf",
+        "QuantFactory/gpt2-GGUF",
         "gpt2.Q8_0.gguf",
     ),
 }
@@ -205,9 +205,13 @@ class ComparisonRecord:
     decode_p50_ms: float
     decode_mean_ms: float
     decode_throughput_tok_s: float
+    ggmlc_bandwidth_gb_s: float = 0.0
     llamacpp_decode_p50_ms: float = 0.0
     llamacpp_decode_throughput_tok_s: float = 0.0
+    llamacpp_payload_mb: float = 0.0
+    llamacpp_bandwidth_gb_s: float = 0.0
     decode_speedup: float = 1.0
+    bandwidth_ratio: float = 1.0
     prefill_throughput_tok_s: dict[int, float] = field(default_factory=dict)
     llamacpp_prefill_throughput_tok_s: dict[int, float] = field(default_factory=dict)
     max_abs_diff: float = 0.0
@@ -224,12 +228,14 @@ class LlamaCppComparisonSuite:
         backend: str = "cpu",
         warmup: int = 2,
         runs: int = 5,
+        quantize: str | None = None,
         prefill_seq_lens: list[int] | None = None,
         verbose: bool = False,
     ):
         self.backend = backend.lower()
         self.warmup = warmup
         self.runs = runs
+        self.quantize = quantize.lower() if quantize else None
         self.prefill_seq_lens = prefill_seq_lens or [16, 64, 128, 256]
         self.verbose = verbose
         self.hardware_info = get_hardware_info(self.backend)
@@ -237,14 +243,16 @@ class LlamaCppComparisonSuite:
 
     def evaluate_live_llamacpp(
         self, model_name: str, explicit_gguf: str | Path | None = None
-    ) -> tuple[float, float, dict[int, float]]:
+    ) -> tuple[float, float, dict[int, float], float]:
         """Runs live performance evaluation on official llama.cpp engine if GGUF is available."""
         if not _LLAMA_CPP_AVAILABLE:
-            return 0.0, 0.0, {}
+            return 0.0, 0.0, {}, 0.0
 
         target_path = get_or_download_gguf(model_name, explicit_gguf)
         if not target_path:
-            return 0.0, 0.0, {}
+            return 0.0, 0.0, {}, 0.0
+
+        payload_mb = round(Path(target_path).stat().st_size / (1024.0 * 1024.0), 2)
 
         try:
             n_gpu = -1 if self.backend == "cuda" else 0
@@ -277,11 +285,11 @@ class LlamaCppComparisonSuite:
                     avg_s = (tp1 - tp0) / self.runs
                     prefill_map[seq_len] = round(seq_len / max(avg_s, 1e-6), 1)
 
-                return round(p50_ms, 2), round(tok_s, 1), prefill_map
+                return round(p50_ms, 2), round(tok_s, 1), prefill_map, payload_mb
         except Exception as e:  # noqa: BLE001
             if self.verbose:
                 print(f"⚠️ llama.cpp live evaluation skipped for {model_name}: {e}")
-            return 0.0, 0.0, {}
+            return 0.0, 0.0, {}, payload_mb
 
     def evaluate_model(
         self,
@@ -299,10 +307,8 @@ class LlamaCppComparisonSuite:
             np.random.seed(42)
 
             with suppress_output(verbose=self.verbose):
-                # 1. Base export at nominal sequence length
-                loaded = loader_factory(
-                    seq_len=8 if "gpt" in name or "smol" in name or "qwen" in name else 16
-                )
+                # 1. Base export at sequence length 1 for single-token decode
+                loaded = loader_factory(seq_len=1)
                 if len(loaded) == 4:
                     model, example_inputs, _input_names, _framework = loaded
                 else:
@@ -318,6 +324,12 @@ class LlamaCppComparisonSuite:
 
                 t1 = time.perf_counter()
                 ggml_graph = lower_to_ggml(exported.main_graph)
+                if self.quantize:
+                    from ggmlc.quantization.model_quantizer import quantize_graph_parameters
+
+                    ggml_graph, _ = quantize_graph_parameters(
+                        ggml_graph, target_dtype=self.quantize
+                    )
                 ser_bytes = serialize_ggml_graph(ggml_graph)
                 lowering_time_ms = (time.perf_counter() - t1) * 1000.0
                 payload_mb = len(ser_bytes) / (1024.0 * 1024.0)
@@ -349,6 +361,7 @@ class LlamaCppComparisonSuite:
             p50_lat = float(np.percentile(lat_arr, 50))
             mean_lat = float(np.mean(lat_arr))
             decode_throughput = 1000.0 / p50_lat if p50_lat > 0 else 0.0
+            ggmlc_bw = round((payload_mb / 1024.0) / (p50_lat / 1000.0), 1) if p50_lat > 0 else 0.0
 
             # 3. Prompt Prefill Throughput across Context Lengths
             prefill_throughputs: dict[int, float] = {}
@@ -362,6 +375,12 @@ class LlamaCppComparisonSuite:
                             seq_m, seq_in, model_name=f"{name}_seq{seq_len}"
                         )
                         seq_ggml = lower_to_ggml(seq_exp.main_graph)
+                        if self.quantize:
+                            from ggmlc.quantization.model_quantizer import quantize_graph_parameters
+
+                            seq_ggml, _ = quantize_graph_parameters(
+                                seq_ggml, target_dtype=self.quantize
+                            )
                         seq_ser = serialize_ggml_graph(seq_ggml)
                         seq_runner = ModelRunner(seq_ser, device=self.backend)
                         seq_np_in = [
@@ -383,8 +402,12 @@ class LlamaCppComparisonSuite:
                     prefill_throughputs[seq_len] = 0.0
 
             # 4. Live llama.cpp Measurement (with auto-download if needed)
-            ll_p50, ll_tok_s, ll_prefill = self.evaluate_live_llamacpp(name, gguf_path)
+            ll_p50, ll_tok_s, ll_prefill, ll_payload_mb = self.evaluate_live_llamacpp(
+                name, gguf_path
+            )
+            ll_bw = round((ll_payload_mb / 1024.0) / (ll_p50 / 1000.0), 1) if ll_p50 > 0 else 0.0
             speedup = round(decode_throughput / ll_tok_s, 2) if ll_tok_s > 0 else 1.0
+            bw_ratio = round(ggmlc_bw / ll_bw, 2) if ll_bw > 0 else 1.0
 
             # 5. Numerical Parity Verification
             act_list = (
@@ -450,9 +473,13 @@ class LlamaCppComparisonSuite:
                 decode_p50_ms=round(p50_lat, 2),
                 decode_mean_ms=round(mean_lat, 2),
                 decode_throughput_tok_s=round(decode_throughput, 1),
+                ggmlc_bandwidth_gb_s=ggmlc_bw,
                 llamacpp_decode_p50_ms=ll_p50,
                 llamacpp_decode_throughput_tok_s=ll_tok_s,
+                llamacpp_payload_mb=ll_payload_mb,
+                llamacpp_bandwidth_gb_s=ll_bw,
                 decode_speedup=speedup,
+                bandwidth_ratio=bw_ratio,
                 prefill_throughput_tok_s=prefill_throughputs,
                 llamacpp_prefill_throughput_tok_s=ll_prefill,
                 max_abs_diff=float(max_diff),
@@ -467,9 +494,10 @@ class LlamaCppComparisonSuite:
                 f"⚡ GEMV Launches / tok: ggmlc={record.ggmlc_gemv_launches} vs llama.cpp={record.llamacpp_gemv_launches} (-{record.gemv_reduction_pct}%)"
             )
             print(
-                f"🚀 Single-Token Decode: ggmlc={record.decode_throughput_tok_s} tok/s"
+                f"🚀 Single-Token Decode: ggmlc={record.decode_throughput_tok_s} tok/s ({record.payload_size_mb} MB, {record.ggmlc_bandwidth_gb_s} GB/s)"
                 + (
-                    f" vs llama.cpp={record.llamacpp_decode_throughput_tok_s} tok/s ({record.decode_speedup}x speedup)"
+                    f" vs llama.cpp={record.llamacpp_decode_throughput_tok_s} tok/s ({record.llamacpp_payload_mb} MB, {record.llamacpp_bandwidth_gb_s} GB/s) "
+                    f"[{record.decode_speedup}x speedup | BW ratio: {record.bandwidth_ratio}x]"
                     if ll_tok_s > 0
                     else ""
                 )
@@ -574,9 +602,9 @@ class LlamaCppComparisonSuite:
         lines.append("## 2. Steady-State Single-Token Decode Performance (S=1)")
         lines.append("")
         lines.append(
-            "| Model | ggmlc Decode | llama.cpp Decode | Speedup | ggmlc Latency (ms) | Payload Size | Max Diff | Status |"
+            "| Model | ggmlc Decode | llama.cpp Decode | Speedup | ggmlc Payload (BW) | llama.cpp Payload (BW) | BW Efficiency | Max Diff | Status |"
         )
-        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for r in self.records:
             badge = "✅ PASS" if r.status == "PASS" else f"❌ {r.status}"
             ll_str = (
@@ -584,10 +612,21 @@ class LlamaCppComparisonSuite:
                 if r.llamacpp_decode_throughput_tok_s > 0
                 else "N/A"
             )
-            speedup_str = f"**{r.decode_speedup:.2f}x**" if r.decode_speedup > 1.0 else "-"
+            speedup_str = (
+                f"**{r.decode_speedup:.2f}x**"
+                if r.decode_speedup > 1.0
+                else (f"{r.decode_speedup:.2f}x" if r.decode_speedup > 0 else "-")
+            )
+            ggmlc_payload_bw = f"{r.payload_size_mb:.1f} MB ({r.ggmlc_bandwidth_gb_s:.1f} GB/s)"
+            ll_payload_bw = (
+                f"{r.llamacpp_payload_mb:.1f} MB ({r.llamacpp_bandwidth_gb_s:.1f} GB/s)"
+                if r.llamacpp_payload_mb > 0
+                else "N/A"
+            )
+            bw_ratio_str = f"**{r.bandwidth_ratio:.2f}x**" if r.llamacpp_bandwidth_gb_s > 0 else "-"
             lines.append(
                 f"| `{r.model_name}` | **{r.decode_throughput_tok_s:.1f} tok/s** | {ll_str} | "
-                f"{speedup_str} | **{r.decode_p50_ms:.2f} ms** | {r.payload_size_mb} MB | `{r.max_abs_diff:.2e}` | {badge} |"
+                f"{speedup_str} | {ggmlc_payload_bw} | {ll_payload_bw} | {bw_ratio_str} | `{r.max_abs_diff:.2e}` | {badge} |"
             )
         lines.append("")
 
@@ -614,6 +653,9 @@ class LlamaCppComparisonSuite:
         lines.append(
             "3. **Zero-Copy Memory & CUDA Graphs:** Planned Arena offset reuse and Driver-VMM virtual page mapping eliminate dynamic allocation overhead (`ggml-alloc`), allowing full decode CUDA Graph replay across all CC $\\ge 6.0$ hardware."
         )
+        lines.append(
+            "4. **Decode Bandwidth vs. Quantization Footprint:** Single-token autoregressive decode ($S=1$) is strictly memory bandwidth-bound (~1.0 FLOP/byte). A smaller quantized model (e.g. Q8_0 at ~520 MB) achieves higher raw tok/s than an unquantized FP32 model (2,404 MB) because 4.6x less memory is transferred across the memory bus per token. Evaluating effective memory throughput (GB/s = Payload / Latency) reveals hardware bandwidth saturation. Precision can be matched directly using `--quantize q8_0`."
+        )
         lines.append("")
 
         return "\n".join(lines)
@@ -622,6 +664,7 @@ class LlamaCppComparisonSuite:
         """Saves machine-readable JSON results."""
         data = {
             "backend": self.backend,
+            "quantize": self.quantize,
             "timestamp": time.time(),
             "hardware": self.hardware_info,
             "warmup": self.warmup,
@@ -643,6 +686,13 @@ def main():
         help="Target execution backend",
     )
     parser.add_argument("--models", nargs="*", default=None, help="Subset of models to benchmark")
+    parser.add_argument(
+        "--quantize",
+        type=str,
+        default=None,
+        choices=["q8_0", "f16"],
+        help="Quantize ggmlc weights (e.g. q8_0 or f16) to match GGUF precision",
+    )
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup iterations")
     parser.add_argument("--runs", type=int, default=5, help="Number of measurement runs")
     parser.add_argument("--verbose", action="store_true", help="Print verbose compilation output")
@@ -664,6 +714,7 @@ def main():
         backend=args.backend,
         warmup=args.warmup,
         runs=args.runs,
+        quantize=args.quantize,
         verbose=args.verbose,
     )
     suite.run_all(selected_models=args.models)

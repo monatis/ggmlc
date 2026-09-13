@@ -19,6 +19,7 @@ scratch/
 *.dist-info
 dist
 .ruff_cache
+.cache/
 benchmark*.md
 benchmark*.json
 project.md
