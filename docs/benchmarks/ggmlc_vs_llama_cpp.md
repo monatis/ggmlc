@@ -159,13 +159,26 @@ Both `ggmlc` and `llama-cpp-python` can be installed directly from pre-built CUD
 !uv pip install ggmlc --extra-index-url https://monatis.github.io/ggmlc-index/
 !uv pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu122
 
-# 3. Run side-by-side GGMLC vs llama.cpp Comparison Suite on GPU
-!python examples/benchmarks/benchmark_llama_cpp_comparison.py --backend cuda --runs 5 --warmup 2 \
+# 3. Run Unified Comparative Benchmark Suite (`compare_ggmlc_vs_llama_cpp.py`)
+# Uses standalone C++ `ggml-bench` and `llama-bench` for apples-to-apples evaluation:
+!python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --runs 5 --warmup 2 \
   --output-md colab_llamacpp_comparison.md --output-json colab_llamacpp_comparison.json
 
 # 4. Display generated markdown report
 from IPython.display import Markdown, display
 display(Markdown(open("colab_llamacpp_comparison.md").read()))
 ```
+
+---
+
+## 6. Standalone C++ Benchmark Harness (`ggml-bench`)
+
+`ggml-bench` is the standalone C++ binary that mirrors `llama-bench`'s exact execution semantics without any Python runtime or ctypes wrapper overhead:
+
+```bash
+# Benchmark prompt prefill (pp) and token generation (tg) across lengths
+./build-win-cuda/runtime/ggml-bench scratch/smollm2_135m_q8_0.gguf -p 16,64,128 -n 32,64 -r 5 --device cuda -o md
+```
+
 
 

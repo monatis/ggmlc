@@ -455,6 +455,30 @@ def load_smollm2_model(
     return SmolLM2Wrapper(model), example_input, input_names
 
 
+def load_smollm2_360m_model(
+    variant: str = "HuggingFaceTB/SmolLM2-360M-Instruct",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads SmolLM2 360M checkpoint."""
+    return load_smollm2_model(variant=variant, seq_len=seq_len)
+
+
+def load_qwen_1_5b_model(
+    variant: str = "Qwen/Qwen2.5-1.5B",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads Qwen2.5 1.5B checkpoint."""
+    return load_qwen_model(variant=variant, seq_len=seq_len)
+
+
+def load_llama_model(
+    variant: str = "unsloth/Llama-3.2-1B-Instruct",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads LLaMA-3 / LLaMA-3.2 architecture checkpoint."""
+    return load_smollm2_model(variant=variant, seq_len=seq_len)
+
+
 def load_gemma3_model(
     variant: str = "google/gemma-3-270m-it",
     seq_len: int = 8,

@@ -38,6 +38,23 @@ target_link_libraries(ggmlc-run PRIVATE
     ggmlc_runtime
 )
 
+# Benchmark Tools
+add_executable(ggml-bench
+    tools/ggml_bench.cpp
+)
+
+target_link_libraries(ggml-bench PRIVATE
+    ggmlc_runtime
+)
+
+add_executable(ggmlc-bench
+    tools/ggml_bench.cpp
+)
+
+target_link_libraries(ggmlc-bench PRIVATE
+    ggmlc_runtime
+)
+
 if (GGMLC_BUILD_TESTS)
     add_executable(test-executor-cpu ../tests/runtime/test_executor_cpu.cpp)
     target_link_libraries(test-executor-cpu PRIVATE ggmlc_runtime)

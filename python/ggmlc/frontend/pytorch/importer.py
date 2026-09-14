@@ -78,6 +78,7 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
     lifted_constants = dict(getattr(sig, "inputs_to_lifted_tensor_constants", {}))
 
     # 1. Process placeholder nodes
+    param_ptrs: dict[int, tuple[Tensor, torch.Tensor]] = {}
     for node in ep.graph.nodes:
         if node.op != "placeholder":
             continue
@@ -95,6 +96,18 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
         if target_name in lifted_params:
             param_name = lifted_params[target_name]
             param_tensor = ep.state_dict[param_name]
+            ptr = param_tensor.data_ptr()
+            if ptr in param_ptrs:
+                existing_t, existing_param = param_ptrs[ptr]
+                if (
+                    param_tensor.shape == existing_param.shape
+                    and param_tensor.stride() == existing_param.stride()
+                    and param_tensor.dtype == existing_param.dtype
+                ):
+                    node_to_tensor[node] = existing_t
+                    name_to_tensor[node.name] = existing_t
+                    continue
+
             t = g.add_tensor(
                 name=param_name,
                 shape=Shape.from_tuple(tuple(param_tensor.shape)),
@@ -104,6 +117,7 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 role="parameter",
             )
             g.parameters.append(t.id)
+            param_ptrs[ptr] = (t, param_tensor)
         elif target_name in lifted_buffers or target_name in lifted_constants:
             buf_name = lifted_buffers.get(target_name, lifted_constants.get(target_name))
             buf_tensor = ep.constants.get(
@@ -111,6 +125,18 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 ep.state_dict.get(buf_name, getattr(ep, "tensor_constants", {}).get(buf_name)),
             )
             data = buf_tensor.detach().cpu().numpy() if buf_tensor is not None else None
+            ptr = buf_tensor.data_ptr() if buf_tensor is not None else None
+            if ptr is not None and ptr in param_ptrs:
+                existing_t, existing_param = param_ptrs[ptr]
+                if (
+                    buf_tensor.shape == existing_param.shape
+                    and buf_tensor.stride() == existing_param.stride()
+                    and buf_tensor.dtype == existing_param.dtype
+                ):
+                    node_to_tensor[node] = existing_t
+                    name_to_tensor[node.name] = existing_t
+                    continue
+
             t = g.add_tensor(
                 name=buf_name,
                 shape=Shape.from_tuple(tuple(buf_tensor.shape))
@@ -122,6 +148,8 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 role="constant",
             )
             g.parameters.append(t.id)
+            if ptr is not None and buf_tensor is not None:
+                param_ptrs[ptr] = (t, buf_tensor)
         elif target_name in user_inputs:
             t = g.add_tensor(
                 name=node.name,
