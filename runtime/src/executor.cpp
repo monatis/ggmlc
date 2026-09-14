@@ -862,6 +862,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
+    // Graph Allocator Lifecycle Protection:
+    // Mark all model graph inputs with both ggml_set_input and ggml_set_output so that:
+    // 1. ggml_gallocr allocates them at non-overlapping addresses at the beginning of the arena.
+    // 2. ggml_gallocr never frees or reuses their memory buffers for downstream operations,
+    //    guaranteeing that input tensors remain intact across repeated inference runs (e.g. run_benchmark)
+    //    and CUDA graph replays without redundant PCIe re-transfers.
+    for (uint32_t inp_id : model_graph_.inputs) {
+        if (compute_tensors_.count(inp_id)) {
+            struct ggml_tensor* inp_t = compute_tensors_[inp_id];
+            ggml_set_input(inp_t);
+            ggml_set_output(inp_t);
+        }
+    }
+
     // 3. Build computation graph
     size_t graph_nodes = std::max<size_t>(32768, model_graph_.ops.size() * 16);
     cgraph_ = ggml_new_graph_custom(ctx_, graph_nodes, false);
@@ -1897,6 +1911,12 @@ void ModelExecutor::run(int n_threads) {
     }
 
     // Execution completed successfully
+}
+
+void ModelExecutor::synchronize() {
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
 }
 
 void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_bytes) {

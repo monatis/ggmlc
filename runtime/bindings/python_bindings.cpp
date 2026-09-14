@@ -143,6 +143,10 @@ NB_MODULE(_runtime, m) {
             nb::gil_scoped_release release;
             self.run(n_threads);
         }, "n_threads"_a = 1)
+        .def("synchronize", [](ggmlc::ModelExecutor& self) {
+            nb::gil_scoped_release release;
+            self.synchronize();
+        })
         .def("get_output_bytes", [](ggmlc::ModelExecutor& self, uint32_t tensor_id) -> nb::bytes {
             const void* ptr = self.get_output_data(tensor_id);
             size_t size_bytes = self.get_tensor_size_bytes(tensor_id);

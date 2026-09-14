@@ -48,6 +48,7 @@ public:
 
     // Run execution graph
     void run(int n_threads = 1);
+    void synchronize();
 
     // State tensor access
     void set_state(uint32_t tensor_id, const void* data, size_t size_bytes);

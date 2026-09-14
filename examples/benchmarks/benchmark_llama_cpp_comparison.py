@@ -239,6 +239,7 @@ class LlamaCppComparisonSuite:
         warmup: int = 2,
         runs: int = 5,
         quantize: str | None = None,
+        unplanned: bool = False,
         prefill_seq_lens: list[int] | None = None,
         verbose: bool = False,
     ):
@@ -246,6 +247,7 @@ class LlamaCppComparisonSuite:
         self.warmup = warmup
         self.runs = runs
         self.quantize = quantize.lower() if quantize else None
+        self.unplanned = unplanned
         self.prefill_seq_lens = prefill_seq_lens or [16, 64, 128, 256]
         self.verbose = verbose
         self.hardware_info = get_hardware_info(self.backend)
@@ -358,9 +360,10 @@ class LlamaCppComparisonSuite:
                     for x in example_inputs
                 ]
 
-                # Warmup
-                for _ in range(self.warmup):
-                    runner(*np_inputs)
+                # Warmup / prepare context and inputs
+                warmup_count = max(self.warmup, 1)
+                for _ in range(warmup_count):
+                    runner(*np_inputs, enable_arena_reuse=not self.unplanned)
 
             # 2. Steady-state Single-Token Decode Latency
             decode_latencies = runner.run_benchmark(runs=self.runs)
@@ -398,7 +401,7 @@ class LlamaCppComparisonSuite:
                         ]
                         # Warmup
                         for _ in range(1):
-                            seq_runner(*seq_np_in)
+                            seq_runner(*seq_np_in, enable_arena_reuse=not self.unplanned)
 
                         latencies = seq_runner.run_benchmark(runs=self.runs)
                         avg_ms = float(np.mean(latencies))
@@ -702,6 +705,11 @@ def main():
     )
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup iterations")
     parser.add_argument("--runs", type=int, default=5, help="Number of measurement runs")
+    parser.add_argument(
+        "--unplanned",
+        action="store_true",
+        help="Disable memory arena reuse planning (for debugging)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print verbose compilation output")
     parser.add_argument(
         "--output-md",
@@ -722,6 +730,7 @@ def main():
         warmup=args.warmup,
         runs=args.runs,
         quantize=args.quantize,
+        unplanned=args.unplanned,
         verbose=args.verbose,
     )
     suite.run_all(selected_models=args.models)

@@ -13,8 +13,14 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+# Ensure repository root is on sys.path
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
 
 
 def find_ggmlc_run_executable(explicit_path: str | None = None) -> str:
@@ -25,18 +31,21 @@ def find_ggmlc_run_executable(explicit_path: str | None = None) -> str:
             return str(p.resolve())
         raise FileNotFoundError(f"Specified executable not found: {explicit_path}")
 
-    candidates = [
-        # Colab / Linux CMake default
-        Path("build/runtime/ggmlc-run"),
-        Path("build-cuda/runtime/ggmlc-run"),
-        Path("runtime/ggmlc-run"),
-        Path("./ggmlc-run"),
-        # Windows Ninja / CUDA / MSVC
-        Path("build-win-cuda/runtime/ggmlc-run.exe"),
-        Path("build-win/runtime/Release/ggmlc-run.exe"),
-        Path("build-win/runtime/Debug/ggmlc-run.exe"),
-        Path("./ggmlc-run.exe"),
-    ]
+    if sys.platform == "win32":
+        candidates = [
+            Path("build-win-cuda/runtime/ggmlc-run.exe"),
+            Path("build-win/runtime/Release/ggmlc-run.exe"),
+            Path("build-win/runtime/Debug/ggmlc-run.exe"),
+            Path("./ggmlc-run.exe"),
+            Path("build/runtime/ggmlc-run.exe"),
+        ]
+    else:
+        candidates = [
+            Path("build/runtime/ggmlc-run"),
+            Path("build-cuda/runtime/ggmlc-run"),
+            Path("runtime/ggmlc-run"),
+            Path("./ggmlc-run"),
+        ]
     for c in candidates:
         if c.is_file():
             return str(c.resolve())
