@@ -56,8 +56,9 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
         # Repeat or generate tokens
         repeated = (base_ids * ((seq_len // len(base_ids)) + 1))[:seq_len]
         input_ids = torch.tensor([repeated], dtype=torch.int32)
-    example_input = (input_ids,)
-    input_names = ["input_ids"]
+    pos_ids = torch.arange(0, input_ids.shape[-1], dtype=torch.int32).unsqueeze(0)
+    example_input = (input_ids, pos_ids)
+    input_names = ["input_ids", "position_ids"]
 
     class GPT2Wrapper(nn.Module):
         def __init__(self, base):
@@ -71,7 +72,6 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
             self.layers = nn.ModuleList()
 
             for h in base.transformer.h:
-                # Extract weights from c_attn (Conv1D weights have shape [in_features, out_features])
                 w_qkv = h.attn.c_attn.weight  # [768, 2304]
                 b_qkv = h.attn.c_attn.bias  # [2304]
 
@@ -114,12 +114,13 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
                 )
                 self.layers.append(layer)
 
-        def forward(self, input_ids):
+        def forward(self, input_ids, position_ids=None):
             bsz, seq_len = input_ids.shape
-            pos_ids = torch.arange(
-                0, seq_len, dtype=torch.int32, device=input_ids.device
-            ).unsqueeze(0)
-            h = self.wte(input_ids) + self.wpe(pos_ids)
+            if position_ids is None:
+                position_ids = torch.arange(
+                    0, seq_len, dtype=torch.int32, device=input_ids.device
+                ).unsqueeze(0)
+            h = self.wte(input_ids) + self.wpe(position_ids)
 
             for layer in self.layers:
                 residual = h

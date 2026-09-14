@@ -489,6 +489,17 @@ int main(int argc, char** argv) {
             uint32_t in_tid = model_graph.inputs[0];
             uint32_t out_tid = model_graph.outputs[0];
 
+            int32_t pos_tid = -1;
+            for (uint32_t inp : model_graph.inputs) {
+                auto it = model_graph.tensors.find(inp);
+                if (it != model_graph.tensors.end()) {
+                    if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                        pos_tid = static_cast<int32_t>(inp);
+                        break;
+                    }
+                }
+            }
+
             std::string formatted_prompt;
             bool is_chat_mode = !chat_text.empty();
             if (is_chat_mode) {
@@ -585,6 +596,16 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                if (pos_tid >= 0) {
+                    for (const auto& dim_expr : model_graph.tensors[pos_tid].ne) {
+                        if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
+                            int64_t sym_idx = dim_expr->val;
+                            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(model_graph.symbol_table.size())) {
+                                symbol_env[model_graph.symbol_table[sym_idx]] = c_len;
+                            }
+                        }
+                    }
+                }
 
                 if (use_kv_cache) {
                     symbol_env["pos"] = pos;
@@ -592,6 +613,13 @@ int main(int argc, char** argv) {
 
                 executor.prepare(symbol_env, !unplanned);
                 executor.set_input(in_tid, current_tokens.data() + c_start, c_len * sizeof(int32_t));
+                if (pos_tid >= 0) {
+                    std::vector<int32_t> pos_vec(c_len);
+                    for (int64_t i = 0; i < c_len; ++i) {
+                        pos_vec[i] = static_cast<int32_t>(c_start + i);
+                    }
+                    executor.set_input(pos_tid, pos_vec.data(), c_len * sizeof(int32_t));
+                }
                 executor.run(n_threads);
 
                 if (chunk_idx == n_chunks - 1) {
@@ -655,6 +683,16 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                if (pos_tid >= 0) {
+                    for (const auto& dim_expr : model_graph.tensors[pos_tid].ne) {
+                        if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
+                            int64_t sym_idx = dim_expr->val;
+                            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(model_graph.symbol_table.size())) {
+                                symbol_env[model_graph.symbol_table[sym_idx]] = S;
+                            }
+                        }
+                    }
+                }
 
                 if (use_kv_cache) {
                     symbol_env["pos"] = pos;
@@ -665,6 +703,10 @@ int main(int argc, char** argv) {
                     executor.set_input(in_tid, &last_token, sizeof(int32_t));
                 } else {
                     executor.set_input(in_tid, current_tokens.data(), current_tokens.size() * sizeof(int32_t));
+                }
+                if (pos_tid >= 0) {
+                    int32_t cur_pos = static_cast<int32_t>(pos);
+                    executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
                 }
                 executor.run(n_threads);
 

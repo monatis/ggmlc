@@ -304,6 +304,16 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
             break;
         }
     }
+    bool has_pos_input = false;
+    for (uint32_t in_id : model_graph_.inputs) {
+        auto it = model_graph_.tensors.find(in_id);
+        if (it != model_graph_.tensors.end()) {
+            if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                has_pos_input = true;
+                break;
+            }
+        }
+    }
     bool has_arange_tensor = false;
     for (const auto& pair : model_graph_.tensors) {
         if (pair.second.name.find("arange") != std::string::npos && pair.second.data_ptr) {
@@ -311,7 +321,7 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
             break;
         }
     }
-    if (!has_rope && !has_pos_sym && !has_arange_tensor) return;
+    if (!has_rope && !has_pos_sym && !has_arange_tensor && !has_pos_input) return;
 
     std::vector<const SerializedOp*> attn_ops;
     for (const auto& op : model_graph_.ops) {
@@ -758,8 +768,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
+    bool has_pos_input = false;
+    for (uint32_t in_id : model_graph_.inputs) {
+        auto it = model_graph_.tensors.find(in_id);
+        if (it != model_graph_.tensors.end()) {
+            if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                has_pos_input = true;
+                break;
+            }
+        }
+    }
+
     // Fast path: if decode graph is cached, mutate in-place
-    bool can_use_cached_decode = is_decode_step && decode_graph_cached_;
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !has_pos_input && !getenv("GGMLC_DISABLE_DECODE_CACHE");
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
             if (pair.first == "pos") continue;
