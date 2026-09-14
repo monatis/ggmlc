@@ -9,11 +9,24 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iomanip>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
 #include "ggmlc/pipeline/image.h"
 #include "ggmlc/pipeline/tokenizer.h"
 #include "ggmlc/batch_scheduler.h"
+
+static inline bool is_stdout_tty() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(fileno(stdout)) != 0;
+#endif
+}
 
 static void print_help(const char* prog_name) {
     std::cout << "================================================================================\n"
@@ -431,6 +444,7 @@ int main(int argc, char** argv) {
                 uint64_t req_id = scheduler.add_request(p_tokens, max_tokens, temperature, tokenizer.eos_token_id());
                 std::cout << "[Request #" << req_id << " Queued] (" << p_tokens.size() << " prompt tokens)\n";
 
+                bool flush_per_token = is_stdout_tty();
                 while (scheduler.has_work()) {
                     auto res = scheduler.step();
                     for (const auto& pair : res.new_tokens) {
@@ -440,16 +454,19 @@ int main(int argc, char** argv) {
                         }
                         if (tokenizer.is_special_token(tok)) {
                             if (show_special) {
-                                std::cout << tokenizer.decode({tok}, false) << std::flush;
+                                std::cout << tokenizer.decode({tok}, false);
+                                if (flush_per_token) std::cout << std::flush;
                             }
                             continue;
                         }
-                        std::cout << tokenizer.decode_token(tok, true) << std::flush;
+                        std::cout << tokenizer.decode_token(tok, true);
+                        if (flush_per_token) std::cout << std::flush;
                     }
                     if (!res.completed_request_ids.empty()) {
                         std::cout << "\n[Request Completed]\n";
                     }
                 }
+                std::cout << std::flush;
                 std::cout << "\n> " << std::flush;
             }
             return 0;
@@ -502,6 +519,7 @@ int main(int argc, char** argv) {
             if (use_cuda_graph) {
                 executor.set_enable_cuda_graph(true);
             }
+            bool flush_per_token = is_stdout_tty();
             auto t_start = std::chrono::high_resolution_clock::now();
             auto t_prefill_end = t_start;
             auto t_decode_start = t_start;
@@ -602,14 +620,16 @@ int main(int argc, char** argv) {
                         }
                         if (tokenizer.is_special_token(next_token)) {
                             if (show_special) {
-                                std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                                std::cout << tokenizer.decode({next_token}, false);
+                                if (flush_per_token) std::cout << std::flush;
                             }
                             stopped = true;
                             break;
                         }
 
                         std::string piece = tokenizer.decode_token(next_token, true);
-                        std::cout << piece << std::flush;
+                        std::cout << piece;
+                        if (flush_per_token) std::cout << std::flush;
                     }
                 }
             }
@@ -670,15 +690,18 @@ int main(int argc, char** argv) {
                 }
                 if (tokenizer.is_special_token(next_token)) {
                     if (show_special) {
-                        std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                        std::cout << tokenizer.decode({next_token}, false);
+                        if (flush_per_token) std::cout << std::flush;
                     }
                     break;
                 }
 
                 std::string piece = tokenizer.decode_token(next_token, true);
-                std::cout << piece << std::flush;
+                std::cout << piece;
+                if (flush_per_token) std::cout << std::flush;
             }
 
+            std::cout << std::flush;
             auto t_end = std::chrono::high_resolution_clock::now();
             double total_sec = std::chrono::duration<double>(t_end - t_start).count();
             double prefill_sec = std::chrono::duration<double>(t_prefill_end - t_start).count();

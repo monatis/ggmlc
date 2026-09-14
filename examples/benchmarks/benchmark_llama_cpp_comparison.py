@@ -55,9 +55,7 @@ from examples.benchmarks.graph_compare import (
     compare_with_llamacpp,
 )
 from examples.models.hub_models import (
-    load_bert_model,
     load_gpt2_model,
-    load_minilm_model,
     load_qwen_model,
     load_smollm2_model,
 )
@@ -91,10 +89,6 @@ GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
     "gpt2": (
         "QuantFactory/gpt2-GGUF",
         "gpt2.Q8_0.gguf",
-    ),
-    "minilm_l6": (
-        "second-state/All-MiniLM-L6-v2-Embedding-GGUF",
-        "all-MiniLM-L6-v2-Q8_0.gguf",
     ),
 }
 
@@ -558,12 +552,6 @@ class LlamaCppComparisonSuite:
             ("smollm2_135m", "smollm2_135m", lambda seq_len=8: load_smollm2_model(seq_len=seq_len)),
             ("qwen2.5_0.5b", "qwen2.5_0.5b", lambda seq_len=8: load_qwen_model(seq_len=seq_len)),
             ("gpt2", "gpt2", lambda seq_len=8: load_gpt2_model(seq_len=seq_len)),
-            (
-                "bert_base_uncased",
-                "bert_base",
-                lambda seq_len=16: load_bert_model(seq_len=seq_len),
-            ),
-            ("minilm_l6", "bert_base", lambda seq_len=16: load_minilm_model(seq_len=seq_len)),
         ]
 
         for name, arch_key, factory in models_to_run:

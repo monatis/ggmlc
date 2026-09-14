@@ -64,23 +64,103 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
             super().__init__()
             self.wte = base.transformer.wte
             self.wpe = base.transformer.wpe
-            self.blocks = nn.ModuleList([base.transformer.h[i] for i in range(12)])
             self.ln_f = base.transformer.ln_f
             self.lm_head = base.lm_head
+            self.num_heads = 12
+            self.head_dim = 64
+            self.layers = nn.ModuleList()
+
+            for h in base.transformer.h:
+                # Extract weights from c_attn (Conv1D weights have shape [in_features, out_features])
+                w_qkv = h.attn.c_attn.weight  # [768, 2304]
+                b_qkv = h.attn.c_attn.bias  # [2304]
+
+                q_proj = nn.Linear(768, 768)
+                k_proj = nn.Linear(768, 768)
+                v_proj = nn.Linear(768, 768)
+
+                q_proj.weight.data = w_qkv[:, :768].t().contiguous()
+                q_proj.bias.data = b_qkv[:768].contiguous()
+
+                k_proj.weight.data = w_qkv[:, 768:1536].t().contiguous()
+                k_proj.bias.data = b_qkv[768:1536].contiguous()
+
+                v_proj.weight.data = w_qkv[:, 1536:].t().contiguous()
+                v_proj.bias.data = b_qkv[1536:].contiguous()
+
+                out_proj = nn.Linear(768, 768)
+                out_proj.weight.data = h.attn.c_proj.weight.t().contiguous()
+                out_proj.bias.data = h.attn.c_proj.bias.contiguous()
+
+                mlp_fc = nn.Linear(768, 3072)
+                mlp_fc.weight.data = h.mlp.c_fc.weight.t().contiguous()
+                mlp_fc.bias.data = h.mlp.c_fc.bias.contiguous()
+
+                mlp_proj = nn.Linear(3072, 768)
+                mlp_proj.weight.data = h.mlp.c_proj.weight.t().contiguous()
+                mlp_proj.bias.data = h.mlp.c_proj.bias.contiguous()
+
+                layer = nn.ModuleDict(
+                    {
+                        "ln_1": h.ln_1,
+                        "q_proj": q_proj,
+                        "k_proj": k_proj,
+                        "v_proj": v_proj,
+                        "out_proj": out_proj,
+                        "ln_2": h.ln_2,
+                        "mlp_fc": mlp_fc,
+                        "mlp_proj": mlp_proj,
+                    }
+                )
+                self.layers.append(layer)
 
         def forward(self, input_ids):
-            pos_ids = torch.arange(0, input_ids.shape[-1], dtype=torch.int32).unsqueeze(0)
+            bsz, seq_len = input_ids.shape
+            pos_ids = torch.arange(
+                0, seq_len, dtype=torch.int32, device=input_ids.device
+            ).unsqueeze(0)
             h = self.wte(input_ids) + self.wpe(pos_ids)
-            for blk in self.blocks:
-                if h.ndim == 2:
-                    h = h.unsqueeze(0)
-                h = blk(h)[0]
-            if h.ndim == 2:
-                h = h.unsqueeze(0)
+
+            for layer in self.layers:
+                residual = h
+                h_norm = layer["ln_1"](h)
+
+                q = (
+                    layer["q_proj"](h_norm)
+                    .view(bsz, seq_len, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = (
+                    layer["k_proj"](h_norm)
+                    .view(bsz, seq_len, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                v = (
+                    layer["v_proj"](h_norm)
+                    .view(bsz, seq_len, self.num_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+
+                attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+                attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+                attn_out = layer["out_proj"](attn_out)
+                h = residual + attn_out
+
+                residual = h
+                h_norm = layer["ln_2"](h)
+                mlp_act = torch.nn.functional.gelu(layer["mlp_fc"](h_norm), approximate="tanh")
+                mlp_out = layer["mlp_proj"](mlp_act)
+                h = residual + mlp_out
+
             h = self.ln_f(h)
             return self.lm_head(h)
 
-    return GPT2Wrapper(model), example_input, input_names
+    wrapped = GPT2Wrapper(model)
+    import gc
+
+    del model
+    gc.collect()
+    return wrapped, example_input, input_names
 
 
 def load_qwen_model(
