@@ -200,6 +200,7 @@ bool CUDAGraphManager::update_executable(struct ggml_cgraph* cgraph, ggml_backen
     cudaGraphExecUpdateResult update_result;
     err = cudaGraphExecUpdate(impl_->instance, step_graph, &errorNode, &update_result);
     if (err != cudaSuccess) {
+        cudaGetLastError(); // Clear sticky CUDA error status from failed in-place update
         // In case update failed due to structural change, re-instantiate
         cudaGraphExecDestroy(impl_->instance);
         impl_->instance = nullptr;
