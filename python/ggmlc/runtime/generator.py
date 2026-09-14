@@ -49,15 +49,41 @@ class GGMLCGenerator:
     def _compile(self):
         """Compiles the PyTorch model graph into a serialized GGUF artifact and initializes ModelRunner."""
         self.model.eval()
-        dummy_input = (torch.randint(0, 1000, (1, 8), dtype=torch.int32),)
-        try:
-            dim_s = torch.export.Dim("s", min=1, max=self.max_seq_len)
-            dynamic_shapes = ({1: dim_s},)
-            exported = export_torch_model(
-                self.model, dummy_input, dynamic_shapes=dynamic_shapes, model_name=self.model_name
+        import inspect
+
+        sig = inspect.signature(self.model.forward)
+        param_names = list(sig.parameters.keys())
+        has_pos_param = "position_ids" in param_names or any("pos" in p for p in param_names)
+
+        if has_pos_param:
+            dummy_input = (
+                torch.randint(0, 1000, (1, 8), dtype=torch.int32),
+                torch.arange(0, 8, dtype=torch.int32).unsqueeze(0),
             )
-        except Exception:  # noqa: BLE001
-            exported = export_torch_model(self.model, dummy_input, model_name=self.model_name)
+            try:
+                dim_s = torch.export.Dim("s", min=1, max=self.max_seq_len)
+                dynamic_shapes = ({1: dim_s}, {1: dim_s})
+                exported = export_torch_model(
+                    self.model,
+                    dummy_input,
+                    dynamic_shapes=dynamic_shapes,
+                    model_name=self.model_name,
+                )
+            except Exception:  # noqa: BLE001
+                exported = export_torch_model(self.model, dummy_input, model_name=self.model_name)
+        else:
+            dummy_input = (torch.randint(0, 1000, (1, 8), dtype=torch.int32),)
+            try:
+                dim_s = torch.export.Dim("s", min=1, max=self.max_seq_len)
+                dynamic_shapes = ({1: dim_s},)
+                exported = export_torch_model(
+                    self.model,
+                    dummy_input,
+                    dynamic_shapes=dynamic_shapes,
+                    model_name=self.model_name,
+                )
+            except Exception:  # noqa: BLE001
+                exported = export_torch_model(self.model, dummy_input, model_name=self.model_name)
 
         ggml_graph = lower_to_ggml(
             exported.main_graph,
@@ -124,6 +150,14 @@ class GGMLCGenerator:
             self.runner.init_kv_cache(len(generated_tokens) + max_new_tokens + 256)
             use_kv_cache = self.runner.has_kv_cache()
 
+        has_pos_input = False
+        if hasattr(self.runner, "input_name_to_id") and self.runner.input_name_to_id:
+            has_pos_input = "position_ids" in self.runner.input_name_to_id or any(
+                "pos" in name for name in self.runner.input_name_to_id
+            )
+        elif hasattr(self.runner, "inputs") and len(self.runner.inputs) > 1:
+            has_pos_input = True
+
         prompt_len = len(generated_tokens)
         c_size = chunk_size if chunk_size is not None else self.chunk_size
         effective_chunk_size = c_size if (c_size > 0 and use_kv_cache) else prompt_len
@@ -141,9 +175,15 @@ class GGMLCGenerator:
             c_tokens = generated_tokens[c_start:c_end]
 
             curr_input = np.array([c_tokens], dtype=np.int32)
+            pos_input = (
+                np.arange(c_start, c_start + c_len, dtype=np.int32).reshape(1, -1)
+                if has_pos_input
+                else None
+            )
             symbols = {"pos": c_start, "s": c_len} if use_kv_cache else None
 
-            out = self.runner(curr_input, symbols=symbols)
+            runner_args = (curr_input, pos_input) if has_pos_input else (curr_input,)
+            out = self.runner(*runner_args, symbols=symbols)
 
             if chunk_idx == n_chunks - 1 and max_new_tokens > 0:
                 out_tensor = next(iter(out.values())) if isinstance(out, dict) else out
@@ -165,12 +205,19 @@ class GGMLCGenerator:
             for _ in range(1, max_new_tokens):
                 if use_kv_cache:
                     curr_input = np.array([[last_token]], dtype=np.int32)
+                    pos_input = np.array([[pos]], dtype=np.int32) if has_pos_input else None
                     symbols = {"pos": pos, "s": 1}
                 else:
                     curr_input = np.array([generated_tokens], dtype=np.int32)
+                    pos_input = (
+                        np.arange(0, len(generated_tokens), dtype=np.int32).reshape(1, -1)
+                        if has_pos_input
+                        else None
+                    )
                     symbols = None
 
-                out = self.runner(curr_input, symbols=symbols)
+                runner_args = (curr_input, pos_input) if has_pos_input else (curr_input,)
+                out = self.runner(*runner_args, symbols=symbols)
                 out_tensor = next(iter(out.values())) if isinstance(out, dict) else out
 
                 S = curr_input.shape[1]

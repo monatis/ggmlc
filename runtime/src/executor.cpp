@@ -304,6 +304,16 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
             break;
         }
     }
+    bool has_pos_input = false;
+    for (uint32_t in_id : model_graph_.inputs) {
+        auto it = model_graph_.tensors.find(in_id);
+        if (it != model_graph_.tensors.end()) {
+            if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                has_pos_input = true;
+                break;
+            }
+        }
+    }
     bool has_arange_tensor = false;
     for (const auto& pair : model_graph_.tensors) {
         if (pair.second.name.find("arange") != std::string::npos && pair.second.data_ptr) {
@@ -311,7 +321,7 @@ void ModelExecutor::init_kv_cache(int64_t max_ctx) {
             break;
         }
     }
-    if (!has_rope && !has_pos_sym && !has_arange_tensor) return;
+    if (!has_rope && !has_pos_sym && !has_arange_tensor && !has_pos_input) return;
 
     std::vector<const SerializedOp*> attn_ops;
     for (const auto& op : model_graph_.ops) {
@@ -758,8 +768,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
-    // Fast path: if CUDA graph replay is active and decode graph is cached, mutate in-place
-    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && is_cuda_ && enable_cuda_graph_;
+    bool has_pos_input = false;
+    for (uint32_t in_id : model_graph_.inputs) {
+        auto it = model_graph_.tensors.find(in_id);
+        if (it != model_graph_.tensors.end()) {
+            if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                has_pos_input = true;
+                break;
+            }
+        }
+    }
+
+    // Fast path: if decode graph is cached, mutate in-place
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !has_pos_input && !getenv("GGMLC_DISABLE_DECODE_CACHE");
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
             if (pair.first == "pos") continue;
@@ -1129,7 +1150,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 1) {
                     struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
                     if (w) {
-                        if (ggml_can_repeat(w, result)) {
+                        if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
                             w = ggml_repeat(ctx_, w, result);
                         }
                         result = ggml_mul(ctx_, result, w);
@@ -1138,7 +1159,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 2) {
                     struct ggml_tensor* b = ggml_tensors_[op.inputs[2]];
                     if (b) {
-                        if (ggml_can_repeat(b, result)) {
+                        if (!ggml_are_same_shape(b, result) && ggml_can_repeat(b, result)) {
                             b = ggml_repeat(ctx_, b, result);
                         }
                         result = ggml_add(ctx_, result, b);
@@ -1152,7 +1173,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 1) {
                     struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
                     if (w) {
-                        if (ggml_can_repeat(w, result)) {
+                        if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
                             w = ggml_repeat(ctx_, w, result);
                         }
                         result = ggml_mul(ctx_, result, w);
@@ -1415,7 +1436,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         if (bias->ne[0] != result->ne[0] && bias->ne[1] == result->ne[0] && bias->ne[0] == 1) {
                             bias = ggml_reshape_1d(ctx_, bias, result->ne[0]);
                         }
-                        if (ggml_can_repeat(bias, result)) {
+                        if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
                         }
                         result = ggml_add(ctx_, result, bias);
@@ -1518,7 +1539,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
                             bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
-                        if (ggml_can_repeat(bias, result)) {
+                        if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
                         }
                         result = ggml_add(ctx_, result, bias);
@@ -1548,7 +1569,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
                             bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
-                        if (ggml_can_repeat(bias, result)) {
+                        if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
                         }
                         result = ggml_add(ctx_, result, bias);
@@ -1604,7 +1625,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 if (is_cuda_) {
                     struct ggml_tensor* b = in1;
-                    if (ggml_can_repeat(b, in0)) {
+                    if (!ggml_are_same_shape(b, in0) && ggml_can_repeat(b, in0)) {
                         b = ggml_repeat(ctx_, b, in0);
                     }
                     result = ggml_gelu(ctx_, ggml_add(ctx_, in0, b));
@@ -1621,13 +1642,13 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
                 result = ggml_norm(ctx_, in0, eps);
                 if (w) {
-                    if (ggml_can_repeat(w, result)) {
+                    if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
                         w = ggml_repeat(ctx_, w, result);
                     }
                     result = ggml_mul(ctx_, result, w);
                 }
                 if (b) {
-                    if (ggml_can_repeat(b, result)) {
+                    if (!ggml_are_same_shape(b, result) && ggml_can_repeat(b, result)) {
                         b = ggml_repeat(ctx_, b, result);
                     }
                     result = ggml_add(ctx_, result, b);
@@ -1641,7 +1662,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
                 result = ggml_rms_norm(ctx_, in0, eps);
                 if (w) {
-                    if (ggml_can_repeat(w, result)) {
+                    if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
                         w = ggml_repeat(ctx_, w, result);
                     }
                     result = ggml_mul(ctx_, result, w);
@@ -1745,7 +1766,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
     }
 
-    if (is_decode_step && is_cuda_ && enable_cuda_graph_) {
+    if (is_decode_step) {
         decode_graph_cached_ = true;
         decode_cached_pos_ = symbol_env.at("pos");
     }

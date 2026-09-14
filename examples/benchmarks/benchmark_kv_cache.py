@@ -60,7 +60,7 @@ def find_ggmlc_run_executable(explicit_path: str | None = None) -> str:
     )
 
 
-def find_or_fetch_official_gguf(explicit_path: str | None = None) -> str:
+def find_or_fetch_official_gguf(explicit_path: str | None = None, quantize: str = "q8_0") -> str:
     """Discovers existing official GGUF or fetches SmolLM2-135M from Hugging Face Hub."""
     if explicit_path:
         p = Path(explicit_path)
@@ -68,11 +68,15 @@ def find_or_fetch_official_gguf(explicit_path: str | None = None) -> str:
             return str(p.resolve())
         raise FileNotFoundError(f"Specified official GGUF not found: {explicit_path}")
 
+    target_fn = (
+        "SmolLM2-135M-Instruct-f16.gguf"
+        if quantize.lower() == "f16"
+        else "SmolLM2-135M-Instruct-Q8_0.gguf"
+    )
     candidates = [
-        Path("scratch/SmolLM2-135M-Instruct-f16.gguf"),
-        Path("scratch/SmolLM2-135M-Instruct-Q8_0.gguf"),
-        Path(".cache/gguf/SmolLM2-135M-Instruct-Q8_0.gguf"),
-        Path(".cache/gguf/SmolLM2-135M-Instruct-f16.gguf"),
+        Path(f"scratch/{target_fn}"),
+        Path(f".cache/gguf/{target_fn}"),
+        Path(f"scratch/SmolLM2-135M-Instruct-{quantize}.gguf"),
     ]
     for c in candidates:
         if c.is_file():
@@ -81,49 +85,55 @@ def find_or_fetch_official_gguf(explicit_path: str | None = None) -> str:
     try:
         from huggingface_hub import hf_hub_download
 
-        print("📥 Fetching official SmolLM2 GGUF from Hugging Face Hub...", flush=True)
+        print(
+            f"📥 Fetching official SmolLM2 GGUF `{target_fn}` from Hugging Face Hub...", flush=True
+        )
         downloaded = hf_hub_download(
             repo_id="bartowski/SmolLM2-135M-Instruct-GGUF",
-            filename="SmolLM2-135M-Instruct-Q8_0.gguf",
+            filename=target_fn,
             cache_dir=".cache/gguf",
         )
         return str(Path(downloaded).resolve())
     except Exception as e:
         raise FileNotFoundError(
-            f"Official SmolLM2 GGUF not found and auto-download failed ({e}).\n"
+            f"Official SmolLM2 GGUF ({target_fn}) not found and auto-download failed ({e}).\n"
             "Please specify `--official-gguf <path>`."
         ) from e
 
 
-def find_or_compile_ggmlc_gguf(explicit_path: str | None = None, auto_compile: bool = True) -> str:
-    """Discovers existing ggmlc GGUF or compiles SmolLM2-135M on demand."""
+def find_or_compile_ggmlc_gguf(
+    explicit_path: str | None = None, auto_compile: bool = True, quantize: str = "q8_0"
+) -> str:
+    """Discovers existing ggmlc GGUF or compiles SmolLM2-135M on demand with matching precision."""
     if explicit_path:
         p = Path(explicit_path)
         if p.is_file():
             return str(p.resolve())
         raise FileNotFoundError(f"Specified ggmlc GGUF not found: {explicit_path}")
 
-    candidates = [
-        Path("scratch/smollm2_chat.gguf"),
-        Path(".cache/ggmlc/smollm2_chat.gguf"),
-    ]
-    for c in candidates:
-        if c.is_file():
-            return str(c.resolve())
+    target_path = Path(f"scratch/smollm2_chat_{quantize}.gguf")
+    if target_path.is_file():
+        return str(target_path.resolve())
+
+    # Check fallback legacy path if f16
+    if quantize.lower() == "f16" and Path("scratch/smollm2_chat.gguf").is_file():
+        return str(Path("scratch/smollm2_chat.gguf").resolve())
 
     if not auto_compile:
         raise FileNotFoundError(
-            "ggmlc GGUF not found. Please specify `--ggmlc-gguf <path>` or allow auto-compilation."
+            f"ggmlc GGUF not found at {target_path}. Please specify `--ggmlc-gguf <path>` or allow auto-compilation."
         )
 
-    print("⚙️ Compiling SmolLM2-135M with native GQA and RoPE fusion for benchmark...", flush=True)
+    print(
+        f"⚙️ Compiling SmolLM2-135M (quantize={quantize}) with native GQA and RoPE fusion for benchmark...",
+        flush=True,
+    )
     import ggmlc
     import torch
     from ggmlc.pipeline.tokenizer import BPETokenizer
 
     from examples.models.hub_models import load_smollm2_model
 
-    target_path = Path("scratch/smollm2_chat.gguf")
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
     model, dummy_input, _ = load_smollm2_model(seq_len=8)
@@ -138,7 +148,7 @@ def find_or_compile_ggmlc_gguf(explicit_path: str | None = None, auto_compile: b
         output=str(target_path),
         dynamic_shapes=dynamic_shapes,
         model_name="smollm2_135m",
-        quantize="f16",
+        quantize=quantize,
         pipeline=tokenizer,
         tasks=["text-generation"],
     )
@@ -272,6 +282,13 @@ def main():
     parser = argparse.ArgumentParser(description="KV Cache Autoregressive Benchmark")
     parser.add_argument("--device", choices=["cpu", "cuda", "both"], default="both")
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--quantize",
+        type=str,
+        default="q8_0",
+        choices=["q8_0", "f16"],
+        help="Quantization precision for both llama.cpp and ggmlc-run (default: q8_0)",
+    )
     parser.add_argument("--output-md", type=str, default="benchmark_kv_cache_report.md")
     parser.add_argument("--output-json", type=str, default="benchmark_kv_cache_report.json")
     parser.add_argument(
@@ -292,11 +309,17 @@ def main():
     ggmlc_run_exe = find_ggmlc_run_executable(args.executable)
     print(f"🔧 Using standalone runner: {ggmlc_run_exe}")
 
-    official_gguf = find_or_fetch_official_gguf(args.official_gguf)
-    print(f"📦 Using official GGUF: {official_gguf}")
+    official_gguf = find_or_fetch_official_gguf(args.official_gguf, quantize=args.quantize)
+    llama_payload_mb = round(Path(official_gguf).stat().st_size / (1024.0 * 1024.0), 1)
+    print(
+        f"📦 Using official GGUF ({args.quantize.upper()}, {llama_payload_mb} MB): {official_gguf}"
+    )
 
-    ggmlc_gguf = find_or_compile_ggmlc_gguf(args.ggmlc_gguf, auto_compile=not args.skip_compile)
-    print(f"🚀 Using ggmlc GGUF: {ggmlc_gguf}")
+    ggmlc_gguf = find_or_compile_ggmlc_gguf(
+        args.ggmlc_gguf, auto_compile=not args.skip_compile, quantize=args.quantize
+    )
+    ggmlc_payload_mb = round(Path(ggmlc_gguf).stat().st_size / (1024.0 * 1024.0), 1)
+    print(f"🚀 Using ggmlc GGUF ({args.quantize.upper()}, {ggmlc_payload_mb} MB): {ggmlc_gguf}")
 
     prompt = "The capital of France is"
     seq_lengths = [32, 64, 128, 256]
@@ -306,7 +329,9 @@ def main():
     all_results = {}
 
     for dev in devices_to_test:
-        print(f"\n{'=' * 70}\nBenchmarking on device: {dev.upper()}\n{'=' * 70}")
+        print(
+            f"\n{'=' * 70}\nBenchmarking on device: {dev.upper()} ({args.quantize.upper()})\n{'=' * 70}"
+        )
         all_results[dev] = {}
 
         for slen in seq_lengths:
@@ -319,8 +344,17 @@ def main():
                     official_gguf, prompt, slen, n_threads=args.threads, n_gpu_layers=gpu_layers
                 )
                 if llama_res:
+                    llama_res["payload_mb"] = llama_payload_mb
+                    llama_bw = (
+                        round((llama_payload_mb / 1024.0) / (llama_res["ms_per_tok"] / 1000.0), 1)
+                        if llama_res["ms_per_tok"] > 0
+                        else 0.0
+                    )
+                    llama_res["bandwidth_gb_s"] = llama_bw
                     print(
-                        f"[llama.cpp  {dev.upper()}] {llama_res['gen_tokens']} tok | {llama_res['total_time_s']:.2f}s | {llama_res['decode_tok_s']:.1f} tok/s | {llama_res['ms_per_tok']:.2f} ms/tok"
+                        f"[llama.cpp  {dev.upper()}] {llama_res['gen_tokens']} tok | {llama_res['total_time_s']:.2f}s | "
+                        f"{llama_res['decode_tok_s']:.1f} tok/s | {llama_res['ms_per_tok']:.2f} ms/tok | "
+                        f"BW: {llama_bw} GB/s ({llama_payload_mb} MB)"
                     )
             except Exception as e:  # noqa: BLE001
                 print(f"[llama.cpp  {dev.upper()}] Error: {e}")
@@ -337,9 +371,19 @@ def main():
                     n_threads=args.threads,
                     use_cuda_graph=args.cuda_graph,
                 )
-                print(
-                    f"[ggmlc-run  {dev.upper()}] {ggmlc_res['gen_tokens']} tok | {ggmlc_res['total_time_s']:.2f}s | {ggmlc_res['decode_tok_s']:.1f} tok/s | {ggmlc_res['ms_per_tok']:.2f} ms/tok"
-                )
+                if ggmlc_res:
+                    ggmlc_res["payload_mb"] = ggmlc_payload_mb
+                    ggmlc_bw = (
+                        round((ggmlc_payload_mb / 1024.0) / (ggmlc_res["ms_per_tok"] / 1000.0), 1)
+                        if ggmlc_res["ms_per_tok"] > 0
+                        else 0.0
+                    )
+                    ggmlc_res["bandwidth_gb_s"] = ggmlc_bw
+                    print(
+                        f"[ggmlc-run  {dev.upper()}] {ggmlc_res['gen_tokens']} tok | {ggmlc_res['total_time_s']:.2f}s | "
+                        f"{ggmlc_res['decode_tok_s']:.1f} tok/s | {ggmlc_res['ms_per_tok']:.2f} ms/tok | "
+                        f"BW: {ggmlc_bw} GB/s ({ggmlc_payload_mb} MB)"
+                    )
             except Exception as e:  # noqa: BLE001
                 print(f"[ggmlc-run  {dev.upper()}] Error: {e}")
                 ggmlc_res = None
@@ -353,8 +397,11 @@ def main():
     md_lines = [
         "# Autoregressive KV Cache Inference Benchmark Report",
         "",
+        f'**Precision Target:** `{args.quantize.upper()}` | **Prompt:** "{prompt}"  ',
+        f"**Model:** SmolLM2-135M (`llama.cpp`: {llama_payload_mb} MB vs `ggmlc-run`: {ggmlc_payload_mb} MB)  ",
+        "",
         "Comparing standalone native runner `ggmlc-run` (with hardware KV cache) against official `llama.cpp`",
-        "on SmolLM2-135M across sequence lengths (32, 64, 128, 256 tokens).",
+        "across sequence lengths (32, 64, 128, 256 tokens).",
         "",
     ]
 
@@ -362,9 +409,9 @@ def main():
         md_lines.append(f"## Hardware Target: {dev.upper()}")
         md_lines.append("")
         md_lines.append(
-            "| Max Tokens | Engine | Generated | Total Time | Decode Throughput | Inter-Token Latency | Latency Flatness |"
+            "| Max Tokens | Engine | Precision | Model Payload | Generated | Total Time | Decode Throughput | Inter-Token Latency | Memory Bandwidth | Latency Flatness |"
         )
-        md_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+        md_lines.append("| :--- | :--- | :---: | :---: | :--- | :--- | :--- | :--- | :--- | :--- |")
 
         for slen in seq_lengths:
             data = all_results[dev].get(slen, {})
@@ -373,11 +420,15 @@ def main():
 
             if lres:
                 md_lines.append(
-                    f"| {slen} | `llama.cpp` | {lres['gen_tokens']} tok | {lres['total_time_s']:.2f} s | {lres['decode_tok_s']:.1f} tok/s | {lres['ms_per_tok']:.2f} ms/tok | Baseline |"
+                    f"| {slen} | `llama.cpp` | {args.quantize.upper()} | {lres.get('payload_mb', llama_payload_mb)} MB | "
+                    f"{lres['gen_tokens']} tok | {lres['total_time_s']:.2f} s | {lres['decode_tok_s']:.1f} tok/s | "
+                    f"{lres['ms_per_tok']:.2f} ms/tok | **{lres.get('bandwidth_gb_s', 0.0)} GB/s** | Baseline |"
                 )
             if gres:
                 md_lines.append(
-                    f"| {slen} | `ggmlc-run` (KV Cache) | {gres['gen_tokens']} tok | {gres['total_time_s']:.2f} s | {gres['decode_tok_s']:.1f} tok/s | {gres['ms_per_tok']:.2f} ms/tok | **O(1) Flat** |"
+                    f"| {slen} | `ggmlc-run` (KV Cache) | {args.quantize.upper()} | {gres.get('payload_mb', ggmlc_payload_mb)} MB | "
+                    f"{gres['gen_tokens']} tok | {gres['total_time_s']:.2f} s | {gres['decode_tok_s']:.1f} tok/s | "
+                    f"{gres['ms_per_tok']:.2f} ms/tok | **{gres.get('bandwidth_gb_s', 0.0)} GB/s** | **O(1) Flat** |"
                 )
 
         md_lines.append("")

@@ -9,11 +9,24 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iomanip>
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
 #include "ggmlc/pipeline/image.h"
 #include "ggmlc/pipeline/tokenizer.h"
 #include "ggmlc/batch_scheduler.h"
+
+static inline bool is_stdout_tty() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(fileno(stdout)) != 0;
+#endif
+}
 
 static void print_help(const char* prog_name) {
     std::cout << "================================================================================\n"
@@ -431,6 +444,7 @@ int main(int argc, char** argv) {
                 uint64_t req_id = scheduler.add_request(p_tokens, max_tokens, temperature, tokenizer.eos_token_id());
                 std::cout << "[Request #" << req_id << " Queued] (" << p_tokens.size() << " prompt tokens)\n";
 
+                bool flush_per_token = is_stdout_tty();
                 while (scheduler.has_work()) {
                     auto res = scheduler.step();
                     for (const auto& pair : res.new_tokens) {
@@ -440,16 +454,19 @@ int main(int argc, char** argv) {
                         }
                         if (tokenizer.is_special_token(tok)) {
                             if (show_special) {
-                                std::cout << tokenizer.decode({tok}, false) << std::flush;
+                                std::cout << tokenizer.decode({tok}, false);
+                                if (flush_per_token) std::cout << std::flush;
                             }
                             continue;
                         }
-                        std::cout << tokenizer.decode_token(tok, true) << std::flush;
+                        std::cout << tokenizer.decode_token(tok, true);
+                        if (flush_per_token) std::cout << std::flush;
                     }
                     if (!res.completed_request_ids.empty()) {
                         std::cout << "\n[Request Completed]\n";
                     }
                 }
+                std::cout << std::flush;
                 std::cout << "\n> " << std::flush;
             }
             return 0;
@@ -471,6 +488,17 @@ int main(int argc, char** argv) {
 
             uint32_t in_tid = model_graph.inputs[0];
             uint32_t out_tid = model_graph.outputs[0];
+
+            int32_t pos_tid = -1;
+            for (uint32_t inp : model_graph.inputs) {
+                auto it = model_graph.tensors.find(inp);
+                if (it != model_graph.tensors.end()) {
+                    if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
+                        pos_tid = static_cast<int32_t>(inp);
+                        break;
+                    }
+                }
+            }
 
             std::string formatted_prompt;
             bool is_chat_mode = !chat_text.empty();
@@ -502,6 +530,7 @@ int main(int argc, char** argv) {
             if (use_cuda_graph) {
                 executor.set_enable_cuda_graph(true);
             }
+            bool flush_per_token = is_stdout_tty();
             auto t_start = std::chrono::high_resolution_clock::now();
             auto t_prefill_end = t_start;
             auto t_decode_start = t_start;
@@ -567,6 +596,16 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                if (pos_tid >= 0) {
+                    for (const auto& dim_expr : model_graph.tensors[pos_tid].ne) {
+                        if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
+                            int64_t sym_idx = dim_expr->val;
+                            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(model_graph.symbol_table.size())) {
+                                symbol_env[model_graph.symbol_table[sym_idx]] = c_len;
+                            }
+                        }
+                    }
+                }
 
                 if (use_kv_cache) {
                     symbol_env["pos"] = pos;
@@ -574,6 +613,13 @@ int main(int argc, char** argv) {
 
                 executor.prepare(symbol_env, !unplanned);
                 executor.set_input(in_tid, current_tokens.data() + c_start, c_len * sizeof(int32_t));
+                if (pos_tid >= 0) {
+                    std::vector<int32_t> pos_vec(c_len);
+                    for (int64_t i = 0; i < c_len; ++i) {
+                        pos_vec[i] = static_cast<int32_t>(c_start + i);
+                    }
+                    executor.set_input(pos_tid, pos_vec.data(), c_len * sizeof(int32_t));
+                }
                 executor.run(n_threads);
 
                 if (chunk_idx == n_chunks - 1) {
@@ -602,14 +648,16 @@ int main(int argc, char** argv) {
                         }
                         if (tokenizer.is_special_token(next_token)) {
                             if (show_special) {
-                                std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                                std::cout << tokenizer.decode({next_token}, false);
+                                if (flush_per_token) std::cout << std::flush;
                             }
                             stopped = true;
                             break;
                         }
 
                         std::string piece = tokenizer.decode_token(next_token, true);
-                        std::cout << piece << std::flush;
+                        std::cout << piece;
+                        if (flush_per_token) std::cout << std::flush;
                     }
                 }
             }
@@ -635,6 +683,16 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                if (pos_tid >= 0) {
+                    for (const auto& dim_expr : model_graph.tensors[pos_tid].ne) {
+                        if (dim_expr && dim_expr->type == ggmlc::DimType::SYMBOL) {
+                            int64_t sym_idx = dim_expr->val;
+                            if (sym_idx >= 0 && sym_idx < static_cast<int64_t>(model_graph.symbol_table.size())) {
+                                symbol_env[model_graph.symbol_table[sym_idx]] = S;
+                            }
+                        }
+                    }
+                }
 
                 if (use_kv_cache) {
                     symbol_env["pos"] = pos;
@@ -645,6 +703,10 @@ int main(int argc, char** argv) {
                     executor.set_input(in_tid, &last_token, sizeof(int32_t));
                 } else {
                     executor.set_input(in_tid, current_tokens.data(), current_tokens.size() * sizeof(int32_t));
+                }
+                if (pos_tid >= 0) {
+                    int32_t cur_pos = static_cast<int32_t>(pos);
+                    executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
                 }
                 executor.run(n_threads);
 
@@ -670,15 +732,18 @@ int main(int argc, char** argv) {
                 }
                 if (tokenizer.is_special_token(next_token)) {
                     if (show_special) {
-                        std::cout << tokenizer.decode({next_token}, false) << std::flush;
+                        std::cout << tokenizer.decode({next_token}, false);
+                        if (flush_per_token) std::cout << std::flush;
                     }
                     break;
                 }
 
                 std::string piece = tokenizer.decode_token(next_token, true);
-                std::cout << piece << std::flush;
+                std::cout << piece;
+                if (flush_per_token) std::cout << std::flush;
             }
 
+            std::cout << std::flush;
             auto t_end = std::chrono::high_resolution_clock::now();
             double total_sec = std::chrono::duration<double>(t_end - t_start).count();
             double prefill_sec = std::chrono::duration<double>(t_prefill_end - t_start).count();

@@ -20,6 +20,7 @@ class FusionOptions:
     """Configuration options for enabling or disabling individual fusion passes."""
 
     enable_bias_gelu: bool = True
+    enable_approx_gelu: bool = True
     enable_layer_norm: bool = True
     enable_rms_norm: bool = True
     enable_swiglu: bool = True
@@ -86,6 +87,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
 
     if options.enable_swiglu:
         _fuse_swiglu_patterns(graph)
+
+    if options.enable_approx_gelu or options.enable_bias_gelu:
+        _fuse_approx_gelu_patterns(graph)
 
     if options.enable_bias_gelu:
         _fuse_bias_gelu_patterns(graph)
@@ -694,6 +698,194 @@ def _fuse_swiglu_patterns(graph: Graph) -> None:
     # Filter out nodes marked for removal
     final_nodes = [n for n in new_nodes if n.id not in ops_to_remove]
     graph.nodes = final_nodes
+
+
+def _fuse_approx_gelu_patterns(graph: Graph) -> None:
+    """Matches polynomial NewGELU approximation subgraphs:
+    0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    and folds the entire elementary operation sub-DAG into a single OpCode.GELU(approximate="tanh").
+    """
+    producer_map: dict[int, Operation] = {}
+    consumer_map: dict[int, list[Operation]] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_map.setdefault(in_id, []).append(op)
+
+    def get_const_val(t_id: int) -> float | None:
+        t = graph.get_tensor(t_id)
+        if (
+            t
+            and t.storage in (StorageClass.CONSTANT, StorageClass.PARAMETER)
+            and t.data is not None
+        ):
+            if hasattr(t.data, "item"):
+                try:
+                    return float(t.data.item())
+                except (TypeError, ValueError):
+                    return None
+            try:
+                return float(t.data)
+            except (TypeError, ValueError):
+                return None
+
+    ops_to_remove: set[int] = set()
+    new_nodes: list[Operation] = []
+
+    for op in graph.nodes:
+        if op.id in ops_to_remove:
+            continue
+
+        if op.opcode == OpCode.TANH and len(op.inputs) == 1:
+            tanh_in = op.inputs[0]
+            prod_mul_c = producer_map.get(tanh_in)
+            if not prod_mul_c or prod_mul_c.opcode != OpCode.MUL or len(prod_mul_c.inputs) != 2:
+                new_nodes.append(op)
+                continue
+
+            # Check for sqrt(2/pi) approx 0.79788
+            c_val = None
+            poly_sum_id = None
+            for inp in prod_mul_c.inputs:
+                v = get_const_val(inp)
+                if v is not None and abs(v - 0.79788) < 0.02:
+                    c_val = v
+                else:
+                    poly_sum_id = inp
+
+            if c_val is None or poly_sum_id is None:
+                new_nodes.append(op)
+                continue
+
+            prod_poly_add = producer_map.get(poly_sum_id)
+            if (
+                not prod_poly_add
+                or prod_poly_add.opcode != OpCode.ADD
+                or len(prod_poly_add.inputs) != 2
+            ):
+                new_nodes.append(op)
+                continue
+
+            # In ADD(x, 0.044715 * x^3), identify x and cube_term
+            x_cand = None
+            cube_op = None
+            for inp in prod_poly_add.inputs:
+                p = producer_map.get(inp)
+                if p and p.opcode == OpCode.MUL:
+                    cube_op = p
+                else:
+                    x_cand = inp
+
+            if not cube_op or x_cand is None:
+                new_nodes.append(op)
+                continue
+
+            # Check 0.044715 in cube_op
+            c_coeff = None
+            pow_id = None
+            for inp in cube_op.inputs:
+                v = get_const_val(inp)
+                if v is not None and abs(v - 0.044715) < 0.01:
+                    c_coeff = v
+                else:
+                    pow_id = inp
+
+            if c_coeff is None or pow_id is None:
+                new_nodes.append(op)
+                continue
+
+            # Check downstream: TANH -> ADD(..., 1.0) -> MUL(..., 0.5 * x)
+            tanh_consumers = consumer_map.get(op.outputs[0], [])
+            if len(tanh_consumers) != 1:
+                new_nodes.append(op)
+                continue
+
+            add1_op = tanh_consumers[0]
+            if add1_op.opcode != OpCode.ADD or len(add1_op.inputs) != 2:
+                new_nodes.append(op)
+                continue
+
+            has_one = any(
+                get_const_val(inp) is not None and abs(get_const_val(inp) - 1.0) < 1e-3
+                for inp in add1_op.inputs
+            )
+            if not has_one:
+                new_nodes.append(op)
+                continue
+
+            add1_consumers = consumer_map.get(add1_op.outputs[0], [])
+            if len(add1_consumers) != 1:
+                new_nodes.append(op)
+                continue
+
+            mul_final_op = add1_consumers[0]
+            if mul_final_op.opcode != OpCode.MUL or len(mul_final_op.inputs) != 2:
+                new_nodes.append(op)
+                continue
+
+            # Find the other input to mul_final_op
+            other_inp = (
+                mul_final_op.inputs[0]
+                if mul_final_op.inputs[1] == add1_op.outputs[0]
+                else mul_final_op.inputs[1]
+            )
+            # other_inp should be 0.5 * x or x
+            prod_half = producer_map.get(other_inp)
+            final_out_op = mul_final_op
+            matched_gelu = False
+
+            if prod_half and prod_half.opcode == OpCode.MUL:
+                # Check if it multiplies x_cand by 0.5
+                if x_cand in prod_half.inputs:
+                    for inp in prod_half.inputs:
+                        v = get_const_val(inp)
+                        if v is not None and abs(v - 0.5) < 1e-3:
+                            matched_gelu = True
+                            ops_to_remove.add(prod_half.id)
+                            break
+            elif other_inp == x_cand:
+                # Might have an outer MUL by 0.5
+                outer_consumers = consumer_map.get(mul_final_op.outputs[0], [])
+                if len(outer_consumers) == 1 and outer_consumers[0].opcode == OpCode.MUL:
+                    outer_mul = outer_consumers[0]
+                    for inp in outer_mul.inputs:
+                        v = get_const_val(inp)
+                        if v is not None and abs(v - 0.5) < 1e-3:
+                            matched_gelu = True
+                            final_out_op = outer_mul
+                            ops_to_remove.add(mul_final_op.id)
+                            break
+
+            if not matched_gelu:
+                new_nodes.append(op)
+                continue
+
+            # Mark all intermediate polynomial nodes for removal
+            ops_to_remove.add(op.id)
+            ops_to_remove.add(prod_mul_c.id)
+            ops_to_remove.add(prod_poly_add.id)
+            ops_to_remove.add(cube_op.id)
+            prod_pow = producer_map.get(pow_id)
+            if prod_pow and len(consumer_map.get(pow_id, [])) <= 1:
+                ops_to_remove.add(prod_pow.id)
+            ops_to_remove.add(add1_op.id)
+            ops_to_remove.add(final_out_op.id)
+
+            fused_op = Operation(
+                id=graph.new_op_id(),
+                opcode=OpCode.GELU,
+                inputs=[x_cand],
+                outputs=list(final_out_op.outputs),
+                attributes={"approximate": "tanh"},
+                name=f"{final_out_op.name or 'gelu'}_approx_fused",
+            )
+            new_nodes.append(fused_op)
+            continue
+
+        new_nodes.append(op)
+
+    graph.nodes = [n for n in new_nodes if n.id not in ops_to_remove]
 
 
 def _fuse_bias_gelu_patterns(graph: Graph) -> None:
