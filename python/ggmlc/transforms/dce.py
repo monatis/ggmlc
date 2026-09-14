@@ -46,9 +46,9 @@ class DeadCodeEliminationPass(Pass):
                             visited_tensors.add(in_id)
                             worklist.append(in_id)
 
-        # Always preserve inputs and parameters
+        # Always preserve inputs and persistent states (parameters are preserved if referenced)
         for tid, tensor in graph.tensors.items():
-            if tensor.storage in (StorageClass.INPUT, StorageClass.PARAMETER, StorageClass.STATE):
+            if tensor.storage in (StorageClass.INPUT, StorageClass.STATE):
                 visited_tensors.add(tid)
 
         # 3. Construct clean pruned graph

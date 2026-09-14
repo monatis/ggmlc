@@ -302,7 +302,10 @@ def main():
         "--skip-compile", action="store_true", help="Do not auto-compile ggmlc GGUF if missing"
     )
     parser.add_argument(
-        "--cuda-graph", action="store_true", default=True, help="Enable CUDA Graph for ggmlc-run"
+        "--cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable CUDA Graph for ggmlc-run (default: False)",
     )
     args = parser.parse_args()
 

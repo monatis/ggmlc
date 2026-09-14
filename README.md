@@ -239,18 +239,21 @@ print("Generated text:", text)
 
 ### 8. GGMLC vs. `llama.cpp`: Computation Graph & Architectural Comparison
 
-A comprehensive comparison across shared architectures (`SmolLM2-135M`, `Qwen 2.5 0.5B`, `Gemma 3`, `GPT-2`, and `BERT-Base`):
+A comprehensive comparison across shared architectures (`SmolLM2-135M`, `SmolLM2-360M`, `Qwen 2.5 0.5B`, `Qwen 2.5 1.5B`, `GPT-2`, and `BERT-Base`) using native standalone C++ benchmark tools (`ggml-bench` vs `llama-bench`):
 
 ```bash
-# Run the GGMLC vs llama.cpp comparison suite across shared architectures
-python examples/benchmarks/benchmark_llama_cpp_comparison.py --backend cpu --runs 5 --warmup 2
+# 1. Run the unified apples-to-apples comparative benchmark suite
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cpu --models smollm2_135m,gpt2 --runs 5
+
+# 2. Standalone C++ benchmark binary execution (zero Python wrapper/sampling overhead)
+./ggml-bench model.gguf -p 16,64,128 -n 32,64 -r 5 -o md
 ```
 
 | Architecture | Model | ggmlc GEMV/tok | llama.cpp GEMV/tok | Kernel Launch Reduction | Memory Strategy | CUDA Graph Support |
 | :--- | :--- | :---: | :---: | :---: | :--- | :--- |
 | **SmolLM2 / LLaMA** | `smollm2_135m` | **121** | 211 | **-42.7%** | Planned Arena + Driver-VMM | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
-| **Qwen 2.5** | `qwen2.5_0.5b` | **97** | 169 | **-42.6%** | Planned Arena + Driver-VMM | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
-| **GPT-2** | `gpt2` | **37** | 49 | **-24.5%** | Planned Arena + Driver-VMM | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
+| **Qwen 2.5** | `qwen2.5_0.5b` | **97** | 169 | **-41.2%** | Planned Arena + Driver-VMM | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
+| **GPT-2** | `gpt2` | **37** | 49 | **-24.5%** | Planned Arena | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
 | **BERT / MiniLM** | `minilm_l6` | **49** | 73 | **-32.9%** | Planned Arena + Driver-VMM | Unified (CC $\ge 6.0$, Pascal to Blackwell) |
 
 > 📖 **Deep-Dive Architectural Report**: See [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md) for detailed structural proofs, operator breakdown tables, and Colab GPU reproduction instructions.
