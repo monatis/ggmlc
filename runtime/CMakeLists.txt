@@ -39,19 +39,19 @@ target_link_libraries(ggmlc-run PRIVATE
 )
 
 # Benchmark Tools
-add_executable(ggml-bench
-    tools/ggml_bench.cpp
-)
-
-target_link_libraries(ggml-bench PRIVATE
-    ggmlc_runtime
-)
-
 add_executable(ggmlc-bench
-    tools/ggml_bench.cpp
+    tools/ggmlc_bench.cpp
 )
 
 target_link_libraries(ggmlc-bench PRIVATE
+    ggmlc_runtime
+)
+
+add_executable(ggml-bench
+    tools/ggmlc_bench.cpp
+)
+
+target_link_libraries(ggml-bench PRIVATE
     ggmlc_runtime
 )
 

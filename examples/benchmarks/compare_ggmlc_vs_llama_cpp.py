@@ -28,6 +28,24 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# On Windows, ensure CUDA bin path is in PATH for child subprocesses
+if sys.platform == "win32":
+    cuda_candidates = [
+        os.environ.get("CUDA_PATH", "") + "\\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3\bin",
+    ]
+    for c_path in cuda_candidates:
+        if c_path and os.path.isdir(c_path) and c_path not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = c_path + os.pathsep + os.environ.get("PATH", "")
+os.environ["GGML_NO_BACKTRACE"] = "1"
+
 import numpy as np
 import torch
 
@@ -61,9 +79,21 @@ GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
         "bartowski/Llama-3.2-1B-Instruct-GGUF",
         "Llama-3.2-1B-Instruct-Q8_0.gguf",
     ),
+    "llama-3.2-1b": (
+        "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "Llama-3.2-1B-Instruct-Q8_0.gguf",
+    ),
     "gpt2": (
         "QuantFactory/gpt2-GGUF",
         "gpt2.Q8_0.gguf",
+    ),
+    "gpt2_medium": (
+        "mradermacher/gpt2-medium-GGUF",
+        "gpt2-medium.Q8_0.gguf",
+    ),
+    "gpt2-medium": (
+        "mradermacher/gpt2-medium-GGUF",
+        "gpt2-medium.Q8_0.gguf",
     ),
 }
 
@@ -142,13 +172,16 @@ def compile_ggmlc_model(
     model_name: str,
     quantize: str = "q8_0",
     output_dir: str = "scratch",
+    force_recompile: bool = False,
 ) -> str:
     """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container."""
     import ggmlc
     from ggmlc.pipeline.tokenizer import BPETokenizer
 
     from examples.models.hub_models import (
+        load_gpt2_medium_model,
         load_gpt2_model,
+        load_llama_model,
         load_qwen_1_5b_model,
         load_qwen_model,
         load_smollm2_360m_model,
@@ -156,7 +189,7 @@ def compile_ggmlc_model(
     )
 
     target_path = Path(output_dir) / f"{model_name}_{quantize}.gguf"
-    if target_path.is_file():
+    if target_path.is_file() and not force_recompile:
         return str(target_path.resolve())
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +217,14 @@ def compile_ggmlc_model(
     elif model_key == "gpt2":
         model, dummy_input, _ = load_gpt2_model(seq_len=8)
         tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2")
-        dynamic_shapes = None
+        dynamic_shapes = ({1: dim_s}, {1: dim_s})
+    elif model_key in ("gpt2_medium", "gpt2-medium"):
+        model, dummy_input, _ = load_gpt2_medium_model(seq_len=8)
+        tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2-medium")
+        dynamic_shapes = ({1: dim_s}, {1: dim_s})
+    elif model_key in ("llama3.2_1b", "llama-3.2-1b"):
+        model, dummy_input, _ = load_llama_model(variant="unsloth/Llama-3.2-1B-Instruct", seq_len=8)
+        tokenizer = BPETokenizer.from_huggingface("unsloth/Llama-3.2-1B-Instruct")
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")
 
@@ -199,6 +239,12 @@ def compile_ggmlc_model(
         tasks=["text-generation"],
     )
 
+    del model
+    del dummy_input
+    import gc
+
+    gc.collect()
+
     size_mb = target_path.stat().st_size / (1024 * 1024)
     print(f"✅ Compilation finished: {target_path.name} ({size_mb:.1f} MB)", flush=True)
     return str(target_path.resolve())
@@ -212,6 +258,8 @@ def run_ggml_bench(
     prompt_lens: list[int],
     gen_lens: list[int],
     runs: int,
+    cuda_graph: bool = False,
+    ubatch: int = 512,
 ) -> list[dict[str, Any]]:
     """Runs ggml-bench standalone C++ binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -230,11 +278,15 @@ def run_ggml_bench(
         str(runs),
         "-t",
         str(threads),
+        "-ub",
+        str(ubatch),
         "--device",
         device,
         "-o",
         "json",
     ]
+    if cuda_graph and device == "cuda":
+        cmd.append("--cuda-graph")
 
     print(f"🚀 [ggml-bench] Executing: {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -264,6 +316,7 @@ def run_llama_bench(
     prompt_lens: list[int],
     gen_lens: list[int],
     runs: int,
+    ubatch: int = 512,
 ) -> list[dict[str, Any]]:
     """Runs official llama-bench binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -284,6 +337,8 @@ def run_llama_bench(
         str(threads),
         "-ngl",
         ngl,
+        "-ub",
+        str(ubatch),
         "-o",
         "json",
     ]
@@ -303,6 +358,13 @@ def run_llama_bench(
             records = json.loads(json_str)
             for r in records:
                 r["engine"] = "llama.cpp"
+                if not r.get("test"):
+                    n_p = r.get("n_prompt", 0)
+                    n_g = r.get("n_gen", 0)
+                    if n_p > 0:
+                        r["test"] = f"pp{n_p}"
+                    elif n_g > 0:
+                        r["test"] = f"tg{n_g}"
             return records
         return []
     except Exception as e:  # noqa: BLE001
@@ -443,16 +505,34 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
     """Verifies output logit differential between PyTorch reference and ggmlc compiled GGUF."""
     from ggmlc.runtime.runner import ModelRunner
 
-    from examples.models.hub_models import load_gpt2_model, load_qwen_model, load_smollm2_model
+    from examples.models.hub_models import (
+        load_gpt2_medium_model,
+        load_gpt2_model,
+        load_llama_model,
+        load_qwen_1_5b_model,
+        load_qwen_model,
+        load_smollm2_360m_model,
+        load_smollm2_model,
+    )
 
     model_key = model_name.lower()
     seq_len = 8
-    if "smol" in model_key:
+    if model_key == "smollm2_135m":
         ref_model, dummy_input, _ = load_smollm2_model(seq_len=seq_len)
-    elif "qwen" in model_key:
-        ref_model, dummy_input, _ = load_qwen_model(seq_len=seq_len)
-    elif "gpt2" in model_key:
+    elif model_key == "smollm2_360m":
+        ref_model, dummy_input, _ = load_smollm2_360m_model(seq_len=seq_len)
+    elif model_key == "qwen2.5_0.5b":
+        ref_model, dummy_input, _ = load_qwen_model(variant="Qwen/Qwen2.5-0.5B", seq_len=seq_len)
+    elif model_key == "qwen2.5_1.5b":
+        ref_model, dummy_input, _ = load_qwen_1_5b_model(seq_len=seq_len)
+    elif model_key == "gpt2":
         ref_model, dummy_input, _ = load_gpt2_model(seq_len=seq_len)
+    elif model_key in ("gpt2_medium", "gpt2-medium"):
+        ref_model, dummy_input, _ = load_gpt2_medium_model(seq_len=seq_len)
+    elif model_key in ("llama3.2_1b", "llama-3.2-1b"):
+        ref_model, dummy_input, _ = load_llama_model(
+            variant="unsloth/Llama-3.2-1B-Instruct", seq_len=seq_len
+        )
     else:
         return {"parity_status": "SKIPPED", "max_diff": 0.0, "cosine_sim": 1.0}
 
@@ -461,6 +541,10 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
         if isinstance(ref_out, tuple):
             ref_out = ref_out[0]
         ref_arr = ref_out.detach().cpu().numpy()
+    del ref_model
+    import gc
+
+    gc.collect()
 
     runner = ModelRunner(ggmlc_gguf_path, device="cpu")
     input_arrays = [t.detach().cpu().numpy() for t in dummy_input]
@@ -468,6 +552,8 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
     actual_out = runner(*input_arrays, symbols=syms)
     if isinstance(actual_out, dict):
         actual_out = next(iter(actual_out.values()))
+    del runner
+    gc.collect()
 
     max_diff = float(np.max(np.abs(ref_arr - actual_out)))
     flat_ref = ref_arr.flatten().astype(np.float64)
@@ -590,8 +676,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--models",
-        default="smollm2_135m,gpt2",
-        help="Comma-separated models to benchmark (e.g. smollm2_135m,smollm2_360m,qwen2.5_0.5b,gpt2)",
+        default="smollm2_360m,qwen2.5_0.5b,gpt2_medium,llama3.2_1b",
+        help="Comma-separated models to benchmark (e.g. smollm2_360m,qwen2.5_0.5b,gpt2_medium,llama3.2_1b)",
     )
     parser.add_argument(
         "--quantize", choices=["q8_0", "f16"], default="q8_0", help="Quantization format"
@@ -600,7 +686,12 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup iterations")
     parser.add_argument("--threads", type=int, default=4, help="CPU worker threads")
     parser.add_argument(
-        "--prompt-lens", default="16,64,128", help="Prompt sequence lengths (comma-separated)"
+        "--ubatch", type=int, default=512, help="Prefill physical chunk size (ubatch)"
+    )
+    parser.add_argument(
+        "--prompt-lens",
+        default="16,64,128,256,512,1024",
+        help="Prompt sequence lengths (comma-separated)",
     )
     parser.add_argument(
         "--gen-lens", default="32,64", help="Autoregressive generation lengths (comma-separated)"
@@ -609,20 +700,26 @@ def main() -> int:
         "--ggmlc-bench-bin", default=None, help="Explicit path to ggml-bench binary"
     )
     parser.add_argument(
+        "--cuda-graph", action="store_true", help="Enable CUDA graph capture in ggml-bench"
+    )
+    parser.add_argument(
         "--llama-bench-bin", default=None, help="Explicit path to llama-bench binary"
     )
     parser.add_argument(
         "--output-md",
-        default="compare_ggmlc_vs_llama_report.md",
+        default="scratch/compare_ggmlc_vs_llama_report.md",
         help="Output Markdown report path",
     )
     parser.add_argument(
         "--output-json",
-        default="compare_ggmlc_vs_llama_report.json",
+        default="scratch/compare_ggmlc_vs_llama_report.json",
         help="Output JSON report path",
     )
     parser.add_argument(
         "--skip-numerical-check", action="store_true", help="Skip differential numerical check"
+    )
+    parser.add_argument(
+        "--force-recompile", action="store_true", help="Force re-export and compilation of models"
     )
     args = parser.parse_args()
 
@@ -631,14 +728,14 @@ def main() -> int:
     gen_lens = [int(n.strip()) for n in args.gen_lens.split(",") if n.strip()]
 
     # 1. Locate binaries
-    ggml_bench_bin = find_binary("ggml-bench", args.ggmlc_bench_bin)
+    ggml_bench_bin = find_binary("ggmlc-bench", args.ggmlc_bench_bin) or find_binary("ggml-bench", args.ggmlc_bench_bin)
     if not ggml_bench_bin:
         print(
-            "❌ Error: `ggml-bench` binary not found! Please build it via CMake first.",
+            "❌ Error: `ggmlc-bench` binary not found! Please build it via CMake first.",
             file=sys.stderr,
         )
         return 1
-    print(f"✅ Found ggml-bench binary: {ggml_bench_bin}")
+    print(f"✅ Found ggmlc-bench binary: {ggml_bench_bin}")
 
     llama_bench_bin = find_binary("llama-bench", args.llama_bench_bin)
     if llama_bench_bin:
@@ -658,7 +755,9 @@ def main() -> int:
         print("================================================================================")
 
         # A. Compile or locate ggmlc GGUF
-        ggmlc_gguf = compile_ggmlc_model(model_name, quantize=args.quantize)
+        ggmlc_gguf = compile_ggmlc_model(
+            model_name, quantize=args.quantize, force_recompile=args.force_recompile
+        )
 
         # B. Check numerical parity
         parity_info: dict[str, Any] = {
@@ -687,6 +786,8 @@ def main() -> int:
             prompt_lens=prompt_lens,
             gen_lens=gen_lens,
             runs=args.runs,
+            cuda_graph=args.cuda_graph,
+            ubatch=args.ubatch,
         )
 
         # D. Obtain official GGUF & run llama-bench (or fallback)
@@ -702,6 +803,7 @@ def main() -> int:
                     prompt_lens=prompt_lens,
                     gen_lens=gen_lens,
                     runs=args.runs,
+                    ubatch=args.ubatch,
                 )
             else:
                 llama_records = run_llama_python_fallback(
@@ -720,7 +822,9 @@ def main() -> int:
         ggml_map = {r.get("test"): r for r in ggml_records}
         llama_map = {r.get("test"): r for r in llama_records}
 
-        all_tests = sorted(set(list(ggml_map.keys()) + list(llama_map.keys())))
+        all_tests = sorted(
+            [t for t in set(list(ggml_map.keys()) + list(llama_map.keys())) if t is not None]
+        )
         model_size_bytes = os.path.getsize(ggmlc_gguf)
 
         for test_key in all_tests:

@@ -131,6 +131,7 @@ def quantize_graph_parameters(
             orig_bytes += orig_tensor_bytes
             quant_bytes += len(q_bytes)
             tensors_quantized += 1
+            del arr
             type_name = actual_dtype.name
             type_counts[type_name] = type_counts.get(type_name, 0) + 1
 

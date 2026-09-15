@@ -62,18 +62,19 @@ static std::string escape_json(const std::string& str) {
 
 static void print_help(const char* prog_name) {
     std::cout << "================================================================================\n"
-              << " ggml-bench : High-Performance Standalone Neural Computation Benchmark Tool\n"
+              << " ggmlc-bench : High-Performance Standalone Neural Computation Benchmark Tool\n"
               << "================================================================================\n"
               << "Usage: " << prog_name << " [options]\n\n"
               << "Options:\n"
               << "  -h, --help                            Show this help menu and exit\n"
               << "  -m, --model <filename>                Path to compiled GGUF model\n"
-              << "  -p, --n-prompt <n1,n2,...>            Prompt prefill lengths (default: 16,64,128,256,512)\n"
+              << "  -p, --n-prompt <n1,n2,...>            Prompt prefill lengths (default: 16,64,128,256,512,1024)\n"
               << "  -n, --n-gen <n1,n2,...>               Generation/decode token counts (default: 0,32,64,128)\n"
               << "  -r, --repetitions <n>                 Number of repetitions per test (default: 5)\n"
               << "  -o, --output <json|md|csv>            Output format printed to stdout (default: json)\n"
               << "  -d, --device <cpu|cuda>               Target execution backend (default: cpu)\n"
               << "  -t, --threads <n>                     CPU execution worker threads (default: 4)\n"
+              << "  -ub, --ubatch <n>                     Prompt prefill physical chunk size (default: 512)\n"
               << "  --no-warmup                           Skip initial warmup passes\n"
               << "  --cuda-graph                          Enable CUDA graph capture on decode steps\n"
               << "  --unplanned                           Disable planned arena reuse (debug mode)\n\n"
@@ -90,12 +91,13 @@ int main(int argc, char** argv) {
     }
 
     std::string model_path;
-    std::vector<int> prompt_lens = {16, 64, 128, 256, 512};
+    std::vector<int> prompt_lens = {16, 64, 128, 256, 512, 1024};
     std::vector<int> gen_lens = {0, 32, 64, 128};
     int repetitions = 5;
     std::string output_format = "json";
     std::string device_name = "cpu";
     int n_threads = 4;
+    int ubatch = 512;
     bool no_warmup = false;
     bool use_cuda_graph = false;
     bool unplanned = false;
@@ -119,6 +121,8 @@ int main(int argc, char** argv) {
             device_name = argv[++i];
         } else if ((arg == "-t" || arg == "--threads") && i + 1 < argc) {
             n_threads = std::max(1, std::stoi(argv[++i]));
+        } else if ((arg == "-ub" || arg == "--ubatch" || arg == "--chunk-size") && i + 1 < argc) {
+            ubatch = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--no-warmup") {
             no_warmup = true;
         } else if (arg == "--cuda-graph") {
@@ -131,13 +135,13 @@ int main(int argc, char** argv) {
     }
 
     if (model_path.empty()) {
-        std::cerr << "[ggml-bench ERROR] No model file specified. Use '-m <path.gguf>'.\n";
+        std::cerr << "[ggmlc-bench ERROR] No model file specified. Use '-m <path.gguf>'.\n";
         return 1;
     }
 
     std::ifstream file_check(model_path, std::ios::binary | std::ios::ate);
     if (!file_check.is_open()) {
-        std::cerr << "[ggml-bench ERROR] Cannot open model file: " << model_path << "\n";
+        std::cerr << "[ggmlc-bench ERROR] Cannot open model file: " << model_path << "\n";
         return 1;
     }
     uint64_t file_size_bytes = static_cast<uint64_t>(file_check.tellg());
@@ -213,14 +217,8 @@ int main(int argc, char** argv) {
         for (int P : prompt_lens) {
             if (P <= 0) continue;
 
-            std::unordered_map<std::string, int64_t> symbol_env;
-            symbol_env["s"] = P;
-            for (const auto& sym : model_graph.symbol_table) {
-                symbol_env[sym] = P;
-            }
-            if (use_kv_cache) {
-                symbol_env["pos"] = 0;
-            }
+            int effective_chunk_size = (ubatch > 0 && use_kv_cache) ? ubatch : P;
+            int n_chunks = (P + effective_chunk_size - 1) / effective_chunk_size;
 
             std::vector<int32_t> tokens(P, 1);
             std::vector<int32_t> pos_vec;
@@ -229,29 +227,55 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < P; ++i) pos_vec[i] = i;
             }
 
-            executor.prepare(symbol_env, !unplanned);
-            executor.set_input(in_tid, tokens.data(), P * sizeof(int32_t));
-            if (pos_tid >= 0) {
-                executor.set_input(pos_tid, pos_vec.data(), P * sizeof(int32_t));
-            }
-
             // Warmup
             if (!no_warmup) {
-                executor.run(n_threads);
+                if (use_kv_cache) executor.reset_kv_cache();
+                for (int chunk_idx = 0; chunk_idx < n_chunks; ++chunk_idx) {
+                    int c_start = chunk_idx * effective_chunk_size;
+                    int c_len = std::min(effective_chunk_size, P - c_start);
+                    int pos = c_start;
+
+                    std::unordered_map<std::string, int64_t> symbol_env;
+                    symbol_env["s"] = c_len;
+                    for (const auto& sym : model_graph.symbol_table) {
+                        symbol_env[sym] = c_len;
+                    }
+                    if (use_kv_cache) symbol_env["pos"] = pos;
+
+                    executor.prepare(symbol_env, !unplanned);
+                    executor.set_input(in_tid, tokens.data() + c_start, c_len * sizeof(int32_t));
+                    if (pos_tid >= 0) {
+                        executor.set_input(pos_tid, pos_vec.data() + c_start, c_len * sizeof(int32_t));
+                    }
+                    executor.run(n_threads);
+                }
                 executor.synchronize();
             }
 
             std::vector<double> samples_ns;
             std::vector<double> samples_ts;
             for (int r = 0; r < repetitions; ++r) {
-                executor.prepare(symbol_env, !unplanned);
-                executor.set_input(in_tid, tokens.data(), P * sizeof(int32_t));
-                if (pos_tid >= 0) {
-                    executor.set_input(pos_tid, pos_vec.data(), P * sizeof(int32_t));
-                }
-
+                if (use_kv_cache) executor.reset_kv_cache();
                 auto t0 = std::chrono::high_resolution_clock::now();
-                executor.run(n_threads);
+                for (int chunk_idx = 0; chunk_idx < n_chunks; ++chunk_idx) {
+                    int c_start = chunk_idx * effective_chunk_size;
+                    int c_len = std::min(effective_chunk_size, P - c_start);
+                    int pos = c_start;
+
+                    std::unordered_map<std::string, int64_t> symbol_env;
+                    symbol_env["s"] = c_len;
+                    for (const auto& sym : model_graph.symbol_table) {
+                        symbol_env[sym] = c_len;
+                    }
+                    if (use_kv_cache) symbol_env["pos"] = pos;
+
+                    executor.prepare(symbol_env, !unplanned);
+                    executor.set_input(in_tid, tokens.data() + c_start, c_len * sizeof(int32_t));
+                    if (pos_tid >= 0) {
+                        executor.set_input(pos_tid, pos_vec.data() + c_start, c_len * sizeof(int32_t));
+                    }
+                    executor.run(n_threads);
+                }
                 executor.synchronize();
                 auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -442,7 +466,7 @@ int main(int argc, char** argv) {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[ggml-bench ERROR] " << e.what() << "\n";
+        std::cerr << "[ggmlc-bench ERROR] " << e.what() << "\n";
         return 1;
     }
 
