@@ -83,8 +83,12 @@ def quantize_q4_0(data: np.ndarray) -> bytes:
     n_blocks = flat.size // BLOCK_SIZE
     flat_blocks = flat.reshape(n_blocks, BLOCK_SIZE)
 
-    max_val = np.max(np.abs(flat_blocks), axis=1)
-    scale = np.where(max_val > 0, max_val / -8.0, 0.0)
+    # Match GGML's quantize_row_q4_0_ref: scale = signed_max / -8
+    # signed_max is the value (with sign) that has the largest absolute magnitude.
+    abs_vals = np.abs(flat_blocks)
+    amax_idx = np.argmax(abs_vals, axis=1)
+    signed_max = flat_blocks[np.arange(n_blocks), amax_idx]
+    scale = np.where(signed_max != 0, signed_max / -8.0, 0.0)
     scale_fp16 = scale.astype(np.float16)
 
     safe_scale = np.where(scale != 0, scale, 1.0)[:, None]
