@@ -62,13 +62,13 @@ static std::string escape_json(const std::string& str) {
 
 static void print_help(const char* prog_name) {
     std::cout << "================================================================================\n"
-              << " ggml-bench : High-Performance Standalone Neural Computation Benchmark Tool\n"
+              << " ggmlc-bench : High-Performance Standalone Neural Computation Benchmark Tool\n"
               << "================================================================================\n"
               << "Usage: " << prog_name << " [options]\n\n"
               << "Options:\n"
               << "  -h, --help                            Show this help menu and exit\n"
               << "  -m, --model <filename>                Path to compiled GGUF model\n"
-              << "  -p, --n-prompt <n1,n2,...>            Prompt prefill lengths (default: 16,64,128,256,512)\n"
+              << "  -p, --n-prompt <n1,n2,...>            Prompt prefill lengths (default: 16,64,128,256,512,1024)\n"
               << "  -n, --n-gen <n1,n2,...>               Generation/decode token counts (default: 0,32,64,128)\n"
               << "  -r, --repetitions <n>                 Number of repetitions per test (default: 5)\n"
               << "  -o, --output <json|md|csv>            Output format printed to stdout (default: json)\n"
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     }
 
     std::string model_path;
-    std::vector<int> prompt_lens = {16, 64, 128, 256, 512};
+    std::vector<int> prompt_lens = {16, 64, 128, 256, 512, 1024};
     std::vector<int> gen_lens = {0, 32, 64, 128};
     int repetitions = 5;
     std::string output_format = "json";
@@ -135,13 +135,13 @@ int main(int argc, char** argv) {
     }
 
     if (model_path.empty()) {
-        std::cerr << "[ggml-bench ERROR] No model file specified. Use '-m <path.gguf>'.\n";
+        std::cerr << "[ggmlc-bench ERROR] No model file specified. Use '-m <path.gguf>'.\n";
         return 1;
     }
 
     std::ifstream file_check(model_path, std::ios::binary | std::ios::ate);
     if (!file_check.is_open()) {
-        std::cerr << "[ggml-bench ERROR] Cannot open model file: " << model_path << "\n";
+        std::cerr << "[ggmlc-bench ERROR] Cannot open model file: " << model_path << "\n";
         return 1;
     }
     uint64_t file_size_bytes = static_cast<uint64_t>(file_check.tellg());
@@ -466,7 +466,7 @@ int main(int argc, char** argv) {
         }
 
     } catch (const std::exception& e) {
-        std::cerr << "[ggml-bench ERROR] " << e.what() << "\n";
+        std::cerr << "[ggmlc-bench ERROR] " << e.what() << "\n";
         return 1;
     }
 
