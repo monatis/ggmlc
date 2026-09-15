@@ -98,6 +98,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
     if options.enable_horizontal_mlp or options.enable_horizontal_qkv:
         _fuse_horizontal_linear_patterns(graph, options)
 
+    if options.enable_swiglu and options.enable_horizontal_mlp:
+        _fuse_swiglu_concatenated_patterns(graph)
+
     if options.enable_sdpa_transpose:
         _fuse_sdpa_transpose_patterns(graph)
 
@@ -1304,6 +1307,67 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
             else:
                 new_nodes.append(op)
         graph.nodes = new_nodes
+
+
+def _fuse_swiglu_concatenated_patterns(graph: Graph) -> None:
+    """Fuses SLICE(0..d, parent) and SLICE(d..2d, parent) feeding SWIGLU(gate, up)
+    into a single-input SWIGLU(parent), eliminating the two slice operations."""
+    producer_map: dict[int, Operation] = {}
+    consumer_map: dict[int, list[Operation]] = {}
+    for op in graph.nodes:
+        for out_id in op.outputs:
+            producer_map[out_id] = op
+        for in_id in op.inputs:
+            consumer_map.setdefault(in_id, []).append(op)
+
+    ops_to_remove: set[int] = set()
+    for op in graph.nodes:
+        if op.opcode != OpCode.SWIGLU or len(op.inputs) != 2:
+            continue
+        gate_id, up_id = op.inputs[0], op.inputs[1]
+        prod_gate = producer_map.get(gate_id)
+        prod_up = producer_map.get(up_id)
+
+        if not (prod_gate and prod_up):
+            continue
+        if prod_gate.opcode not in (OpCode.SLICE, OpCode.VIEW) or prod_up.opcode not in (
+            OpCode.SLICE,
+            OpCode.VIEW,
+        ):
+            continue
+        if len(prod_gate.inputs) < 1 or len(prod_up.inputs) < 1:
+            continue
+        if prod_gate.inputs[0] != prod_up.inputs[0]:
+            continue
+
+        parent_id = prod_gate.inputs[0]
+        # Gate and up must only be consumed by this SWIGLU op
+        if len(consumer_map.get(gate_id, [])) != 1 or len(consumer_map.get(up_id, [])) != 1:
+            continue
+
+        start0 = prod_gate.attributes.get("start", 0)
+        end0 = prod_gate.attributes.get("end", 0)
+        start1 = prod_up.attributes.get("start", 0)
+        end1 = prod_up.attributes.get("end", 0)
+
+        if start0 == 0 and end0 > 0 and start1 == end0 and end1 == 2 * end0:
+            # Gate is [0..d], Up is [d..2d] -> Standard non-swapped
+            op.inputs = [parent_id]
+            ops_to_remove.add(prod_gate.id)
+            ops_to_remove.add(prod_up.id)
+            graph.tensors.pop(gate_id, None)
+            graph.tensors.pop(up_id, None)
+        elif start1 == 0 and end1 > 0 and start0 == end1 and end0 == 2 * end1:
+            # Up is [0..d], Gate is [d..2d] -> Swapped
+            op.inputs = [parent_id]
+            op.attributes["swapped"] = 1
+            ops_to_remove.add(prod_gate.id)
+            ops_to_remove.add(prod_up.id)
+            graph.tensors.pop(gate_id, None)
+            graph.tensors.pop(up_id, None)
+
+    if ops_to_remove:
+        graph.nodes = [op for op in graph.nodes if op.id not in ops_to_remove]
 
 
 def _fuse_sdpa_transpose_patterns(graph: Graph) -> None:

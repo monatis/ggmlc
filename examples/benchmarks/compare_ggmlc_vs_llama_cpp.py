@@ -223,9 +223,7 @@ def compile_ggmlc_model(
         tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2-medium")
         dynamic_shapes = ({1: dim_s}, {1: dim_s})
     elif model_key in ("llama3.2_1b", "llama-3.2-1b"):
-        model, dummy_input, _ = load_llama_model(
-            variant="unsloth/Llama-3.2-1B-Instruct", seq_len=8
-        )
+        model, dummy_input, _ = load_llama_model(variant="unsloth/Llama-3.2-1B-Instruct", seq_len=8)
         tokenizer = BPETokenizer.from_huggingface("unsloth/Llama-3.2-1B-Instruct")
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")

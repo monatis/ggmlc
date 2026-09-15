@@ -7,42 +7,44 @@ import numpy as np
 BLOCK_SIZE = 32
 
 
-def quantize_q8_0(data: np.ndarray) -> bytes:
-    """Quantizes a float32 array into standard GGML Q8_0 format.
-
-    Each 32-element block contains a 16-bit half-precision float scale
-    and 32 signed 8-bit integers (34 bytes per 32 float values).
-
-    Args:
-        data: NumPy array of float32 values.
-
-    Returns:
-        Bytes containing Q8_0 packed binary payload.
-    """
-    flat = np.ascontiguousarray(data, dtype=np.float32).flatten()
-    n_elements = flat.size
-    if n_elements % BLOCK_SIZE != 0:
-        pad_len = BLOCK_SIZE - (n_elements % BLOCK_SIZE)
-        flat = np.pad(flat, (0, pad_len))
-
-    n_blocks = flat.size // BLOCK_SIZE
-    flat_blocks = flat.reshape(n_blocks, BLOCK_SIZE)
-
+def _quantize_q8_0_chunk(flat_blocks: np.ndarray) -> bytes:
+    n_blocks = flat_blocks.shape[0]
     max_val = np.max(np.abs(flat_blocks), axis=1)
     scale = np.where(max_val > 0, max_val / 127.0, 0.0)
     scale_fp16 = scale.astype(np.float16)
 
     safe_scale = np.where(scale != 0, scale, 1.0)[:, None]
-    qs = np.where(
-        scale[:, None] != 0,
-        np.clip(np.round(flat_blocks / safe_scale), -128, 127),
-        0,
-    ).astype(np.int8)
+    inv_scale = (1.0 / safe_scale).astype(np.float32)
+    scaled = flat_blocks * inv_scale
+    np.round(scaled, out=scaled)
+    np.clip(scaled, -128, 127, out=scaled)
+    qs = scaled.astype(np.int8)
 
     scale_bytes = scale_fp16.view(np.uint8).reshape(n_blocks, 2)
     qs_bytes = qs.view(np.uint8).reshape(n_blocks, BLOCK_SIZE)
-    block_data = np.hstack([scale_bytes, qs_bytes])
-    return block_data.tobytes()
+    return np.hstack([scale_bytes, qs_bytes]).tobytes()
+
+
+def quantize_q8_0(data: np.ndarray) -> bytes:
+    """Quantizes float32 array into standard GGML Q8_0 format.
+    Processes in cache-friendly chunks to minimize peak memory consumption."""
+    flat = np.ascontiguousarray(data, dtype=np.float32).ravel()
+    n_elements = flat.size
+    pad_len = (BLOCK_SIZE - (n_elements % BLOCK_SIZE)) % BLOCK_SIZE
+    if pad_len > 0:
+        flat = np.pad(flat, (0, pad_len))
+
+    n_blocks = flat.size // BLOCK_SIZE
+    CHUNK_BLOCKS = 65536
+    if n_blocks <= CHUNK_BLOCKS:
+        return _quantize_q8_0_chunk(flat.reshape(n_blocks, BLOCK_SIZE))
+
+    chunks = []
+    for i in range(0, n_blocks, CHUNK_BLOCKS):
+        end = min(i + CHUNK_BLOCKS, n_blocks)
+        chunk_flat = flat[i * BLOCK_SIZE : end * BLOCK_SIZE].reshape(end - i, BLOCK_SIZE).copy()
+        chunks.append(_quantize_q8_0_chunk(chunk_flat))
+    return b"".join(chunks)
 
 
 def dequantize_q8_0(raw_bytes: bytes, shape: tuple[int, ...]) -> np.ndarray:

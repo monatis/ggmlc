@@ -1173,18 +1173,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 1) {
                     struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
                     if (w) {
-                        if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
-                            w = ggml_repeat(ctx_, w, result);
-                        }
                         result = ggml_mul(ctx_, result, w);
                     }
                 }
                 if (op.inputs.size() > 2) {
                     struct ggml_tensor* b = ggml_tensors_[op.inputs[2]];
                     if (b) {
-                        if (!ggml_are_same_shape(b, result) && ggml_can_repeat(b, result)) {
-                            b = ggml_repeat(ctx_, b, result);
-                        }
                         result = ggml_add(ctx_, result, b);
                     }
                 }
@@ -1196,9 +1190,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (op.inputs.size() > 1) {
                     struct ggml_tensor* w = ggml_tensors_[op.inputs[1]];
                     if (w) {
-                        if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
-                            w = ggml_repeat(ctx_, w, result);
-                        }
                         result = ggml_mul(ctx_, result, w);
                     }
                 }
@@ -1469,9 +1460,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         if (bias->ne[0] != result->ne[0] && bias->ne[1] == result->ne[0] && bias->ne[0] == 1) {
                             bias = ggml_reshape_1d(ctx_, bias, result->ne[0]);
                         }
-                        if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
-                            bias = ggml_repeat(ctx_, bias, result);
-                        }
                         result = ggml_add(ctx_, result, bias);
                     }
                 }
@@ -1658,9 +1646,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 if (is_cuda_) {
                     struct ggml_tensor* b = in1;
-                    if (!ggml_are_same_shape(b, in0) && ggml_can_repeat(b, in0)) {
-                        b = ggml_repeat(ctx_, b, in0);
-                    }
                     result = ggml_gelu(ctx_, ggml_add(ctx_, in0, b));
                 } else {
                     result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_bias_gelu, GGML_N_TASKS_MAX, nullptr);
@@ -1675,15 +1660,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
                 result = ggml_norm(ctx_, in0, eps);
                 if (w) {
-                    if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
-                        w = ggml_repeat(ctx_, w, result);
-                    }
                     result = ggml_mul(ctx_, result, w);
                 }
                 if (b) {
-                    if (!ggml_are_same_shape(b, result) && ggml_can_repeat(b, result)) {
-                        b = ggml_repeat(ctx_, b, result);
-                    }
                     result = ggml_add(ctx_, result, b);
                 }
                 break;
@@ -1695,9 +1674,6 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
                 result = ggml_rms_norm(ctx_, in0, eps);
                 if (w) {
-                    if (!ggml_are_same_shape(w, result) && ggml_can_repeat(w, result)) {
-                        w = ggml_repeat(ctx_, w, result);
-                    }
                     result = ggml_mul(ctx_, result, w);
                 }
                 break;
@@ -1707,7 +1683,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires at least 1 input");
                 }
                 if (op.inputs.size() == 1 || in1 == nullptr) {
-                    result = ggml_swiglu(ctx_, in0);
+                    bool swapped = op.attributes.count("swapped") && op.attributes.at("swapped") != 0;
+                    if (swapped) {
+                        result = ggml_swiglu_swapped(ctx_, in0);
+                    } else {
+                        result = ggml_swiglu(ctx_, in0);
+                    }
                 } else {
                     result = ggml_swiglu_split(ctx_, in0, in1);
                 }
