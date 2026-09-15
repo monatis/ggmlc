@@ -173,6 +173,7 @@ private:
     };
     std::vector<MaskInitInfo> dynamic_causal_masks_;
     std::vector<std::pair<struct ggml_tensor*, uint32_t>> decode_rope_arange_tensors_;
+    std::vector<uint32_t> pos_input_tids_;
 
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;

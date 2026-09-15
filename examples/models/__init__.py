@@ -1,15 +1,19 @@
 """Full model architectures for ggmlc."""
 
-from examples.models.flax_models import (
-    FlaxCausalLM,
-    FlaxConvNeXt,
-    FlaxFullTransformer,
-    FlaxMLPClassifier,
-    FlaxResNet,
-    FlaxTransformerLayer,
-    FlaxViTB16,
-    load_flax_vit_b16,
-)
+try:
+    from examples.models.flax_models import (
+        FlaxCausalLM,
+        FlaxConvNeXt,
+        FlaxFullTransformer,
+        FlaxMLPClassifier,
+        FlaxResNet,
+        FlaxTransformerLayer,
+        FlaxViTB16,
+        load_flax_vit_b16,
+    )
+except (ImportError, ModuleNotFoundError):
+    pass
+
 from examples.models.hub_models import (
     load_bert_model,
     load_bge_m3_distill_model,
@@ -26,14 +30,18 @@ from examples.models.hub_models import (
     load_vit_model,
     load_whisper_model,
 )
-from examples.models.keras_models import (
-    load_keras_convnext_tiny,
-    load_keras_densenet121,
-    load_keras_efficientnet_b0,
-    load_keras_mobilenet_v3_large,
-    load_keras_mobilenet_v3_small,
-    load_keras_resnet50,
-)
+
+try:
+    from examples.models.keras_models import (
+        load_keras_convnext_tiny,
+        load_keras_densenet121,
+        load_keras_efficientnet_b0,
+        load_keras_mobilenet_v3_large,
+        load_keras_mobilenet_v3_small,
+        load_keras_resnet50,
+    )
+except (ImportError, ModuleNotFoundError):
+    pass
 
 try:
     from examples.models.kerashub_models import (

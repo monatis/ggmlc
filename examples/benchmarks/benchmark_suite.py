@@ -172,20 +172,32 @@ from examples.models.hub_models import (
     load_vit_model,
     load_whisper_model,
 )
-from examples.models.keras_models import (
-    load_keras_convnext_tiny,
-    load_keras_densenet121,
-    load_keras_efficientnet_b0,
-    load_keras_mobilenet_v3_large,
-    load_keras_mobilenet_v3_small,
-    load_keras_resnet50,
-)
-from examples.models.kerashub_models import (
-    load_kerashub_bert,
-    load_kerashub_distilbert,
-    load_kerashub_gemma3,
-    load_kerashub_gpt2,
-)
+
+try:
+    from examples.models.keras_models import (
+        load_keras_convnext_tiny,
+        load_keras_densenet121,
+        load_keras_efficientnet_b0,
+        load_keras_mobilenet_v3_large,
+        load_keras_mobilenet_v3_small,
+        load_keras_resnet50,
+    )
+
+    _KERAS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _KERAS_AVAILABLE = False
+
+try:
+    from examples.models.kerashub_models import (
+        load_kerashub_bert,
+        load_kerashub_distilbert,
+        load_kerashub_gemma3,
+        load_kerashub_gpt2,
+    )
+
+    _KERASHUB_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _KERASHUB_AVAILABLE = False
 
 
 @dataclass
@@ -514,23 +526,35 @@ class BenchmarkSuite:
                 "Audio-Seq2Seq",
                 lambda: load_whisper_model(component="decoder"),
             ),
-            # 7. JAX / Keras 3 Production Models
-            ("keras_mobilenet_v3_small", "JAX-Vision", load_keras_mobilenet_v3_small),
-            ("keras_mobilenet_v3_large", "JAX-Vision", load_keras_mobilenet_v3_large),
-            ("keras_resnet50", "JAX-Vision", load_keras_resnet50),
-            ("keras_convnext_tiny", "JAX-Vision", load_keras_convnext_tiny),
-            ("keras_densenet121", "JAX-Vision", load_keras_densenet121),
-            ("keras_efficientnet_b0", "JAX-Vision", load_keras_efficientnet_b0),
+            # 7. JAX / Flax Production Models
             ("flax_vit_b16", "JAX-Vision", load_flax_vit_b16),
-            ("kerashub_bert", "JAX-NLP", load_kerashub_bert),
-            ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
-            ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
-            ("kerashub_gemma3", "JAX-SLM", load_kerashub_gemma3),
             # 8. Multimodal Vision-Language Models
             ("clip_vision_vit_b32", "Multimodal-Vision", load_clip_vision_model),
             ("clip_text_transformer", "Multimodal-Text", load_clip_text_model),
             ("clip_multimodal_similarity", "Multimodal-E2E", load_clip_full_model),
         ]
+
+        if _KERAS_AVAILABLE:
+            all_models.extend(
+                [
+                    ("keras_mobilenet_v3_small", "JAX-Vision", load_keras_mobilenet_v3_small),
+                    ("keras_mobilenet_v3_large", "JAX-Vision", load_keras_mobilenet_v3_large),
+                    ("keras_resnet50", "JAX-Vision", load_keras_resnet50),
+                    ("keras_convnext_tiny", "JAX-Vision", load_keras_convnext_tiny),
+                    ("keras_densenet121", "JAX-Vision", load_keras_densenet121),
+                    ("keras_efficientnet_b0", "JAX-Vision", load_keras_efficientnet_b0),
+                ]
+            )
+
+        if _KERASHUB_AVAILABLE:
+            all_models.extend(
+                [
+                    ("kerashub_bert", "JAX-NLP", load_kerashub_bert),
+                    ("kerashub_distilbert", "JAX-NLP", load_kerashub_distilbert),
+                    ("kerashub_gpt2", "JAX-SLM", load_kerashub_gpt2),
+                    ("kerashub_gemma3", "JAX-SLM", load_kerashub_gemma3),
+                ]
+            )
 
         for name, category, loader in all_models:
             if selected_models and name not in selected_models:
@@ -632,6 +656,11 @@ class BenchmarkSuite:
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="GGMLC Benchmark Suite")
     parser.add_argument(
         "--backend",

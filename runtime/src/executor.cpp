@@ -742,6 +742,21 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
         }
     }
 
+    // 3. Update explicit position input tensors in-place
+    for (uint32_t tid : pos_input_tids_) {
+        auto it = ggml_tensors_.find(tid);
+        if (it != ggml_tensors_.end() && it->second && it->second->buffer) {
+            struct ggml_tensor* t = it->second;
+            if (t->type == GGML_TYPE_I32) {
+                int32_t p32 = static_cast<int32_t>(pos);
+                ggml_backend_tensor_set(t, &p32, 0, sizeof(int32_t));
+            } else if (t->type == GGML_TYPE_I64) {
+                int64_t p64 = pos;
+                ggml_backend_tensor_set(t, &p64, 0, sizeof(int64_t));
+            }
+        }
+    }
+
     if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
         cuda_graph_needs_update_ = true;
     }
@@ -768,19 +783,18 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
     bool is_decode_step = kv_cache_enabled_ && symbol_env.count("pos") > 0 && is_single_token;
 
-    bool has_pos_input = false;
+    pos_input_tids_.clear();
     for (uint32_t in_id : model_graph_.inputs) {
         auto it = model_graph_.tensors.find(in_id);
         if (it != model_graph_.tensors.end()) {
             if (it->second.name == "position_ids" || it->second.name.find("pos") != std::string::npos) {
-                has_pos_input = true;
-                break;
+                pos_input_tids_.push_back(in_id);
             }
         }
     }
 
     // Fast path: if decode graph is cached, mutate in-place
-    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !has_pos_input && !getenv("GGMLC_DISABLE_DECODE_CACHE");
+    bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !getenv("GGMLC_DISABLE_DECODE_CACHE");
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
             if (pair.first == "pos") continue;
@@ -1243,9 +1257,11 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 struct ggml_tensor* k = in1;
                 struct ggml_tensor* v = op.inputs.size() > 2 ? ggml_tensors_[op.inputs[2]] : nullptr;
                 struct ggml_tensor* mask = op.inputs.size() > 3 ? ggml_tensors_[op.inputs[3]] : nullptr;
-                if (!ggml_is_contiguous(q)) q = ggml_cont(ctx_, q);
-                if (!ggml_is_contiguous(k)) k = ggml_cont(ctx_, k);
-                if (v && !ggml_is_contiguous(v)) v = ggml_cont(ctx_, v);
+                if (!kv_cache_enabled_) {
+                    if (!ggml_is_contiguous(q)) q = ggml_cont(ctx_, q);
+                    if (!ggml_is_contiguous(k)) k = ggml_cont(ctx_, k);
+                    if (v && !ggml_is_contiguous(v)) v = ggml_cont(ctx_, v);
+                }
                 if (mask) {
                     mask = ggml_clamp(ctx_, mask, ATTN_MASK_MIN_FP16, 0.0f);
                     if (mask->type != GGML_TYPE_F16) mask = ggml_cast(ctx_, mask, GGML_TYPE_F16);
@@ -1259,6 +1275,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     scale = static_cast<float>(op.attributes.at("scale"));
                 }
                 bool is_causal = op.attributes.count("is_causal") && op.attributes.at("is_causal") != 0;
+                bool fused_transpose = op.attributes.count("fused_transpose") && op.attributes.at("fused_transpose") != 0;
 
                 if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && kv_cache_k_.count(op.id) > 0 && kv_cache_v_.count(op.id) > 0) {
                     int64_t pos = symbol_env.at("pos");
@@ -1307,7 +1324,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
                             ctx_, q, k_active, v_active, nullptr, scale, 0.0f, 0.0f
                         );
-                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
 
                         if (is_decode_step) {
                             AttnViewRefs refs;
@@ -1333,7 +1350,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
                             ctx_, q, k_active, v_active, mask_t, scale, 0.0f, 0.0f
                         );
-                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
                     }
                 } else {
                     auto is_fattn_supported = [](int64_t hd) {
@@ -1376,7 +1393,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
                             ctx_, q, k, v, mask_t, scale, 0.0f, 0.0f
                         );
-                        result = ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+                        result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
                     }
                 }
                 break;
@@ -1673,11 +1690,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!in0 || !in1) {
                     throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires 2 inputs (gate, up)");
                 }
-                if (is_cuda_) {
-                    result = ggml_mul(ctx_, ggml_silu(ctx_, in0), in1);
-                } else {
-                    result = ggml_map_custom2(ctx_, in0, in1, ggmlc_compute_forward_swiglu, GGML_N_TASKS_MAX, nullptr);
-                }
+                result = ggml_swiglu_split(ctx_, in0, in1);
                 break;
             }
             default:

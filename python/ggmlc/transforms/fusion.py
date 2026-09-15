@@ -29,6 +29,7 @@ class FusionOptions:
     enable_horizontal_mlp: bool = True
     enable_horizontal_qkv: bool = True
     enable_rope: bool = True
+    enable_sdpa_transpose: bool = True
 
 
 class OperatorFusionPass(Pass):
@@ -96,6 +97,9 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
 
     if options.enable_horizontal_mlp or options.enable_horizontal_qkv:
         _fuse_horizontal_linear_patterns(graph, options)
+
+    if options.enable_sdpa_transpose:
+        _fuse_sdpa_transpose_patterns(graph)
 
     return graph
 
@@ -1300,3 +1304,50 @@ def _fuse_horizontal_linear_patterns(graph: Graph, options: FusionOptions) -> No
             else:
                 new_nodes.append(op)
         graph.nodes = new_nodes
+
+
+def _fuse_sdpa_transpose_patterns(graph: Graph) -> None:
+    """Fuses transpose following scaled dot-product attention (SDPA):
+    SDPA(...) -> (B, H, S, D) -> TRANSPOSE(dim0=1, dim1=2) -> (B, S, H, D)
+    is fused by letting SDPA directly produce the (B, S, H, D) layout with
+    fused_transpose=1 attribute, eliminating redundant permute/transpose steps.
+    """
+    consumers: dict[int, list[Operation]] = {}
+    for n in graph.nodes:
+        for in_id in n.inputs:
+            consumers.setdefault(in_id, []).append(n)
+    state_tids = {s.id for s in graph.states}
+    graph_outs = set(graph.outputs) | state_tids
+
+    nodes_to_remove = set()
+    for n in graph.nodes:
+        if n.opcode != OpCode.SDPA:
+            continue
+        out_id = n.outputs[0]
+        if out_id in graph_outs:
+            continue
+        cons = consumers.get(out_id, [])
+        if len(cons) != 1:
+            continue
+        n_trans = cons[0]
+        if n_trans.opcode != OpCode.TRANSPOSE:
+            continue
+        d0 = n_trans.attributes.get("dim0", 0)
+        d1 = n_trans.attributes.get("dim1", 1)
+        trans_in_t = graph.tensors.get(out_id)
+        if trans_in_t is not None:
+            r = len(trans_in_t.shape.dims)
+            if d0 < 0:
+                d0 += r
+            if d1 < 0:
+                d1 += r
+        if {d0, d1} != {1, 2}:
+            continue
+
+        trans_out_id = n_trans.outputs[0]
+        n.outputs = [trans_out_id]
+        n.attributes["fused_transpose"] = 1
+        nodes_to_remove.add(n_trans.id)
+
+    if nodes_to_remove:
+        graph.nodes = [n for n in graph.nodes if n.id not in nodes_to_remove]

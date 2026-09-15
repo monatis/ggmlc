@@ -28,6 +28,24 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# On Windows, ensure CUDA bin path is in PATH for child subprocesses
+if sys.platform == "win32":
+    cuda_candidates = [
+        os.environ.get("CUDA_PATH", "") + "\\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.3\bin",
+    ]
+    for c_path in cuda_candidates:
+        if c_path and os.path.isdir(c_path) and c_path not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = c_path + os.pathsep + os.environ.get("PATH", "")
+os.environ["GGML_NO_BACKTRACE"] = "1"
+
 import numpy as np
 import torch
 
@@ -142,6 +160,7 @@ def compile_ggmlc_model(
     model_name: str,
     quantize: str = "q8_0",
     output_dir: str = "scratch",
+    force_recompile: bool = False,
 ) -> str:
     """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container."""
     import ggmlc
@@ -156,7 +175,7 @@ def compile_ggmlc_model(
     )
 
     target_path = Path(output_dir) / f"{model_name}_{quantize}.gguf"
-    if target_path.is_file():
+    if target_path.is_file() and not force_recompile:
         return str(target_path.resolve())
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +203,7 @@ def compile_ggmlc_model(
     elif model_key == "gpt2":
         model, dummy_input, _ = load_gpt2_model(seq_len=8)
         tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2")
-        dynamic_shapes = None
+        dynamic_shapes = ({1: dim_s}, {1: dim_s})
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")
 
@@ -212,6 +231,7 @@ def run_ggml_bench(
     prompt_lens: list[int],
     gen_lens: list[int],
     runs: int,
+    cuda_graph: bool = False,
 ) -> list[dict[str, Any]]:
     """Runs ggml-bench standalone C++ binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -235,6 +255,8 @@ def run_ggml_bench(
         "-o",
         "json",
     ]
+    if cuda_graph and device == "cuda":
+        cmd.append("--cuda-graph")
 
     print(f"🚀 [ggml-bench] Executing: {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -303,6 +325,13 @@ def run_llama_bench(
             records = json.loads(json_str)
             for r in records:
                 r["engine"] = "llama.cpp"
+                if not r.get("test"):
+                    n_p = r.get("n_prompt", 0)
+                    n_g = r.get("n_gen", 0)
+                    if n_p > 0:
+                        r["test"] = f"pp{n_p}"
+                    elif n_g > 0:
+                        r["test"] = f"tg{n_g}"
             return records
         return []
     except Exception as e:  # noqa: BLE001
@@ -443,15 +472,25 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
     """Verifies output logit differential between PyTorch reference and ggmlc compiled GGUF."""
     from ggmlc.runtime.runner import ModelRunner
 
-    from examples.models.hub_models import load_gpt2_model, load_qwen_model, load_smollm2_model
+    from examples.models.hub_models import (
+        load_gpt2_model,
+        load_qwen_1_5b_model,
+        load_qwen_model,
+        load_smollm2_360m_model,
+        load_smollm2_model,
+    )
 
     model_key = model_name.lower()
     seq_len = 8
-    if "smol" in model_key:
+    if model_key == "smollm2_135m":
         ref_model, dummy_input, _ = load_smollm2_model(seq_len=seq_len)
-    elif "qwen" in model_key:
-        ref_model, dummy_input, _ = load_qwen_model(seq_len=seq_len)
-    elif "gpt2" in model_key:
+    elif model_key == "smollm2_360m":
+        ref_model, dummy_input, _ = load_smollm2_360m_model(seq_len=seq_len)
+    elif model_key == "qwen2.5_0.5b":
+        ref_model, dummy_input, _ = load_qwen_model(variant="Qwen/Qwen2.5-0.5B", seq_len=seq_len)
+    elif model_key == "qwen2.5_1.5b":
+        ref_model, dummy_input, _ = load_qwen_1_5b_model(seq_len=seq_len)
+    elif model_key == "gpt2":
         ref_model, dummy_input, _ = load_gpt2_model(seq_len=seq_len)
     else:
         return {"parity_status": "SKIPPED", "max_diff": 0.0, "cosine_sim": 1.0}
@@ -609,20 +648,26 @@ def main() -> int:
         "--ggmlc-bench-bin", default=None, help="Explicit path to ggml-bench binary"
     )
     parser.add_argument(
+        "--cuda-graph", action="store_true", help="Enable CUDA graph capture in ggml-bench"
+    )
+    parser.add_argument(
         "--llama-bench-bin", default=None, help="Explicit path to llama-bench binary"
     )
     parser.add_argument(
         "--output-md",
-        default="compare_ggmlc_vs_llama_report.md",
+        default="scratch/compare_ggmlc_vs_llama_report.md",
         help="Output Markdown report path",
     )
     parser.add_argument(
         "--output-json",
-        default="compare_ggmlc_vs_llama_report.json",
+        default="scratch/compare_ggmlc_vs_llama_report.json",
         help="Output JSON report path",
     )
     parser.add_argument(
         "--skip-numerical-check", action="store_true", help="Skip differential numerical check"
+    )
+    parser.add_argument(
+        "--force-recompile", action="store_true", help="Force re-export and compilation of models"
     )
     args = parser.parse_args()
 
@@ -658,7 +703,9 @@ def main() -> int:
         print("================================================================================")
 
         # A. Compile or locate ggmlc GGUF
-        ggmlc_gguf = compile_ggmlc_model(model_name, quantize=args.quantize)
+        ggmlc_gguf = compile_ggmlc_model(
+            model_name, quantize=args.quantize, force_recompile=args.force_recompile
+        )
 
         # B. Check numerical parity
         parity_info: dict[str, Any] = {
@@ -687,6 +734,7 @@ def main() -> int:
             prompt_lens=prompt_lens,
             gen_lens=gen_lens,
             runs=args.runs,
+            cuda_graph=args.cuda_graph,
         )
 
         # D. Obtain official GGUF & run llama-bench (or fallback)
@@ -720,7 +768,9 @@ def main() -> int:
         ggml_map = {r.get("test"): r for r in ggml_records}
         llama_map = {r.get("test"): r for r in llama_records}
 
-        all_tests = sorted(set(list(ggml_map.keys()) + list(llama_map.keys())))
+        all_tests = sorted(
+            [t for t in set(list(ggml_map.keys()) + list(llama_map.keys())) if t is not None]
+        )
         model_size_bytes = os.path.getsize(ggmlc_gguf)
 
         for test_key in all_tests:
