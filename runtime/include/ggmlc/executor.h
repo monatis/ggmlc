@@ -154,6 +154,8 @@ private:
     struct AttnViewRefs {
         struct ggml_tensor* k_slot = nullptr;
         struct ggml_tensor* v_slot = nullptr;
+        struct ggml_tensor* k_cpy = nullptr;
+        struct ggml_tensor* v_cpy = nullptr;
         struct ggml_tensor* k_active = nullptr;
         struct ggml_tensor* v_active = nullptr;
         struct ggml_tensor* scores = nullptr;

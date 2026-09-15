@@ -79,9 +79,21 @@ GGUF_HUB_REGISTRY: dict[str, tuple[str, str]] = {
         "bartowski/Llama-3.2-1B-Instruct-GGUF",
         "Llama-3.2-1B-Instruct-Q8_0.gguf",
     ),
+    "llama-3.2-1b": (
+        "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "Llama-3.2-1B-Instruct-Q8_0.gguf",
+    ),
     "gpt2": (
         "QuantFactory/gpt2-GGUF",
         "gpt2.Q8_0.gguf",
+    ),
+    "gpt2_medium": (
+        "mradermacher/gpt2-medium-GGUF",
+        "gpt2-medium.Q8_0.gguf",
+    ),
+    "gpt2-medium": (
+        "mradermacher/gpt2-medium-GGUF",
+        "gpt2-medium.Q8_0.gguf",
     ),
 }
 
@@ -167,7 +179,9 @@ def compile_ggmlc_model(
     from ggmlc.pipeline.tokenizer import BPETokenizer
 
     from examples.models.hub_models import (
+        load_gpt2_medium_model,
         load_gpt2_model,
+        load_llama_model,
         load_qwen_1_5b_model,
         load_qwen_model,
         load_smollm2_360m_model,
@@ -204,6 +218,15 @@ def compile_ggmlc_model(
         model, dummy_input, _ = load_gpt2_model(seq_len=8)
         tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2")
         dynamic_shapes = ({1: dim_s}, {1: dim_s})
+    elif model_key in ("gpt2_medium", "gpt2-medium"):
+        model, dummy_input, _ = load_gpt2_medium_model(seq_len=8)
+        tokenizer = BPETokenizer.from_huggingface("openai-community/gpt2-medium")
+        dynamic_shapes = ({1: dim_s}, {1: dim_s})
+    elif model_key in ("llama3.2_1b", "llama-3.2-1b"):
+        model, dummy_input, _ = load_llama_model(
+            variant="unsloth/Llama-3.2-1B-Instruct", seq_len=8
+        )
+        tokenizer = BPETokenizer.from_huggingface("unsloth/Llama-3.2-1B-Instruct")
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")
 
@@ -217,6 +240,12 @@ def compile_ggmlc_model(
         pipeline=tokenizer,
         tasks=["text-generation"],
     )
+
+    del model
+    del dummy_input
+    import gc
+
+    gc.collect()
 
     size_mb = target_path.stat().st_size / (1024 * 1024)
     print(f"✅ Compilation finished: {target_path.name} ({size_mb:.1f} MB)", flush=True)
@@ -232,6 +261,7 @@ def run_ggml_bench(
     gen_lens: list[int],
     runs: int,
     cuda_graph: bool = False,
+    ubatch: int = 512,
 ) -> list[dict[str, Any]]:
     """Runs ggml-bench standalone C++ binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -250,6 +280,8 @@ def run_ggml_bench(
         str(runs),
         "-t",
         str(threads),
+        "-ub",
+        str(ubatch),
         "--device",
         device,
         "-o",
@@ -286,6 +318,7 @@ def run_llama_bench(
     prompt_lens: list[int],
     gen_lens: list[int],
     runs: int,
+    ubatch: int = 512,
 ) -> list[dict[str, Any]]:
     """Runs official llama-bench binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -306,6 +339,8 @@ def run_llama_bench(
         str(threads),
         "-ngl",
         ngl,
+        "-ub",
+        str(ubatch),
         "-o",
         "json",
     ]
@@ -473,7 +508,9 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
     from ggmlc.runtime.runner import ModelRunner
 
     from examples.models.hub_models import (
+        load_gpt2_medium_model,
         load_gpt2_model,
+        load_llama_model,
         load_qwen_1_5b_model,
         load_qwen_model,
         load_smollm2_360m_model,
@@ -492,6 +529,12 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
         ref_model, dummy_input, _ = load_qwen_1_5b_model(seq_len=seq_len)
     elif model_key == "gpt2":
         ref_model, dummy_input, _ = load_gpt2_model(seq_len=seq_len)
+    elif model_key in ("gpt2_medium", "gpt2-medium"):
+        ref_model, dummy_input, _ = load_gpt2_medium_model(seq_len=seq_len)
+    elif model_key in ("llama3.2_1b", "llama-3.2-1b"):
+        ref_model, dummy_input, _ = load_llama_model(
+            variant="unsloth/Llama-3.2-1B-Instruct", seq_len=seq_len
+        )
     else:
         return {"parity_status": "SKIPPED", "max_diff": 0.0, "cosine_sim": 1.0}
 
@@ -500,6 +543,10 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
         if isinstance(ref_out, tuple):
             ref_out = ref_out[0]
         ref_arr = ref_out.detach().cpu().numpy()
+    del ref_model
+    import gc
+
+    gc.collect()
 
     runner = ModelRunner(ggmlc_gguf_path, device="cpu")
     input_arrays = [t.detach().cpu().numpy() for t in dummy_input]
@@ -507,6 +554,8 @@ def verify_numerical_parity(model_name: str, ggmlc_gguf_path: str) -> dict[str, 
     actual_out = runner(*input_arrays, symbols=syms)
     if isinstance(actual_out, dict):
         actual_out = next(iter(actual_out.values()))
+    del runner
+    gc.collect()
 
     max_diff = float(np.max(np.abs(ref_arr - actual_out)))
     flat_ref = ref_arr.flatten().astype(np.float64)
@@ -629,8 +678,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--models",
-        default="smollm2_135m,gpt2",
-        help="Comma-separated models to benchmark (e.g. smollm2_135m,smollm2_360m,qwen2.5_0.5b,gpt2)",
+        default="smollm2_360m,qwen2.5_0.5b,gpt2_medium,llama3.2_1b",
+        help="Comma-separated models to benchmark (e.g. smollm2_360m,qwen2.5_0.5b,gpt2_medium,llama3.2_1b)",
     )
     parser.add_argument(
         "--quantize", choices=["q8_0", "f16"], default="q8_0", help="Quantization format"
@@ -638,6 +687,9 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=5, help="Number of benchmark iterations")
     parser.add_argument("--warmup", type=int, default=2, help="Number of warmup iterations")
     parser.add_argument("--threads", type=int, default=4, help="CPU worker threads")
+    parser.add_argument(
+        "--ubatch", type=int, default=512, help="Prefill physical chunk size (ubatch)"
+    )
     parser.add_argument(
         "--prompt-lens", default="16,64,128", help="Prompt sequence lengths (comma-separated)"
     )
@@ -735,6 +787,7 @@ def main() -> int:
             gen_lens=gen_lens,
             runs=args.runs,
             cuda_graph=args.cuda_graph,
+            ubatch=args.ubatch,
         )
 
         # D. Obtain official GGUF & run llama-bench (or fallback)
@@ -750,6 +803,7 @@ def main() -> int:
                     prompt_lens=prompt_lens,
                     gen_lens=gen_lens,
                     runs=args.runs,
+                    ubatch=args.ubatch,
                 )
             else:
                 llama_records = run_llama_python_fallback(

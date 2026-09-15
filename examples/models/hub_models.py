@@ -44,11 +44,14 @@ def load_minilm_model(seq_len: int = 16) -> tuple[nn.Module, tuple[torch.Tensor,
     return MiniLMWrapper(model), example_input, input_names
 
 
-def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
-    """Loads real Hugging Face GPT-2 checkpoint."""
+def load_gpt2_model(
+    variant: str = "openai-community/gpt2",
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads real Hugging Face GPT-2 checkpoint (e.g. gpt2, gpt2-medium)."""
     from transformers import GPT2LMHeadModel
 
-    model = GPT2LMHeadModel.from_pretrained("openai-community/gpt2").eval()
+    model = GPT2LMHeadModel.from_pretrained(variant).eval()
     base_ids = [542, 67, 876, 414, 26, 335, 620, 924]
     if seq_len <= len(base_ids):
         input_ids = torch.tensor([base_ids[:seq_len]], dtype=torch.int32)
@@ -67,36 +70,39 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
             self.wpe = base.transformer.wpe
             self.ln_f = base.transformer.ln_f
             self.lm_head = base.lm_head
-            self.num_heads = 12
-            self.head_dim = 64
+            self.hidden_size = base.config.n_embd
+            self.num_heads = base.config.n_head
+            self.head_dim = self.hidden_size // self.num_heads
             self.layers = nn.ModuleList()
 
+            hidden = self.hidden_size
+            mlp_dim = 4 * hidden
             for h in base.transformer.h:
-                w_qkv = h.attn.c_attn.weight  # [768, 2304]
-                b_qkv = h.attn.c_attn.bias  # [2304]
+                w_qkv = h.attn.c_attn.weight  # [hidden, 3 * hidden]
+                b_qkv = h.attn.c_attn.bias  # [3 * hidden]
 
-                q_proj = nn.Linear(768, 768)
-                k_proj = nn.Linear(768, 768)
-                v_proj = nn.Linear(768, 768)
+                q_proj = nn.Linear(hidden, hidden)
+                k_proj = nn.Linear(hidden, hidden)
+                v_proj = nn.Linear(hidden, hidden)
 
-                q_proj.weight.data = w_qkv[:, :768].t().contiguous()
-                q_proj.bias.data = b_qkv[:768].contiguous()
+                q_proj.weight.data = w_qkv[:, :hidden].t().contiguous()
+                q_proj.bias.data = b_qkv[:hidden].contiguous()
 
-                k_proj.weight.data = w_qkv[:, 768:1536].t().contiguous()
-                k_proj.bias.data = b_qkv[768:1536].contiguous()
+                k_proj.weight.data = w_qkv[:, hidden : 2 * hidden].t().contiguous()
+                k_proj.bias.data = b_qkv[hidden : 2 * hidden].contiguous()
 
-                v_proj.weight.data = w_qkv[:, 1536:].t().contiguous()
-                v_proj.bias.data = b_qkv[1536:].contiguous()
+                v_proj.weight.data = w_qkv[:, 2 * hidden :].t().contiguous()
+                v_proj.bias.data = b_qkv[2 * hidden :].contiguous()
 
-                out_proj = nn.Linear(768, 768)
+                out_proj = nn.Linear(hidden, hidden)
                 out_proj.weight.data = h.attn.c_proj.weight.t().contiguous()
                 out_proj.bias.data = h.attn.c_proj.bias.contiguous()
 
-                mlp_fc = nn.Linear(768, 3072)
+                mlp_fc = nn.Linear(hidden, mlp_dim)
                 mlp_fc.weight.data = h.mlp.c_fc.weight.t().contiguous()
                 mlp_fc.bias.data = h.mlp.c_fc.bias.contiguous()
 
-                mlp_proj = nn.Linear(3072, 768)
+                mlp_proj = nn.Linear(mlp_dim, hidden)
                 mlp_proj.weight.data = h.mlp.c_proj.weight.t().contiguous()
                 mlp_proj.bias.data = h.mlp.c_proj.bias.contiguous()
 
@@ -162,6 +168,13 @@ def load_gpt2_model(seq_len: int = 8) -> tuple[nn.Module, tuple[torch.Tensor, ..
     del model
     gc.collect()
     return wrapped, example_input, input_names
+
+
+def load_gpt2_medium_model(
+    seq_len: int = 8,
+) -> tuple[nn.Module, tuple[torch.Tensor, ...], list[str]]:
+    """Loads GPT-2 Medium (355M) checkpoint."""
+    return load_gpt2_model(variant="openai-community/gpt2-medium", seq_len=seq_len)
 
 
 def load_qwen_model(
@@ -452,7 +465,12 @@ def load_smollm2_model(
             h = self.norm(h)
             return self.lm_head(h)
 
-    return SmolLM2Wrapper(model), example_input, input_names
+    wrapped = SmolLM2Wrapper(model)
+    import gc
+
+    del model
+    gc.collect()
+    return wrapped, example_input, input_names
 
 
 def load_smollm2_360m_model(

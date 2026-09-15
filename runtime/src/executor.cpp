@@ -711,6 +711,15 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
         refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
         refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
 
+        if (refs.k_cpy) {
+            refs.k_cpy->view_offs = refs.k_slot->view_offs;
+            refs.k_cpy->data = refs.k_slot->data;
+        }
+        if (refs.v_cpy) {
+            refs.v_cpy->view_offs = refs.v_slot->view_offs;
+            refs.v_cpy->data = refs.v_slot->data;
+        }
+
         // Active sequence length
         int64_t s_kv = pos + 1;
         refs.k_active->ne[1] = s_kv;
@@ -1303,8 +1312,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     );
 
                     // Copy new k and v into cache
-                    ggml_build_forward_expand(cgraph_, ggml_cpy(ctx_, k, k_slot));
-                    ggml_build_forward_expand(cgraph_, ggml_cpy(ctx_, v, v_slot));
+                    struct ggml_tensor* k_cpy = ggml_cpy(ctx_, k, k_slot);
+                    struct ggml_tensor* v_cpy = ggml_cpy(ctx_, v, v_slot);
+                    ggml_build_forward_expand(cgraph_, k_cpy);
+                    ggml_build_forward_expand(cgraph_, v_cpy);
 
                     // Active keys and values up to pos + s_q
                     int64_t s_kv = pos + s_q;
@@ -1330,6 +1341,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             AttnViewRefs refs;
                             refs.k_slot = k_slot;
                             refs.v_slot = v_slot;
+                            refs.k_cpy = k_cpy;
+                            refs.v_cpy = v_cpy;
                             refs.k_active = k_active;
                             refs.v_active = v_active;
                             refs.slot_base_offset_k = base_slot_offset_k;
@@ -1372,6 +1385,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         struct ggml_tensor* kq_soft = ggml_soft_max(ctx_, kq_scaled);
                         struct ggml_tensor* v_t = ggml_cont(ctx_, ggml_transpose(ctx_, v));
                         result = ggml_mul_mat(ctx_, v_t, kq_soft);
+                        if (fused_transpose) {
+                            result = ggml_permute(ctx_, result, 0, 2, 1, 3);
+                        }
                     } else {
                         int64_t s_q = q->ne[1];
                         int64_t s_k = k->ne[1];
@@ -1686,11 +1702,15 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 break;
             }
-            case 203: { // GGML_OP_CUSTOM_SWIGLU: in0=gate, in1=up
-                if (!in0 || !in1) {
-                    throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires 2 inputs (gate, up)");
+            case 203: { // GGML_OP_CUSTOM_SWIGLU: in0=gate, in1=up, or single concatenated input
+                if (!in0) {
+                    throw std::runtime_error("GGML_OP_CUSTOM_SWIGLU requires at least 1 input");
                 }
-                result = ggml_swiglu_split(ctx_, in0, in1);
+                if (op.inputs.size() == 1 || in1 == nullptr) {
+                    result = ggml_swiglu(ctx_, in0);
+                } else {
+                    result = ggml_swiglu_split(ctx_, in0, in1);
+                }
                 break;
             }
             default:
