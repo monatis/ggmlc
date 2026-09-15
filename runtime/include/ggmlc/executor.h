@@ -67,6 +67,7 @@ public:
     void reset_kv_cache();
     bool has_kv_cache() const { return kv_cache_buffer_ != nullptr || paged_kv_enabled_; }
     void set_decode_pos(int64_t pos);
+    void set_chunk_pos(int64_t pos, int64_t s_q);
 
     // VMM Paged KV Cache management (Driver-level virtual memory mapping)
     void init_paged_kv_cache(size_t max_batch = 8, size_t max_ctx = 2048);
@@ -149,8 +150,9 @@ private:
     struct ggml_context* ctx_kv_cache_ = nullptr;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_k_;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_v_;
+    struct ggml_tensor* shared_mask_tensor_ = nullptr;
 
-    // Decode Graph Cache: static execution graph and buffer for S=1 decode
+    // Decode & Chunk Graph Cache: static execution graph and buffer for autoregressive steps
     struct AttnViewRefs {
         struct ggml_tensor* k_slot = nullptr;
         struct ggml_tensor* v_slot = nullptr;
@@ -158,6 +160,7 @@ private:
         struct ggml_tensor* v_cpy = nullptr;
         struct ggml_tensor* k_active = nullptr;
         struct ggml_tensor* v_active = nullptr;
+        struct ggml_tensor* mask = nullptr;
         struct ggml_tensor* scores = nullptr;
         struct ggml_tensor* probs = nullptr;
         struct ggml_tensor* v_t = nullptr;
@@ -167,6 +170,11 @@ private:
     bool decode_graph_cached_ = false;
     int64_t decode_cached_pos_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> decode_attn_views_;
+
+    bool chunk_graph_cached_ = false;
+    int64_t chunk_cached_pos_ = -1;
+    int64_t chunk_cached_s_ = -1;
+    std::unordered_map<uint32_t, AttnViewRefs> chunk_attn_views_;
     struct MaskInitInfo {
         struct ggml_tensor* mask_tensor = nullptr;
         int64_t pos = 0;

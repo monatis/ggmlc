@@ -689,7 +689,9 @@ def main() -> int:
         "--ubatch", type=int, default=512, help="Prefill physical chunk size (ubatch)"
     )
     parser.add_argument(
-        "--prompt-lens", default="16,64,128", help="Prompt sequence lengths (comma-separated)"
+        "--prompt-lens",
+        default="16,64,128,256,512,1024",
+        help="Prompt sequence lengths (comma-separated)",
     )
     parser.add_argument(
         "--gen-lens", default="32,64", help="Autoregressive generation lengths (comma-separated)"
@@ -726,14 +728,14 @@ def main() -> int:
     gen_lens = [int(n.strip()) for n in args.gen_lens.split(",") if n.strip()]
 
     # 1. Locate binaries
-    ggml_bench_bin = find_binary("ggml-bench", args.ggmlc_bench_bin)
+    ggml_bench_bin = find_binary("ggmlc-bench", args.ggmlc_bench_bin) or find_binary("ggml-bench", args.ggmlc_bench_bin)
     if not ggml_bench_bin:
         print(
-            "❌ Error: `ggml-bench` binary not found! Please build it via CMake first.",
+            "❌ Error: `ggmlc-bench` binary not found! Please build it via CMake first.",
             file=sys.stderr,
         )
         return 1
-    print(f"✅ Found ggml-bench binary: {ggml_bench_bin}")
+    print(f"✅ Found ggmlc-bench binary: {ggml_bench_bin}")
 
     llama_bench_bin = find_binary("llama-bench", args.llama_bench_bin)
     if llama_bench_bin:
