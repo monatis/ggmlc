@@ -222,16 +222,17 @@ print("Generated text:", text)
 ./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4
 ```
 
-#### Autoregressive decode: `ggmlc-bench` vs `llama-bench` (RTX 4050, Q8_0, `p=0 n=32`)
+#### Autoregressive decode + prefill vs `llama-bench` (RTX 4050, Q8_0)
 
-After llama.cpp-style `ggml_set_rows` KV writes and padded `n_kv`, live decode matches frozen CUDA-graph replay:
+After `ggml_set_rows` KV writes, padded `n_kv`, and strided fused-QKV `VIEW→RESHAPE` (zero CONT):
 
-| Model | `ggmlc` tok/s | `llama.cpp` tok/s | Ratio |
-| :--- | ---: | ---: | ---: |
-| **SmolLM2-135M** | **287.3** | 279.0 | **1.03x** |
-| **SmolLM2-360M** | **192.5** (replay 196.5) | ~194 (prior same harness) | **~1.0x** |
+| Model | test | `ggmlc` | `llama.cpp` | Ratio |
+| :--- | :--- | ---: | ---: | ---: |
+| **SmolLM2-135M** | tg32 | **~302** | 279.0 | **≥1.03x** |
+| **SmolLM2-135M** | pp512 | **15856** | 15660 | **1.01x** |
+| **SmolLM2-360M** | tg32 | **192.5** (replay 196.5) | ~194 | **~1.0x** |
 
-Controls: `GGMLC_DISABLE_SET_ROWS=1` drops 360M decode to 140 tok/s. Full isolation write-up: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md#7-bottleneck-isolation-decode-cuda-graphs).
+A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md#7-bottleneck-isolation-decode-cuda-graphs).
 
 ---
 

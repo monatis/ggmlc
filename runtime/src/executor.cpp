@@ -62,6 +62,59 @@ bool env_flag_enabled(const char* name) {
     return e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T';
 }
 
+// Reinterpret a row-strided fused-QKV (or gate_up) slice as a head-split layout
+// without CONT. Only matches VIEW into a wider parent where the outer stride
+// still carries the packed-parent gap (nb[1] > ne[0]*nb[0]).
+struct ggml_tensor* try_reshape_strided_view(
+    struct ggml_context* ctx,
+    struct ggml_tensor* in0,
+    const std::array<int64_t, 4>& ne
+) {
+    if (!in0 || !ctx) return nullptr;
+    if (!in0->view_src) return nullptr;
+    if (ggml_nelements(in0) != ne[0] * ne[1] * ne[2] * ne[3]) return nullptr;
+    if (!ggml_is_contiguous_rows(in0)) return nullptr;
+    // Must be a slice of a wider packed parent (fused QKV / gate_up).
+    if (in0->view_src->ne[0] <= in0->ne[0]) return nullptr;
+    if (in0->nb[1] <= in0->ne[0] * in0->nb[0]) return nullptr;
+
+    // Split ne[0] -> (ne[0], ne[1]) while keeping trailing dims: [E, S, A, B] -> [D, H, S, A]
+    if (in0->ne[0] == ne[0] * ne[1] &&
+        in0->ne[1] == ne[2] &&
+        in0->ne[2] == ne[3] &&
+        in0->ne[3] == 1) {
+        const size_t nb0 = in0->nb[0];
+        const size_t nb1 = nb0 * static_cast<size_t>(ne[0]);
+        const size_t nb2 = in0->nb[1];
+        const size_t nb3 = nb2 * static_cast<size_t>(ne[2]);
+        return ggml_view_4d(ctx, in0, ne[0], ne[1], ne[2], ne[3], nb1, nb2, nb3, 0);
+    }
+
+    // [E, S, 1, 1] -> [D, H, S, 1]
+    if (in0->ne[0] == ne[0] * ne[1] &&
+        in0->ne[1] == ne[2] &&
+        ne[3] == 1 &&
+        in0->ne[2] == 1 && in0->ne[3] == 1) {
+        const size_t nb0 = in0->nb[0];
+        const size_t nb1 = nb0 * static_cast<size_t>(ne[0]);
+        const size_t nb2 = in0->nb[1];
+        const size_t nb3 = nb2 * static_cast<size_t>(ne[2]);
+        return ggml_view_4d(ctx, in0, ne[0], ne[1], ne[2], ne[3], nb1, nb2, nb3, 0);
+    }
+
+    return nullptr;
+}
+
+struct ggml_tensor* reshape4d_contig(
+    struct ggml_context* ctx,
+    struct ggml_tensor* t,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3
+) {
+    if (!t) return nullptr;
+    if (!ggml_is_contiguous(t)) t = ggml_cont(ctx, t);
+    return ggml_reshape_4d(ctx, t, ne0, ne1, ne2, ne3);
+}
+
 void fill_f16_causal_mask(struct ggml_tensor* mask, int64_t pos, int64_t s_q, int64_t s_kv) {
     if (!mask || mask->buffer == nullptr || s_q <= 0 || s_kv <= 0) return;
     std::vector<ggml_fp16_t> mask_data(static_cast<size_t>(s_kv * s_q));
@@ -1163,10 +1216,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
             // If a or b is a 1D channel vector matching the other's channel dim (GGML dim 2), reshape to [1, 1, C, 1]
             if (a->ne[1] == 1 && a->ne[2] == 1 && a->ne[3] == 1 && a->ne[0] == b->ne[2]) {
-                a = ggml_reshape_4d(ctx_, a, 1, 1, a->ne[0], 1);
+                a = reshape4d_contig(ctx_, a, 1, 1, a->ne[0], 1);
             }
             if (b->ne[1] == 1 && b->ne[2] == 1 && b->ne[3] == 1 && b->ne[0] == a->ne[2]) {
-                b = ggml_reshape_4d(ctx_, b, 1, 1, b->ne[0], 1);
+                b = reshape4d_contig(ctx_, b, 1, 1, b->ne[0], 1);
             }
 
             if (ggml_can_repeat(b, a)) return {a, b};
@@ -1216,7 +1269,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int64_t in_elements = in0->ne[0] * in0->ne[1] * in0->ne[2] * in0->ne[3];
                 int64_t out_elements = out_ne[0] * out_ne[1] * out_ne[2] * out_ne[3];
                 if (in_elements == out_elements) {
-                    result = ggml_reshape_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                    result = reshape4d_contig(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 } else {
                     result = ggml_repeat_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 }
@@ -1273,6 +1326,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_SQRT: {
+                // CUDA unary kernels require contiguous src0 (unary.cu).
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 if (op.attributes.count("is_rsqrt") && op.attributes.at("is_rsqrt")) {
                     struct ggml_tensor* sqrt_x = ggml_sqrt(ctx_, in0);
                     result = ggml_div(ctx_, sqrt_x, in0);
@@ -1282,6 +1337,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_SQR: {
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 float exp = 2.0f;
                 if (op.attributes.count("exponent")) {
                     exp = static_cast<float>(op.attributes.at("exponent"));
@@ -1304,7 +1360,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else if (g_dim >= 2) {
                     // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
-                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    struct ggml_tensor* flat_hw = reshape4d_contig(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
                     flat_hw = ggml_cont(ctx_, flat_hw);
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_mean(ctx_, t);
@@ -1312,7 +1368,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 } else {
                     result = ggml_mean(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_SUM:
@@ -1325,7 +1381,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else if (g_dim >= 2) {
                     // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
-                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    struct ggml_tensor* flat_hw = reshape4d_contig(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
                     flat_hw = ggml_cont(ctx_, flat_hw);
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_sum_rows(ctx_, t);
@@ -1333,19 +1389,22 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 } else {
                     result = ggml_sum_rows(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_CONT:
                 result = ggml_cont(ctx_, in0);
                 break;
             case GGML_OP_SIN:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_sin(ctx_, in0);
                 break;
             case GGML_OP_COS:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_cos(ctx_, in0);
                 break;
             case GGML_OP_LOG:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_log(ctx_, in0);
                 break;
             case GGML_OP_UNARY: {
@@ -1365,6 +1424,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         }
                     }
                 }
+                // Soft-cap / activations on fused-QKV views (e.g. Gemma3 tanh) need CONT;
+                // keep the VIEW itself non-contiguous for the RoPE→FA prefill path.
+                if (act_in && !ggml_is_contiguous(act_in)) act_in = ggml_cont(ctx_, act_in);
                 auto it = op.attributes.find("unary_op");
                 int u = (it != op.attributes.end()) ? static_cast<int>(it->second) : 6; // default RELU
                 if (u == 6) { // RELU
@@ -1436,7 +1498,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     raw_rows = ggml_cast(ctx_, raw_rows, GGML_TYPE_I64);
                 }
                 const auto& out_ne = concrete_shapes_[out_id];
-                result = ggml_reshape_4d(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_ROPE: {
@@ -1788,21 +1850,60 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_RESHAPE: {
                 const auto& ne = concrete_shapes_[out_id];
+                // Prefer a strided view over CONT for fused-QKV VIEW->RESHAPE->ROPE/FA.
+                // GGMLC_RESHAPE_FORCE_CONT=1 restores eager materialization for A/B.
+                if (in0 && !ggml_is_contiguous(in0) && !env_flag_enabled("GGMLC_RESHAPE_FORCE_CONT")) {
+                    struct ggml_tensor* viewed = try_reshape_strided_view(ctx_, in0, ne);
+                    if (viewed) {
+                        result = viewed;
+                        break;
+                    }
+                }
                 if (in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
+                result = reshape4d_contig(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
                 break;
             }
             case GGML_OP_PERMUTE: {
-                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
+                // Keep permutes as metadata views when every consumer is FlashAttention
+                // (RoPE->[D,H,S]->PERMUTE->[D,S,H]->FA). Vision graphs that feed CONV/LINEAR
+                // after a permute still need CONT. GGMLC_PERMUTE_FORCE_CONT=1 always materializes.
                 int ax0 = op.attributes.count("axis0") ? static_cast<int>(op.attributes.at("axis0")) : 1;
                 int ax1 = op.attributes.count("axis1") ? static_cast<int>(op.attributes.at("axis1")) : 0;
                 int ax2 = op.attributes.count("axis2") ? static_cast<int>(op.attributes.at("axis2")) : 2;
                 int ax3 = op.attributes.count("axis3") ? static_cast<int>(op.attributes.at("axis3")) : 3;
                 result = ggml_permute(ctx_, in0, ax0, ax1, ax2, ax3);
-                if (ggml_nelements(result) < 10000000) {
-                    result = ggml_cont(ctx_, result);
+
+                bool force_cont = env_flag_enabled("GGMLC_PERMUTE_FORCE_CONT");
+                bool fa_only = !op.outputs.empty();
+                if (fa_only && !force_cont) {
+                    const uint32_t pout = op.outputs[0];
+                    bool saw_consumer = false;
+                    for (const auto& other : model_graph_.ops) {
+                        bool uses = false;
+                        for (uint32_t iid : other.inputs) {
+                            if (iid == pout) { uses = true; break; }
+                        }
+                        if (!uses) continue;
+                        saw_consumer = true;
+                        if (other.opcode != GGML_OP_FLASH_ATTN_EXT) {
+                            fa_only = false;
+                            break;
+                        }
+                    }
+                    if (!saw_consumer) fa_only = false;
+                } else {
+                    fa_only = false;
+                }
+
+                if (force_cont || !fa_only) {
+                    if (in0 && !ggml_is_contiguous(in0) && force_cont) {
+                        // already permuted from possibly non-contig src; materialize result
+                    }
+                    if (ggml_nelements(result) < 10000000) {
+                        result = ggml_cont(ctx_, result);
+                    }
                 }
                 break;
             }
@@ -1815,7 +1916,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
                 int64_t start = op.attributes.count("start") ? op.attributes.at("start") : 0;
                 int64_t step = op.attributes.count("step") ? op.attributes.at("step") : 1;
-                if (in0 && (!ggml_is_contiguous(in0) || in0->view_src != nullptr)) {
+                // Default: keep QKV fusion slices as non-contiguous views (zero copy).
+                // GGMLC_VIEW_FORCE_CONT=1 restores eager materialization for A/B.
+                if (env_flag_enabled("GGMLC_VIEW_FORCE_CONT")) {
+                    if (in0 && (!ggml_is_contiguous(in0) || in0->view_src != nullptr)) {
+                        in0 = ggml_cont(ctx_, in0);
+                    }
+                } else if (in0 && in0->view_src != nullptr && !ggml_is_contiguous(in0)) {
+                    // Break pathological view-of-view chains that break offset math.
                     in0 = ggml_cont(ctx_, in0);
                 }
                 size_t offset = start * in0->nb[g_dim];
@@ -1823,7 +1931,11 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 size_t nb2 = in0->nb[2] * (g_dim == 2 ? step : 1);
                 size_t nb3 = in0->nb[3] * (g_dim == 3 ? step : 1);
                 struct ggml_tensor* v = ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset);
-                result = ggml_is_contiguous(v) ? v : ggml_cont(ctx_, v);
+                if (env_flag_enabled("GGMLC_VIEW_FORCE_CONT") && !ggml_is_contiguous(v)) {
+                    result = ggml_cont(ctx_, v);
+                } else {
+                    result = v;
+                }
                 break;
             }
             case GGML_OP_ARGMAX: {
@@ -1833,7 +1945,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 result = ggml_argmax(ctx_, in0);
                 const auto& out_ne = concrete_shapes_[out_id];
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_CONCAT: {
@@ -1861,10 +1973,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 bool is_1d = op.attributes.count("is_1d") && op.attributes.at("is_1d") != 0;
                 if (is_1d) {
                     if (in0->ne[3] == 1) {
-                        in0 = ggml_reshape_4d(ctx_, in0, in0->ne[0], 1, in0->ne[1], in0->ne[2]);
+                        in0 = reshape4d_contig(ctx_, in0, in0->ne[0], 1, in0->ne[1], in0->ne[2]);
                     }
                     if (in1->ne[3] == 1) {
-                        in1 = ggml_reshape_4d(ctx_, in1, in1->ne[0], 1, in1->ne[1], in1->ne[2]);
+                        in1 = reshape4d_contig(ctx_, in1, in1->ne[0], 1, in1->ne[1], in1->ne[2]);
                     }
                 }
                 int s0 = op.attributes.count("stride_w") ? static_cast<int>(op.attributes.at("stride_w")) : 1;
@@ -1879,7 +1991,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     if (bias) {
                         if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
-                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                            bias = reshape4d_contig(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
                         if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
@@ -1891,7 +2003,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_relu(ctx_, result);
                 }
                 if (is_1d && result->ne[1] == 1) {
-                    result = ggml_reshape_4d(ctx_, result, result->ne[0], result->ne[2], result->ne[3], 1);
+                    result = reshape4d_contig(ctx_, result, result->ne[0], result->ne[2], result->ne[3], 1);
                 }
                 break;
             }
@@ -1909,7 +2021,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     if (bias) {
                         if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
-                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                            bias = reshape4d_contig(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
                         if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
@@ -2030,18 +2142,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    // Ensure all output tensors are anchored at the end of cgraph_ so that
-    // ggml_gallocr treats them as live outputs throughout execution and never
-    // frees or reuses their memory buffers for subsequent intermediate operations.
-    for (uint32_t out_id : model_graph_.outputs) {
-        if (ggml_tensors_.count(out_id)) {
-            struct ggml_tensor* out_t = ggml_tensors_[out_id];
-            ggml_set_output(out_t);
-            struct ggml_tensor* anchor = ggml_reshape_4d(ctx_, out_t, out_t->ne[0], out_t->ne[1], out_t->ne[2], out_t->ne[3]);
-            ggml_set_name(anchor, "output_anchor");
-            ggml_build_forward_expand(cgraph_, anchor);
-        }
-    }
+            // Ensure all output tensors are anchored at the end of cgraph_ so that
+            // ggml_gallocr treats them as live outputs throughout execution and never
+            // frees or reuses their memory buffers for subsequent intermediate operations.
+            for (uint32_t out_id : model_graph_.outputs) {
+                if (ggml_tensors_.count(out_id)) {
+                    struct ggml_tensor* out_t = ggml_tensors_[out_id];
+                    ggml_set_output(out_t);
+                    struct ggml_tensor* anchor = reshape4d_contig(
+                        ctx_, out_t, out_t->ne[0], out_t->ne[1], out_t->ne[2], out_t->ne[3]);
+                    ggml_set_name(anchor, "output_anchor");
+                    ggml_build_forward_expand(cgraph_, anchor);
+                }
+            }
 
     // 4. Allocate tensor storage for compute activations on backend (CPU or CUDA)
     if (enable_arena_reuse) {
