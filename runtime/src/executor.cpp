@@ -212,6 +212,7 @@ ModelExecutor::~ModelExecutor() {
         ggml_threadpool_free(cpu_threadpool_);
         cpu_threadpool_ = nullptr;
     }
+    clear_all_graph_buckets();
     if (galloc_) {
         ggml_gallocr_free(galloc_);
         galloc_ = nullptr;
@@ -502,9 +503,12 @@ void ModelExecutor::reset_kv_cache() {
         for (int i = 0; i < static_cast<int>(paged_slots_.size()); ++i) {
             paged_kv_free_slot(i);
         }
+        // Paged slot teardown invalidates view offsets into VMM windows.
+        clear_all_graph_buckets();
         decode_graph_cached_ = false;
         decode_attn_views_.clear();
         decode_rope_arange_tensors_.clear();
+        decode_cached_n_kv_ = -1;
         chunk_graph_cached_ = false;
         chunk_attn_views_.clear();
         chunk_cached_pos_ = -1;
@@ -522,14 +526,8 @@ void ModelExecutor::reset_kv_cache() {
             ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
         }
     }
-    decode_graph_cached_ = false;
-    decode_attn_views_.clear();
-    decode_rope_arange_tensors_.clear();
-    chunk_graph_cached_ = false;
-    chunk_attn_views_.clear();
-    chunk_cached_pos_ = -1;
-    chunk_cached_s_ = -1;
-    chunk_cached_n_kv_ = -1;
+    // Keep prepared (s, n_kv) graph buckets alive across resets — llama.cpp
+    // likewise reuses can_reuse graphs after clearing KV contents.
 }
 
 void ModelExecutor::init_paged_kv_cache(size_t max_batch, size_t max_ctx) {
@@ -820,6 +818,265 @@ void ModelExecutor::paged_kv_extract_page_handles(
     }
 }
 
+int64_t ModelExecutor::graph_bucket_key(int64_t s, int64_t n_kv) {
+    return (s << 32) ^ n_kv;
+}
+
+void ModelExecutor::free_prepared_bucket(PreparedGraphBucket& bucket) {
+    if (bucket.galloc) {
+        ggml_gallocr_free(bucket.galloc);
+        bucket.galloc = nullptr;
+    }
+    if (bucket.buffer) {
+        ggml_backend_buffer_free(bucket.buffer);
+        bucket.buffer = nullptr;
+    }
+    if (bucket.ctx) {
+        ggml_free(bucket.ctx);
+        bucket.ctx = nullptr;
+    }
+    bucket.cgraph = nullptr;
+    bucket.compute_tensors.clear();
+    bucket.attn_views.clear();
+    bucket.kv_indices = nullptr;
+    bucket.kv_work_mask = nullptr;
+    bucket.dynamic_causal_masks.clear();
+    bucket.rope_arange_tensors.clear();
+    bucket.concrete_shapes.clear();
+    bucket.custom_params.clear();
+    bucket.s = -1;
+    bucket.n_kv = -1;
+    bucket.pos = -1;
+}
+
+void ModelExecutor::clear_decode_graph_buckets() {
+    for (auto& pair : decode_graph_buckets_) {
+        free_prepared_bucket(pair.second);
+    }
+    decode_graph_buckets_.clear();
+}
+
+void ModelExecutor::clear_chunk_graph_buckets() {
+    for (auto& pair : chunk_graph_buckets_) {
+        free_prepared_bucket(pair.second);
+    }
+    chunk_graph_buckets_.clear();
+}
+
+void ModelExecutor::clear_all_graph_buckets() {
+    clear_decode_graph_buckets();
+    clear_chunk_graph_buckets();
+}
+
+void ModelExecutor::relink_ggml_tensors_from_compute() {
+    ggml_tensors_.clear();
+    for (const auto& pair : weight_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+    for (const auto& pair : state_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+    for (const auto& pair : compute_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+}
+
+void ModelExecutor::stash_active_decode_bucket() {
+    if (!decode_graph_cached_ || decode_cached_n_kv_ < 0 || !ctx_) return;
+    const int64_t key = decode_cached_n_kv_;
+    PreparedGraphBucket& slot = decode_graph_buckets_[key];
+    if (slot.ctx && slot.ctx != ctx_) {
+        free_prepared_bucket(slot);
+    }
+    slot.s = 1;
+    slot.n_kv = decode_cached_n_kv_;
+    slot.pos = decode_cached_pos_;
+    slot.buffer = buffer_;
+    slot.galloc = galloc_;
+    slot.ctx = ctx_;
+    slot.cgraph = cgraph_;
+    slot.compute_tensors = std::move(compute_tensors_);
+    slot.attn_views = std::move(decode_attn_views_);
+    slot.kv_indices = kv_indices_tensor_;
+    slot.kv_work_mask = kv_work_mask_tensor_;
+    slot.dynamic_causal_masks = std::move(dynamic_causal_masks_);
+    slot.rope_arange_tensors = std::move(decode_rope_arange_tensors_);
+    slot.concrete_shapes = concrete_shapes_;
+    slot.custom_params = std::move(custom_params_storage_);
+
+    buffer_ = nullptr;
+    galloc_ = nullptr;
+    ctx_ = nullptr;
+    cgraph_ = nullptr;
+    compute_tensors_.clear();
+    decode_attn_views_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
+    dynamic_causal_masks_.clear();
+    decode_rope_arange_tensors_.clear();
+    custom_params_storage_.clear();
+    decode_graph_cached_ = false;
+    decode_cached_n_kv_ = -1;
+    decode_cached_pos_ = -1;
+    prepared_ = false;
+}
+
+void ModelExecutor::stash_active_chunk_bucket() {
+    if (!chunk_graph_cached_ || chunk_cached_n_kv_ < 0 || chunk_cached_s_ < 0 || !ctx_) return;
+    const int64_t key = graph_bucket_key(chunk_cached_s_, chunk_cached_n_kv_);
+    PreparedGraphBucket& slot = chunk_graph_buckets_[key];
+    if (slot.ctx && slot.ctx != ctx_) {
+        free_prepared_bucket(slot);
+    }
+    slot.s = chunk_cached_s_;
+    slot.n_kv = chunk_cached_n_kv_;
+    slot.pos = chunk_cached_pos_;
+    slot.buffer = buffer_;
+    slot.galloc = galloc_;
+    slot.ctx = ctx_;
+    slot.cgraph = cgraph_;
+    slot.compute_tensors = std::move(compute_tensors_);
+    slot.attn_views = std::move(chunk_attn_views_);
+    slot.kv_indices = kv_indices_tensor_;
+    slot.kv_work_mask = kv_work_mask_tensor_;
+    slot.dynamic_causal_masks = std::move(dynamic_causal_masks_);
+    slot.rope_arange_tensors = std::move(decode_rope_arange_tensors_);
+    slot.concrete_shapes = concrete_shapes_;
+    slot.custom_params = std::move(custom_params_storage_);
+
+    buffer_ = nullptr;
+    galloc_ = nullptr;
+    ctx_ = nullptr;
+    cgraph_ = nullptr;
+    compute_tensors_.clear();
+    chunk_attn_views_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
+    dynamic_causal_masks_.clear();
+    decode_rope_arange_tensors_.clear();
+    custom_params_storage_.clear();
+    chunk_graph_cached_ = false;
+    chunk_cached_n_kv_ = -1;
+    chunk_cached_pos_ = -1;
+    chunk_cached_s_ = -1;
+    prepared_ = false;
+}
+
+bool ModelExecutor::activate_decode_bucket(int64_t n_kv) {
+    auto it = decode_graph_buckets_.find(n_kv);
+    if (it == decode_graph_buckets_.end() || !it->second.ctx) return false;
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    PreparedGraphBucket slot = std::move(it->second);
+    decode_graph_buckets_.erase(it);
+
+    stash_active_chunk_bucket();
+    if (decode_graph_cached_ && decode_cached_n_kv_ >= 0 && decode_cached_n_kv_ != n_kv) {
+        stash_active_decode_bucket();
+    } else if (ctx_ && !(decode_graph_cached_ && decode_cached_n_kv_ == n_kv)) {
+        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
+        if (buffer_) { ggml_backend_buffer_free(buffer_); buffer_ = nullptr; }
+        if (ctx_) { ggml_free(ctx_); ctx_ = nullptr; }
+        cgraph_ = nullptr;
+        compute_tensors_.clear();
+        custom_params_storage_.clear();
+        decode_attn_views_.clear();
+        dynamic_causal_masks_.clear();
+        decode_rope_arange_tensors_.clear();
+        kv_indices_tensor_ = nullptr;
+        kv_work_mask_tensor_ = nullptr;
+    }
+
+    buffer_ = slot.buffer;
+    galloc_ = slot.galloc;
+    ctx_ = slot.ctx;
+    cgraph_ = slot.cgraph;
+    compute_tensors_ = std::move(slot.compute_tensors);
+    decode_attn_views_ = std::move(slot.attn_views);
+    kv_indices_tensor_ = slot.kv_indices;
+    kv_work_mask_tensor_ = slot.kv_work_mask;
+    dynamic_causal_masks_ = std::move(slot.dynamic_causal_masks);
+    decode_rope_arange_tensors_ = std::move(slot.rope_arange_tensors);
+    concrete_shapes_ = std::move(slot.concrete_shapes);
+    custom_params_storage_ = std::move(slot.custom_params);
+
+    chunk_graph_cached_ = false;
+    chunk_attn_views_.clear();
+    chunk_cached_n_kv_ = -1;
+    chunk_cached_s_ = -1;
+    chunk_cached_pos_ = -1;
+
+    decode_graph_cached_ = true;
+    decode_cached_n_kv_ = n_kv;
+    decode_cached_pos_ = slot.pos;
+    relink_ggml_tensors_from_compute();
+    prepared_ = true;
+    if (cuda_graph_mgr_) {
+        cuda_graph_mgr_->reset();
+    }
+    cuda_graph_needs_update_ = false;
+    return true;
+}
+
+bool ModelExecutor::activate_chunk_bucket(int64_t s, int64_t n_kv) {
+    const int64_t key = graph_bucket_key(s, n_kv);
+    auto it = chunk_graph_buckets_.find(key);
+    if (it == chunk_graph_buckets_.end() || !it->second.ctx) return false;
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    PreparedGraphBucket slot = std::move(it->second);
+    chunk_graph_buckets_.erase(it);
+
+    stash_active_decode_bucket();
+    if (chunk_graph_cached_ && (chunk_cached_s_ != s || chunk_cached_n_kv_ != n_kv)) {
+        stash_active_chunk_bucket();
+    } else if (ctx_ && !(chunk_graph_cached_ && chunk_cached_s_ == s && chunk_cached_n_kv_ == n_kv)) {
+        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
+        if (buffer_) { ggml_backend_buffer_free(buffer_); buffer_ = nullptr; }
+        if (ctx_) { ggml_free(ctx_); ctx_ = nullptr; }
+        cgraph_ = nullptr;
+        compute_tensors_.clear();
+        custom_params_storage_.clear();
+        chunk_attn_views_.clear();
+        dynamic_causal_masks_.clear();
+        decode_rope_arange_tensors_.clear();
+        kv_indices_tensor_ = nullptr;
+        kv_work_mask_tensor_ = nullptr;
+    }
+
+    buffer_ = slot.buffer;
+    galloc_ = slot.galloc;
+    ctx_ = slot.ctx;
+    cgraph_ = slot.cgraph;
+    compute_tensors_ = std::move(slot.compute_tensors);
+    chunk_attn_views_ = std::move(slot.attn_views);
+    kv_indices_tensor_ = slot.kv_indices;
+    kv_work_mask_tensor_ = slot.kv_work_mask;
+    dynamic_causal_masks_ = std::move(slot.dynamic_causal_masks);
+    decode_rope_arange_tensors_ = std::move(slot.rope_arange_tensors);
+    concrete_shapes_ = std::move(slot.concrete_shapes);
+    custom_params_storage_ = std::move(slot.custom_params);
+
+    decode_graph_cached_ = false;
+    decode_attn_views_.clear();
+    decode_cached_n_kv_ = -1;
+    decode_cached_pos_ = -1;
+
+    chunk_graph_cached_ = true;
+    chunk_cached_s_ = s;
+    chunk_cached_n_kv_ = n_kv;
+    chunk_cached_pos_ = slot.pos;
+    relink_ggml_tensors_from_compute();
+    prepared_ = true;
+    if (cuda_graph_mgr_) {
+        cuda_graph_mgr_->reset();
+    }
+    cuda_graph_needs_update_ = false;
+    return true;
+}
+
 void ModelExecutor::set_decode_pos(int64_t pos) {
     ScopedTimer timer(enable_profile_, profile_.set_decode_pos_ms, &profile_.n_set_decode_pos);
     if (!decode_graph_cached_) return;
@@ -908,39 +1165,22 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
     chunk_cached_pos_ = pos;
     chunk_cached_s_ = s_q;
 
-    // SET_ROWS path: write via indices (no CPY). Grow padded n_kv in-place when
-    // crossing a pad bucket so we avoid a full prepare() between ubatch chunks.
+    // SET_ROWS path: write via indices (no CPY). Graph shapes stay fixed for the
+    // active (s_q, n_kv) pad bucket — matching llama.cpp can_reuse semantics.
     if (kv_indices_tensor_ && kv_indices_tensor_->buffer) {
         if (kv_indices_tensor_->ne[0] == s_q) {
             std::vector<int64_t> idxs(static_cast<size_t>(s_q));
             for (int64_t i = 0; i < s_q; ++i) idxs[static_cast<size_t>(i)] = pos + i;
             ggml_backend_tensor_set(kv_indices_tensor_, idxs.data(), 0, idxs.size() * sizeof(int64_t));
         }
-        const int64_t n_kv = pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
-        for (auto& pair : chunk_attn_views_) {
-            auto& refs = pair.second;
-            if (refs.k_active && refs.k_active->ne[1] != n_kv) {
-                refs.k_active->ne[1] = n_kv;
-                if (refs.v_active) refs.v_active->ne[1] = n_kv;
-                if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
-                    cuda_graph_needs_update_ = true;
-                }
-            }
-            if (refs.mask) {
-                refs.mask->ne[0] = n_kv;
-                refs.mask->ne[1] = s_q;
-                refs.mask->nb[0] = sizeof(ggml_fp16_t);
-                refs.mask->nb[1] = n_kv * sizeof(ggml_fp16_t);
-                refs.mask->nb[2] = s_q * refs.mask->nb[1];
-                refs.mask->nb[3] = refs.mask->nb[2];
-            }
-        }
+        const int64_t n_kv = chunk_cached_n_kv_ > 0
+            ? chunk_cached_n_kv_
+            : pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
         if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
             ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
             // Fill the parent buffer; FA reads the active view prefix of width n_kv.
             fill_f16_causal_mask(kv_work_mask_tensor_, pos, s_q, n_kv);
         }
-        chunk_cached_n_kv_ = n_kv;
     } else {
         // Legacy view+cpy path: mutate destination offsets and active KV length.
         const int64_t s_kv = pos + s_q;
@@ -1083,7 +1323,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    // Fast path 1: if decode graph is cached, mutate in-place
+    // Fast path 1: decode graph reuse (llama.cpp can_reuse analogue).
+    // Same topology when all symbols except pos match and padded n_kv matches.
     bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !getenv("GGMLC_DISABLE_DECODE_CACHE");
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
@@ -1095,19 +1336,48 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
         }
     }
-    if (can_use_cached_decode && kv_indices_tensor_ && kv_n_pad_ > 1) {
-        const int64_t n_kv = pad_kv_len(symbol_env.at("pos") + 1, kv_cache_max_ctx_, kv_n_pad_);
-        if (n_kv != decode_cached_n_kv_) {
-            can_use_cached_decode = false;
-        }
+    int64_t decode_n_kv = -1;
+    if (is_decode_step && kv_cache_enabled_ && symbol_env.count("pos") > 0 && kv_n_pad_ > 1) {
+        decode_n_kv = pad_kv_len(symbol_env.at("pos") + 1, kv_cache_max_ctx_, kv_n_pad_);
+    }
+    if (can_use_cached_decode && decode_n_kv > 0 && decode_n_kv != decode_cached_n_kv_) {
+        can_use_cached_decode = false;
     }
     if (can_use_cached_decode) {
         set_decode_pos(symbol_env.at("pos"));
         last_symbol_env_ = symbol_env;
         return;
     }
+    if (is_decode_step && decode_n_kv > 0 && !getenv("GGMLC_DISABLE_DECODE_CACHE")) {
+        bool symbols_ok = true;
+        for (const auto& pair : symbol_env) {
+            if (pair.first == "pos") continue;
+            auto it = last_symbol_env_.find(pair.first);
+            if (it == last_symbol_env_.end() || it->second != pair.second) {
+                symbols_ok = false;
+                break;
+            }
+        }
+        // Also accept first decode after a chunked prefill if only s/pos differ.
+        if (!symbols_ok && last_symbol_env_.count("s") && last_symbol_env_.at("s") != 1) {
+            symbols_ok = true;
+            for (const auto& pair : symbol_env) {
+                if (pair.first == "pos" || pair.first == "s") continue;
+                auto it = last_symbol_env_.find(pair.first);
+                if (it != last_symbol_env_.end() && it->second != pair.second) {
+                    symbols_ok = false;
+                    break;
+                }
+            }
+        }
+        if (symbols_ok && activate_decode_bucket(decode_n_kv)) {
+            set_decode_pos(symbol_env.at("pos"));
+            last_symbol_env_ = symbol_env;
+            return;
+        }
+    }
 
-    // Fast path 2: if chunked prefill graph is cached (same chunk size s, changing pos), mutate in-place
+    // Fast path 2: chunked prefill graph reuse / (s, n_kv) bucket swap.
     int64_t current_s = symbol_env.count("s") > 0 ? symbol_env.at("s") : -1;
     if (current_s < 0) {
         for (const auto& sym : model_graph_.symbol_table) {
@@ -1116,6 +1386,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
         }
+    }
+    int64_t chunk_n_kv = -1;
+    if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token && current_s > 0) {
+        chunk_n_kv = pad_kv_len(symbol_env.at("pos") + current_s, kv_cache_max_ctx_, kv_n_pad_);
     }
     bool can_use_cached_chunk = kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token &&
                                 chunk_graph_cached_ && chunk_cached_s_ == current_s && current_s > 0 &&
@@ -1131,30 +1405,78 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
     if (can_use_cached_chunk && kv_indices_tensor_) {
-        // SET_ROWS chunk cache: only bust when chunk width (s_q) changes.
-        // n_kv may grow across ubatch steps; set_chunk_pos mutates the active
-        // view length + mask contents without a full prepare()/CPY.
-        if (kv_indices_tensor_->ne[0] != current_s) {
+        // llama-style: reuse only when padded n_kv matches; otherwise swap buckets.
+        if (kv_indices_tensor_->ne[0] != current_s ||
+            (chunk_n_kv > 0 && chunk_cached_n_kv_ > 0 && chunk_n_kv != chunk_cached_n_kv_)) {
             can_use_cached_chunk = false;
         }
+    } else if (can_use_cached_chunk && !kv_indices_tensor_) {
+        // Legacy path still mutates s_kv in-place via set_chunk_pos.
     }
     if (can_use_cached_chunk) {
         set_chunk_pos(symbol_env.at("pos"), current_s);
         last_symbol_env_ = symbol_env;
         return;
     }
+    if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token &&
+        current_s > 0 && chunk_n_kv > 0 && !getenv("GGMLC_DISABLE_CHUNK_CACHE")) {
+        bool symbols_ok = true;
+        for (const auto& pair : symbol_env) {
+            if (pair.first == "pos") continue;
+            auto it = last_symbol_env_.find(pair.first);
+            if (it == last_symbol_env_.end() || it->second != pair.second) {
+                symbols_ok = false;
+                break;
+            }
+        }
+        if (symbols_ok && activate_chunk_bucket(current_s, chunk_n_kv)) {
+            set_chunk_pos(symbol_env.at("pos"), current_s);
+            last_symbol_env_ = symbol_env;
+            return;
+        }
+    }
 
     if (prepared_ && symbol_env == last_symbol_env_ && enable_arena_reuse == last_enable_arena_reuse_) {
         return;
     }
 
-    // Invalidate decode and chunk cache if recompiling
-    decode_graph_cached_ = false;
-    decode_cached_n_kv_ = -1;
-    decode_attn_views_.clear();
-    chunk_graph_cached_ = false;
-    chunk_cached_n_kv_ = -1;
-    chunk_attn_views_.clear();
+    // Rebuild path: stash the live bucket (so it can be swapped back later),
+    // then free only the current compute context. Preserve sibling buckets.
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    const bool keep_chunk_buckets =
+        kv_cache_enabled_ && !is_single_token && current_s > 0 && chunk_n_kv > 0 &&
+        !getenv("GGMLC_DISABLE_CHUNK_CACHE");
+    const bool keep_decode_buckets =
+        is_decode_step && decode_n_kv > 0 && !getenv("GGMLC_DISABLE_DECODE_CACHE");
+
+    if (keep_chunk_buckets) {
+        stash_active_chunk_bucket();
+        stash_active_decode_bucket();
+        // Drop chunk buckets with a different s_q — topology differs.
+        for (auto it = chunk_graph_buckets_.begin(); it != chunk_graph_buckets_.end(); ) {
+            if (it->second.s != current_s) {
+                free_prepared_bucket(it->second);
+                it = chunk_graph_buckets_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else if (keep_decode_buckets) {
+        stash_active_decode_bucket();
+        stash_active_chunk_bucket();
+    } else {
+        clear_all_graph_buckets();
+        decode_graph_cached_ = false;
+        decode_cached_n_kv_ = -1;
+        decode_attn_views_.clear();
+        chunk_graph_cached_ = false;
+        chunk_cached_n_kv_ = -1;
+        chunk_cached_s_ = -1;
+        chunk_attn_views_.clear();
+    }
+
     decode_rope_arange_tensors_.clear();
     dynamic_causal_masks_.clear();
     kv_indices_tensor_ = nullptr;
@@ -1644,8 +1966,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             ggml_set_name(kv_indices_tensor_, "kv_row_indices");
                         }
                         if (!kv_work_mask_tensor_) {
-                            // Parent buffer sized for max ctx so set_chunk_pos can grow the
-                            // active mask view across ubatch steps without reallocating.
+                            // Parent buffer sized for max ctx; each (s, n_kv) bucket
+                            // views a fixed-width prefix (llama.cpp-style pad buckets).
                             kv_work_mask_tensor_ = ggml_new_tensor_4d(
                                 ctx_, GGML_TYPE_F16, kv_cache_max_ctx_, s_q, 1, 1);
                             ggml_set_input(kv_work_mask_tensor_);
@@ -2437,39 +2759,9 @@ void ModelExecutor::run(int n_threads) {
         }
     }
 
-    if (is_cuda_ && enable_cuda_graph_) {
-        if (!cuda_graph_mgr_) {
-            cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
-        }
-        if (!cuda_graph_mgr_->is_initialized()) {
-            cuda_graph_mgr_->init(backend_);
-        }
-
-        if (cuda_graph_mgr_->is_initialized()) {
-            if (!cuda_graph_mgr_->is_captured()) {
-                // First run: capture stream and instantiate CUDA graph
-                if (cuda_graph_mgr_->begin_capture()) {
-                    ggml_backend_graph_compute_async(backend_, cgraph_);
-                    if (cuda_graph_mgr_->end_capture_and_instantiate()) {
-                        cuda_graph_needs_update_ = false;
-                        if (cuda_graph_mgr_->launch()) {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                // Subsequent run: update if pos changed or execute directly
-                if (cuda_graph_needs_update_) {
-                    cuda_graph_mgr_->update_executable(cgraph_, backend_);
-                    cuda_graph_needs_update_ = false;
-                }
-                if (cuda_graph_mgr_->launch()) {
-                    return;
-                }
-            }
-        }
-        // Fallback to standard compute if graph capture/launch failed
-    }
+    // enable_cuda_graph_: rely on GGML's built-in CUDA graphs (keyed per cgraph).
+    // Outer CUDAGraphManager capture nests with ggml_backend_cuda_graph_compute and
+    // aborts on bucket switches; pad-stable SET_ROWS graphs make that wrapper unnecessary.
 
     enum ggml_status status = ggml_backend_graph_compute(backend_, cgraph_);
     if (status != GGML_STATUS_SUCCESS) {

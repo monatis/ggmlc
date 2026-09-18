@@ -35,7 +35,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
 5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
-7. **Hardware-Accelerated Persistent KV Cache**: Decode writes K/V with `ggml_set_rows` into a padded cache so GGML CUDA graphs stay warm. SmolLM2-135M Q8_0 on RTX 4050: **287 tok/s** (`ggmlc-bench tg32`) vs `llama.cpp` **279 tok/s** (1.03x).
+7. **Hardware-Accelerated Persistent KV Cache**: Decode/prefill write K/V with `ggml_set_rows` into padded `(s, n_kv)` graph buckets (llama `can_reuse` analogue) so GGML CUDA graphs stay warm. SmolLM2-360M Q8_0 on RTX 4050: **pp1024 1.00x** vs `llama.cpp`; decode **1.08x–1.10x**.
 8. **High-Throughput Agent Serving & Driver-VMM Paged KV Cache**: GPU MMU virtual memory paging (`cuMemMap`) allocates physical 2 MB pages on demand with **zero bandwidth penalty** (41.77 GB/s), pointer invariance across dynamic expansions, immediate physical VRAM reclamation, and multi-bucket CUDA graphs ($B \in \{1, 2, 4, 8, 16\}$) for iteration-level continuous batching.
 9. **Radix Tree Automated Prefix Caching & Warm Block Pool**: Token-sequence prefix matching via CPU trie directly maps cached physical pages into contiguous virtual slots via `cuMemMap`, skipping prefill for shared prompt prefixes with **zero custom attention kernels**, while elastic warm-pool recycling minimizes OS driver syscalls.
 
@@ -224,15 +224,17 @@ print("Generated text:", text)
 
 #### Autoregressive decode + prefill vs `llama-bench` (RTX 4050, Q8_0)
 
-After `ggml_set_rows` KV writes, padded `n_kv`, and strided fused-QKV `VIEW→RESHAPE` (zero CONT):
+After `ggml_set_rows` KV writes, padded `n_kv`, strided fused-QKV `VIEW→RESHAPE`, and llama-style `(s, n_kv)` prepared-graph buckets:
 
 | Model | test | `ggmlc` | `llama.cpp` | Ratio |
 | :--- | :--- | ---: | ---: | ---: |
 | **SmolLM2-135M** | tg32 | **~302** | 279.0 | **≥1.03x** |
 | **SmolLM2-135M** | pp512 | **15856** | 15660 | **1.01x** |
-| **SmolLM2-360M** | tg32 | **192.5** (replay 196.5) | ~194 | **~1.0x** |
+| **SmolLM2-360M** | tg32 | **208.5** | 188.9 | **1.10x** |
+| **SmolLM2-360M** | pp1024 | **8841** | 8812 | **1.00x** |
+| **GPT-2 Medium** | pp1024 | **9054** | 9022 | **1.00x** |
 
-A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md#7-bottleneck-isolation-decode-cuda-graphs).
+A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md).
 
 ---
 
