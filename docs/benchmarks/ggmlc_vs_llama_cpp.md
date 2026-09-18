@@ -9,9 +9,9 @@ Comparing compiler-generated GGML execution graphs (`ggmlc`) against hand-writte
 - **Kernel launches**: Horizontal fusion merges parallel projections ($W_q, W_k, W_v$ and $W_{\text{gate}}, W_{\text{up}}$), cutting GEMV dispatches by 40%–43% (4 vs 7 GEMVs per layer, saving 90 kernel launches per token on 30 layers).
 - **Performance parity (RTX 4050 Laptop, CUDA 12.8, Q8_0)** — post SET_ROWS + strided-reshape layout fix (`scratch/compare_ggmlc_vs_llama_post_layout_summary.md`):
   - **Short prefill ($P \le 128$)**: `ggmlc` is **1.01x–1.18x** vs `llama.cpp` (fusion / launch-bound win).
-  - **Single chunk ($P = 512$)**: **~0.86x–0.96x** (SmolLM2-360M **0.96x** near parity after CONT elimination).
-  - **Multi-chunk ($P = 1024$, ubatch 512)**: still **0.71x–0.85x** (chunk KV view mutation / graph reuse).
-  - **Decode ($S = 1$)**: **~0.92x–1.11x** — SmolLM2 / Qwen **beat** llama.cpp; LLaMA-3.2-1B ~parity.
+  - **Single chunk ($P = 512$)**: **~0.88x–1.01x** (SmolLM2-360M **1.01x** after CONT elimination + chunk SET_ROWS).
+  - **Multi-chunk ($P = 1024$, ubatch 512)**: **~0.76x–0.86x** after SET_ROWS (was view+cpy); remaining gap is FA `n_kv` growth 512→1024 forcing CUDA-graph reshape on chunk 2.
+  - **Decode ($S = 1$)**: **~0.99x–1.11x** — SmolLM2 / Qwen / LLaMA at or above llama.cpp.
 - **Extensibility**: Non-standard attention patterns (GQA, QK-norm, sliding window, MLA) compile directly from reference Python code without new C++ runtime kernels.
 
 ---
@@ -23,7 +23,7 @@ Comparing compiler-generated GGML execution graphs (`ggmlc`) against hand-writte
 | **Model Ingestion** | Compiles PyTorch (`torch.export`) and JAX (`jaxpr`) traces. | Custom Python conversion scripts (`convert_hf_to_gguf.py`). |
 | **Model Implementation** | Zero model C++. Generic runtime executes any valid GGUF graph. | Hand-written C++ class per architecture (`src/models/*.cpp`). |
 | **Operator Fusion** | Automated compiler passes (horizontal GEMV, affine view folding, SwiGLU). | Manual weight packing during conversion or bespoke multi-weight tensors. |
-| **KV Cache** | Graph-bound tensors: decode uses `ggml_set_rows` into a padded `n_kv` view (CUDA-graph stable); prefill still uses view+cpy + Driver-VMM pages. | External C++ ring buffer (`struct llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256. |
+| **KV Cache** | Graph-bound tensors: decode + chunked prefill use `ggml_set_rows` into a padded `n_kv` view; `set_chunk_pos` grows active length in-place (no CPY). | External C++ ring buffer (`struct llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256. |
 | **CUDA Execution** | `CUDAGraphManager` (stream capture across CC $\ge 6.0$) + generic graph compute. | GGML CUDA graph (CC $\ge 7.0$) or sequential stream dispatches. |
 | **Scope** | Unified compiler for LLMs, SLMs, BERT, Whisper, and vision backbones. | Specialized C++ implementations for LLMs, audio, and multimodal. |
 
@@ -135,7 +135,7 @@ Non-standard attention variants compile directly from Python reference code with
 
 - **Hardware**: NVIDIA GeForce RTX 4050 Laptop (6 GB GDDR6, 96-bit bus, ~192 GB/s peak).
 - **Setup**: Windows 11, CUDA 12.8. Standalone C++ harnesses (`ggmlc-bench.exe` vs. `llama-bench.exe`) via `examples/benchmarks/compare_ggmlc_vs_llama_cpp.py`, 4 threads, `ubatch = 512`, `Q8_0`, 5 reps.
-- **Latest run**: `scratch/compare_ggmlc_vs_llama_post_layout.{md,json}` + ratio summary `scratch/compare_ggmlc_vs_llama_post_layout_summary.{md,json}` (post SET_ROWS + strided VIEW→RESHAPE). Absolute tok/s vary with thermal/power; **ratios within a run** are the fair metric.
+- **Latest run**: `scratch/compare_ggmlc_vs_llama_chunk_set_rows.{md,json}` + delta vs prior `scratch/compare_ggmlc_vs_llama_chunk_set_rows_summary.{md,json}` (chunk SET_ROWS). Absolute tok/s vary with thermal/power; **ratios within a run** are the fair metric.
 
 ### Prefill Throughput ($P$ Tokens, `ubatch = 512`) — latest
 
@@ -204,7 +204,7 @@ Factors were tested one at a time with `ggmlc-bench --diag-mode`, `GGMLC_DISABLE
 
 ### Fix (decode)
 
-Decode writes K/V with `ggml_set_rows` into the full cache and attends a padded view (`n_kv = max(256, pad(pos+1, 256))`), updating only index/mask *contents*. Prefill still uses view+cpy for multi-token chunks.
+Decode writes K/V with `ggml_set_rows` into the full cache and attends a padded view (`n_kv = max(256, pad(pos+1, 256))`), updating only index/mask *contents*. Chunked prefill (`s_q > 1`) uses the same SET_ROWS path; `set_chunk_pos` updates row indices and grows `k_active`/`mask` to the new padded `n_kv` without VIEW+CPY (CUDA graphs still reshape when crossing a pad bucket, e.g. 512→1024).
 
 ### Fix (prefill layout)
 
@@ -253,7 +253,7 @@ Greedy token identity vs the legacy KV path holds (cosine ≥ 0.9988 on 8 decode
 ## 8. Current Gaps
 
 1. **Compiler-level RoPE layout pass**: Runtime strided reshape closes the CONT tax; a Canonical-IR pass that emits `[D,H,S]` views directly (and fuses `ROPE+VIEW+SET_ROWS` like llama.cpp CUDA) would shrink the IR further.
-2. **Multi-chunk prefill CUDA graphs**: Chunked `p=1024` still mutates KV view offsets. Apply SET_ROWS + pad treatment to `set_chunk_pos`.
+2. **Multi-chunk prefill FA pad buckets**: SET_ROWS removed CPY, but `n_kv` 512→1024 still changes FA shapes. Options: over-pad first chunk to `2*ubatch` (hurts pp512) or CUDA-graph update without full reshape.
 3. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
 4. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.
 5. **CPU Microkernels**: Relies on upstream `ggml-cpu` without custom assembly GEMV kernels.

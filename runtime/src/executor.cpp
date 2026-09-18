@@ -509,6 +509,7 @@ void ModelExecutor::reset_kv_cache() {
         chunk_attn_views_.clear();
         chunk_cached_pos_ = -1;
         chunk_cached_s_ = -1;
+        chunk_cached_n_kv_ = -1;
         return;
     }
     for (const auto& pair : kv_cache_k_) {
@@ -528,6 +529,7 @@ void ModelExecutor::reset_kv_cache() {
     chunk_attn_views_.clear();
     chunk_cached_pos_ = -1;
     chunk_cached_s_ = -1;
+    chunk_cached_n_kv_ = -1;
 }
 
 void ModelExecutor::init_paged_kv_cache(size_t max_batch, size_t max_ctx) {
@@ -828,8 +830,11 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
         ggml_backend_tensor_set(kv_indices_tensor_, &idx, 0, sizeof(int64_t));
         if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
             ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
-            fill_f16_causal_mask(
-                kv_work_mask_tensor_, pos, kv_work_mask_tensor_->ne[1], kv_work_mask_tensor_->ne[0]);
+            const int64_t mask_s_q = kv_work_mask_tensor_->ne[1];
+            const int64_t mask_n_kv = decode_cached_n_kv_ > 0
+                ? decode_cached_n_kv_
+                : pad_kv_len(pos + 1, kv_cache_max_ctx_, kv_n_pad_);
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, mask_s_q, mask_n_kv);
         }
     } else {
         // Legacy view+cpy path: mutate destination offsets and active KV length.
@@ -902,70 +907,108 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
     if (!chunk_graph_cached_) return;
     chunk_cached_pos_ = pos;
     chunk_cached_s_ = s_q;
-    int64_t s_kv = pos + s_q;
 
-    // 1. Update attention KV views in-place
-    for (auto& pair : chunk_attn_views_) {
-        uint32_t op_id = pair.first;
-        auto& refs = pair.second;
-        struct ggml_tensor* k_cache = kv_cache_k_[op_id];
-        struct ggml_tensor* v_cache = kv_cache_v_[op_id];
-
-        // Slot offsets
-        refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
-        refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
-
-        refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
-        refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
-
-        if (refs.k_cpy) {
-            refs.k_cpy->view_offs = refs.k_slot->view_offs;
-            refs.k_cpy->data = refs.k_slot->data;
+    // SET_ROWS path: write via indices (no CPY). Grow padded n_kv in-place when
+    // crossing a pad bucket so we avoid a full prepare() between ubatch chunks.
+    if (kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+        if (kv_indices_tensor_->ne[0] == s_q) {
+            std::vector<int64_t> idxs(static_cast<size_t>(s_q));
+            for (int64_t i = 0; i < s_q; ++i) idxs[static_cast<size_t>(i)] = pos + i;
+            ggml_backend_tensor_set(kv_indices_tensor_, idxs.data(), 0, idxs.size() * sizeof(int64_t));
         }
-        if (refs.v_cpy) {
-            refs.v_cpy->view_offs = refs.v_slot->view_offs;
-            refs.v_cpy->data = refs.v_slot->data;
-        }
-
-        // Active sequence length
-        refs.k_active->ne[1] = s_kv;
-        refs.v_active->ne[1] = s_kv;
-
-        if (refs.mask) {
-            refs.mask->ne[0] = s_kv;
-            refs.mask->ne[1] = s_q;
-            refs.mask->nb[0] = sizeof(ggml_fp16_t);
-            refs.mask->nb[1] = s_kv * sizeof(ggml_fp16_t);
-            refs.mask->nb[2] = s_q * refs.mask->nb[1];
-            refs.mask->nb[3] = refs.mask->nb[2];
-        }
-    }
-
-    // 2. Update dynamic causal masks in-place
-    for (auto& minfo : dynamic_causal_masks_) {
-        if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
-        minfo.mask_tensor->ne[0] = s_kv;
-        minfo.mask_tensor->ne[1] = s_q;
-        minfo.mask_tensor->nb[0] = sizeof(ggml_fp16_t);
-        minfo.mask_tensor->nb[1] = s_kv * sizeof(ggml_fp16_t);
-        minfo.mask_tensor->nb[2] = s_q * minfo.mask_tensor->nb[1];
-        minfo.mask_tensor->nb[3] = minfo.mask_tensor->nb[2];
-        minfo.pos = pos;
-        minfo.s_kv = s_kv;
-        minfo.s_q = s_q;
-        size_t s_kv_sz = static_cast<size_t>(s_kv);
-        size_t s_q_sz = static_cast<size_t>(s_q);
-        std::vector<ggml_fp16_t> mask_data(s_kv_sz * s_q_sz);
-        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
-        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
-        {
-            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
-            for (size_t i = 0; i < s_q_sz; ++i) {
-                for (size_t j = 0; j < s_kv_sz; ++j) {
-                    mask_data[i * s_kv_sz + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+        const int64_t n_kv = pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
+        for (auto& pair : chunk_attn_views_) {
+            auto& refs = pair.second;
+            if (refs.k_active && refs.k_active->ne[1] != n_kv) {
+                refs.k_active->ne[1] = n_kv;
+                if (refs.v_active) refs.v_active->ne[1] = n_kv;
+                if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+                    cuda_graph_needs_update_ = true;
                 }
             }
-            ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+            if (refs.mask) {
+                refs.mask->ne[0] = n_kv;
+                refs.mask->ne[1] = s_q;
+                refs.mask->nb[0] = sizeof(ggml_fp16_t);
+                refs.mask->nb[1] = n_kv * sizeof(ggml_fp16_t);
+                refs.mask->nb[2] = s_q * refs.mask->nb[1];
+                refs.mask->nb[3] = refs.mask->nb[2];
+            }
+        }
+        if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+            // Fill the parent buffer; FA reads the active view prefix of width n_kv.
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, s_q, n_kv);
+        }
+        chunk_cached_n_kv_ = n_kv;
+    } else {
+        // Legacy view+cpy path: mutate destination offsets and active KV length.
+        const int64_t s_kv = pos + s_q;
+        for (auto& pair : chunk_attn_views_) {
+            uint32_t op_id = pair.first;
+            auto& refs = pair.second;
+            struct ggml_tensor* k_cache = kv_cache_k_[op_id];
+            struct ggml_tensor* v_cache = kv_cache_v_[op_id];
+
+            refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
+            refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
+
+            refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
+            refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
+
+            if (refs.k_cpy) {
+                refs.k_cpy->view_offs = refs.k_slot->view_offs;
+                refs.k_cpy->data = refs.k_slot->data;
+            }
+            if (refs.v_cpy) {
+                refs.v_cpy->view_offs = refs.v_slot->view_offs;
+                refs.v_cpy->data = refs.v_slot->data;
+            }
+
+            refs.k_active->ne[1] = s_kv;
+            refs.v_active->ne[1] = s_kv;
+
+            if (refs.mask) {
+                refs.mask->ne[0] = s_kv;
+                refs.mask->ne[1] = s_q;
+                refs.mask->nb[0] = sizeof(ggml_fp16_t);
+                refs.mask->nb[1] = s_kv * sizeof(ggml_fp16_t);
+                refs.mask->nb[2] = s_q * refs.mask->nb[1];
+                refs.mask->nb[3] = refs.mask->nb[2];
+            }
+        }
+
+        for (auto& minfo : dynamic_causal_masks_) {
+            if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
+            minfo.mask_tensor->ne[0] = s_kv;
+            minfo.mask_tensor->ne[1] = s_q;
+            minfo.mask_tensor->nb[0] = sizeof(ggml_fp16_t);
+            minfo.mask_tensor->nb[1] = s_kv * sizeof(ggml_fp16_t);
+            minfo.mask_tensor->nb[2] = s_q * minfo.mask_tensor->nb[1];
+            minfo.mask_tensor->nb[3] = minfo.mask_tensor->nb[2];
+            minfo.pos = pos;
+            minfo.s_kv = s_kv;
+            minfo.s_q = s_q;
+            size_t s_kv_sz = static_cast<size_t>(s_kv);
+            size_t s_q_sz = static_cast<size_t>(s_q);
+            std::vector<ggml_fp16_t> mask_data(s_kv_sz * s_q_sz);
+            ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+            {
+                ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+                for (size_t i = 0; i < s_q_sz; ++i) {
+                    for (size_t j = 0; j < s_kv_sz; ++j) {
+                        mask_data[i * s_kv_sz + j] =
+                            (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+                    }
+                }
+                ggml_backend_tensor_set(
+                    minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+            }
+        }
+
+        if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+            cuda_graph_needs_update_ = true;
         }
     }
 
@@ -1087,6 +1130,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
         }
     }
+    if (can_use_cached_chunk && kv_indices_tensor_) {
+        // SET_ROWS chunk cache: only bust when chunk width (s_q) changes.
+        // n_kv may grow across ubatch steps; set_chunk_pos mutates the active
+        // view length + mask contents without a full prepare()/CPY.
+        if (kv_indices_tensor_->ne[0] != current_s) {
+            can_use_cached_chunk = false;
+        }
+    }
     if (can_use_cached_chunk) {
         set_chunk_pos(symbol_env.at("pos"), current_s);
         last_symbol_env_ = symbol_env;
@@ -1102,6 +1153,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     decode_cached_n_kv_ = -1;
     decode_attn_views_.clear();
     chunk_graph_cached_ = false;
+    chunk_cached_n_kv_ = -1;
     chunk_attn_views_.clear();
     decode_rope_arange_tensors_.clear();
     dynamic_causal_masks_.clear();
@@ -1577,7 +1629,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     size_t base_slot_offset_k = slot_idx * k_cache->nb[3];
                     size_t base_slot_offset_v = slot_idx * v_cache->nb[3];
 
-                    const bool use_set_rows = (s_q == 1) && kv_n_pad_ > 1 && !paged_kv_enabled_ &&
+                    // Decode (s_q==1) and chunked prefill (s_q>1) both use SET_ROWS into a
+                    // padded n_kv view so topology stays CUDA-graph stable within a pad bucket.
+                    // Crossing a pad boundary (e.g. 512→1024) rebuilds once — same as llama.cpp.
+                    const bool use_set_rows = kv_n_pad_ > 1 && !paged_kv_enabled_ &&
                                               !env_flag_enabled("GGMLC_DISABLE_SET_ROWS");
 
                     if (use_set_rows) {
@@ -1589,11 +1644,20 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             ggml_set_name(kv_indices_tensor_, "kv_row_indices");
                         }
                         if (!kv_work_mask_tensor_) {
-                            kv_work_mask_tensor_ = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, n_kv, s_q, 1, 1);
+                            // Parent buffer sized for max ctx so set_chunk_pos can grow the
+                            // active mask view across ubatch steps without reallocating.
+                            kv_work_mask_tensor_ = ggml_new_tensor_4d(
+                                ctx_, GGML_TYPE_F16, kv_cache_max_ctx_, s_q, 1, 1);
                             ggml_set_input(kv_work_mask_tensor_);
                             ggml_set_output(kv_work_mask_tensor_);
                             ggml_set_name(kv_work_mask_tensor_, "kv_work_mask");
                         }
+                        struct ggml_tensor* mask_active = ggml_view_4d(
+                            ctx_, kv_work_mask_tensor_, n_kv, s_q, 1, 1,
+                            n_kv * sizeof(ggml_fp16_t),
+                            s_q * n_kv * sizeof(ggml_fp16_t),
+                            s_q * n_kv * sizeof(ggml_fp16_t),
+                            0);
 
                         struct ggml_tensor* k_src = k;
                         struct ggml_tensor* v_src = v;
@@ -1632,19 +1696,22 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                             base_slot_offset_v);
 
                         struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
-                            ctx_, q, k_active, v_active, kv_work_mask_tensor_, scale, 0.0f, 0.0f);
+                            ctx_, q, k_active, v_active, mask_active, scale, 0.0f, 0.0f);
                         result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
 
+                        AttnViewRefs refs;
+                        refs.k_active = k_active;
+                        refs.v_active = v_active;
+                        refs.mask = mask_active;
+                        refs.indices = kv_indices_tensor_;
+                        refs.slot_base_offset_k = base_slot_offset_k;
+                        refs.slot_base_offset_v = base_slot_offset_v;
                         if (is_decode_step) {
                             decode_cached_n_kv_ = n_kv;
-                            AttnViewRefs refs;
-                            refs.k_active = k_active;
-                            refs.v_active = v_active;
-                            refs.mask = kv_work_mask_tensor_;
-                            refs.indices = kv_indices_tensor_;
-                            refs.slot_base_offset_k = base_slot_offset_k;
-                            refs.slot_base_offset_v = base_slot_offset_v;
                             decode_attn_views_[op.id] = refs;
+                        } else if (s_q > 1) {
+                            chunk_cached_n_kv_ = n_kv;
+                            chunk_attn_views_[op.id] = refs;
                         }
                     } else {
                     // View slot in cache for new tokens at offset pos
@@ -2228,9 +2295,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
         }
         if (symbol_env.count("pos") > 0 && kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
-            fill_f16_causal_mask(
-                kv_work_mask_tensor_, symbol_env.at("pos"),
-                kv_work_mask_tensor_->ne[1], kv_work_mask_tensor_->ne[0]);
+            const int64_t pos = symbol_env.at("pos");
+            const int64_t s_q_mask = kv_indices_tensor_ ? kv_indices_tensor_->ne[0]
+                                                        : kv_work_mask_tensor_->ne[1];
+            int64_t n_kv_mask = is_decode_step ? decode_cached_n_kv_ : chunk_cached_n_kv_;
+            if (n_kv_mask < 1) {
+                n_kv_mask = pad_kv_len(pos + s_q_mask, kv_cache_max_ctx_, kv_n_pad_);
+            }
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, s_q_mask, n_kv_mask);
         }
     }
 
@@ -2573,6 +2645,7 @@ std::string ModelExecutor::runtime_graph_summary() const {
         << ",\"n_set_rows\":" << n_set_rows
         << ",\"kv_n_pad\":" << kv_n_pad_
         << ",\"decode_cached_n_kv\":" << decode_cached_n_kv_
+        << ",\"chunk_cached_n_kv\":" << chunk_cached_n_kv_
         << ",\"set_rows_kv\":" << (kv_indices_tensor_ ? "true" : "false")
         << ",\"ggml_cuda_graphs_compiled\":" << (ggml_cuda_graphs_compiled() ? "true" : "false")
         << ",\"cuda_graph_manager_captured\":" << (is_cuda_graph_captured() ? "true" : "false")

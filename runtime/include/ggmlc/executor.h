@@ -199,6 +199,7 @@ private:
     bool chunk_graph_cached_ = false;
     int64_t chunk_cached_pos_ = -1;
     int64_t chunk_cached_s_ = -1;
+    int64_t chunk_cached_n_kv_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> chunk_attn_views_;
     struct MaskInitInfo {
         struct ggml_tensor* mask_tensor = nullptr;
