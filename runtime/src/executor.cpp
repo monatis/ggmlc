@@ -5,6 +5,11 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <chrono>
+#include <map>
+#include <sstream>
+#include <cstdlib>
+#include <vector>
 #include "ggml.h"
 #include "ggml-impl.h"
 #include "ggml-backend.h"
@@ -19,6 +24,58 @@
 #include "ggmlc/stdlib_kernels.h"
 
 namespace ggmlc {
+
+namespace {
+struct ScopedTimer {
+    double& acc;
+    int* count;
+    bool enabled;
+    std::chrono::high_resolution_clock::time_point t0;
+    ScopedTimer(bool enable, double& acc_ms, int* n = nullptr)
+        : acc(acc_ms), count(n), enabled(enable) {
+        if (enabled) t0 = std::chrono::high_resolution_clock::now();
+    }
+    ~ScopedTimer() {
+        if (!enabled) return;
+        acc += std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        if (count) (*count)++;
+    }
+};
+
+bool is_metadata_op(enum ggml_op op) {
+    return op == GGML_OP_NONE || op == GGML_OP_RESHAPE || op == GGML_OP_VIEW ||
+           op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE;
+}
+
+int64_t pad_kv_len(int64_t n_kv, int64_t max_ctx, int64_t n_pad) {
+    if (n_kv < 1) n_kv = 1;
+    if (n_pad <= 1) return std::min(n_kv, max_ctx);
+    int64_t padded = std::max(n_pad, static_cast<int64_t>(GGML_PAD(n_kv, n_pad)));
+    if (padded > max_ctx) padded = max_ctx;
+    return padded;
+}
+
+bool env_flag_enabled(const char* name) {
+    const char* e = std::getenv(name);
+    if (!e || !e[0]) return false;
+    return e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T';
+}
+
+void fill_f16_causal_mask(struct ggml_tensor* mask, int64_t pos, int64_t s_q, int64_t s_kv) {
+    if (!mask || mask->buffer == nullptr || s_q <= 0 || s_kv <= 0) return;
+    std::vector<ggml_fp16_t> mask_data(static_cast<size_t>(s_kv * s_q));
+    ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+    ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+    for (int64_t i = 0; i < s_q; ++i) {
+        for (int64_t j = 0; j < s_kv; ++j) {
+            mask_data[static_cast<size_t>(i * s_kv + j)] =
+                (j <= pos + i) ? zero_f16 : neg_inf_f16;
+        }
+    }
+    ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+}
+} // namespace
 
 std::vector<std::string> ModelExecutor::get_available_devices() {
     std::vector<std::string> devices = {"cpu"};
@@ -286,6 +343,9 @@ void ModelExecutor::init_states(const std::unordered_map<std::string, int64_t>& 
 void ModelExecutor::init_kv_cache(int64_t max_ctx) {
     if (kv_cache_buffer_) return;
     kv_cache_max_ctx_ = max_ctx;
+    if (const char* env_pad = std::getenv("GGMLC_KV_PAD")) {
+        kv_n_pad_ = std::max<int64_t>(1, std::atoll(env_pad));
+    }
 
     // Only enable KV cache if model supports positional offsets (RoPE, explicit pos symbol, or arange constant tensors).
     // Models with absolute position embeddings hardcoded to input length (e.g. GPT-2)
@@ -706,45 +766,50 @@ void ModelExecutor::paged_kv_extract_page_handles(
 }
 
 void ModelExecutor::set_decode_pos(int64_t pos) {
+    ScopedTimer timer(enable_profile_, profile_.set_decode_pos_ms, &profile_.n_set_decode_pos);
     if (!decode_graph_cached_) return;
     decode_cached_pos_ = pos;
 
-    // 1. Update attention KV views in-place
-    for (auto& pair : decode_attn_views_) {
-        uint32_t op_id = pair.first;
-        auto& refs = pair.second;
-        struct ggml_tensor* k_cache = kv_cache_k_[op_id];
-        struct ggml_tensor* v_cache = kv_cache_v_[op_id];
-
-        // Slot offsets
-        refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
-        refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
-
-        refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
-        refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
-
-        if (refs.k_cpy) {
-            refs.k_cpy->view_offs = refs.k_slot->view_offs;
-            refs.k_cpy->data = refs.k_slot->data;
+    if (kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+        int64_t idx = pos;
+        ggml_backend_tensor_set(kv_indices_tensor_, &idx, 0, sizeof(int64_t));
+        if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+            fill_f16_causal_mask(
+                kv_work_mask_tensor_, pos, kv_work_mask_tensor_->ne[1], kv_work_mask_tensor_->ne[0]);
         }
-        if (refs.v_cpy) {
-            refs.v_cpy->view_offs = refs.v_slot->view_offs;
-            refs.v_cpy->data = refs.v_slot->data;
-        }
+    } else {
+        // Legacy view+cpy path: mutate destination offsets and active KV length.
+        for (auto& pair : decode_attn_views_) {
+            uint32_t op_id = pair.first;
+            auto& refs = pair.second;
+            struct ggml_tensor* k_cache = kv_cache_k_[op_id];
+            struct ggml_tensor* v_cache = kv_cache_v_[op_id];
 
-        // Active sequence length
-        int64_t s_kv = pos + 1;
-        refs.k_active->ne[1] = s_kv;
-        refs.v_active->ne[1] = s_kv;
+            refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
+            refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
 
-        if (refs.scores) {
-            refs.scores->ne[0] = s_kv;
+            refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
+            refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
+
+            if (refs.k_cpy) {
+                refs.k_cpy->view_offs = refs.k_slot->view_offs;
+                refs.k_cpy->data = refs.k_slot->data;
+            }
+            if (refs.v_cpy) {
+                refs.v_cpy->view_offs = refs.v_slot->view_offs;
+                refs.v_cpy->data = refs.v_slot->data;
+            }
+
+            int64_t s_kv = pos + 1;
+            refs.k_active->ne[1] = s_kv;
+            refs.v_active->ne[1] = s_kv;
+            if (refs.scores) refs.scores->ne[0] = s_kv;
+            if (refs.probs) refs.probs->ne[0] = s_kv;
+            if (refs.v_t) refs.v_t->ne[1] = s_kv;
         }
-        if (refs.probs) {
-            refs.probs->ne[0] = s_kv;
-        }
-        if (refs.v_t) {
-            refs.v_t->ne[1] = s_kv;
+        if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+            cuda_graph_needs_update_ = true;
         }
     }
 
@@ -777,13 +842,10 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
             }
         }
     }
-
-    if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
-        cuda_graph_needs_update_ = true;
-    }
 }
 
 void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
+    ScopedTimer timer(enable_profile_, profile_.set_chunk_pos_ms, &profile_.n_set_chunk_pos);
     if (!chunk_graph_cached_) return;
     chunk_cached_pos_ = pos;
     chunk_cached_s_ = s_q;
@@ -843,12 +905,15 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
         std::vector<ggml_fp16_t> mask_data(s_kv_sz * s_q_sz);
         ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
         ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
-        for (size_t i = 0; i < s_q_sz; ++i) {
-            for (size_t j = 0; j < s_kv_sz; ++j) {
-                mask_data[i * s_kv_sz + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+        {
+            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+            for (size_t i = 0; i < s_q_sz; ++i) {
+                for (size_t j = 0; j < s_kv_sz; ++j) {
+                    mask_data[i * s_kv_sz + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+                }
             }
+            ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
         }
-        ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
     }
 
     // 3. Update RoPE arange position constants
@@ -891,6 +956,7 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
 }
 
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
+    ScopedTimer timer(enable_profile_, profile_.prepare_ms, &profile_.n_prepare);
     if (!weights_loaded_) {
         init_weights();
     }
@@ -931,6 +997,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 can_use_cached_decode = false;
                 break;
             }
+        }
+    }
+    if (can_use_cached_decode && kv_indices_tensor_ && kv_n_pad_ > 1) {
+        const int64_t n_kv = pad_kv_len(symbol_env.at("pos") + 1, kv_cache_max_ctx_, kv_n_pad_);
+        if (n_kv != decode_cached_n_kv_) {
+            can_use_cached_decode = false;
         }
     }
     if (can_use_cached_decode) {
@@ -974,11 +1046,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
     // Invalidate decode and chunk cache if recompiling
     decode_graph_cached_ = false;
+    decode_cached_n_kv_ = -1;
     decode_attn_views_.clear();
     chunk_graph_cached_ = false;
     chunk_attn_views_.clear();
     decode_rope_arange_tensors_.clear();
     dynamic_causal_masks_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
     if (cuda_graph_mgr_) {
         cuda_graph_mgr_->reset();
     }
@@ -1440,6 +1515,76 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     size_t base_slot_offset_k = slot_idx * k_cache->nb[3];
                     size_t base_slot_offset_v = slot_idx * v_cache->nb[3];
 
+                    const bool use_set_rows = (s_q == 1) && kv_n_pad_ > 1 && !paged_kv_enabled_ &&
+                                              !env_flag_enabled("GGMLC_DISABLE_SET_ROWS");
+
+                    if (use_set_rows) {
+                        const int64_t n_kv = pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
+                        if (!kv_indices_tensor_) {
+                            kv_indices_tensor_ = ggml_new_tensor_1d(ctx_, GGML_TYPE_I64, s_q);
+                            ggml_set_input(kv_indices_tensor_);
+                            ggml_set_output(kv_indices_tensor_);
+                            ggml_set_name(kv_indices_tensor_, "kv_row_indices");
+                        }
+                        if (!kv_work_mask_tensor_) {
+                            kv_work_mask_tensor_ = ggml_new_tensor_4d(ctx_, GGML_TYPE_F16, n_kv, s_q, 1, 1);
+                            ggml_set_input(kv_work_mask_tensor_);
+                            ggml_set_output(kv_work_mask_tensor_);
+                            ggml_set_name(kv_work_mask_tensor_, "kv_work_mask");
+                        }
+
+                        struct ggml_tensor* k_src = k;
+                        struct ggml_tensor* v_src = v;
+                        if (k_src && !ggml_is_contiguous_rows(k_src)) k_src = ggml_cont(ctx_, k_src);
+                        if (v_src && !ggml_is_contiguous_rows(v_src)) v_src = ggml_cont(ctx_, v_src);
+                        if (k_src && k_src->type != GGML_TYPE_F32 && k_src->type != GGML_TYPE_F16) {
+                            k_src = ggml_cast(ctx_, k_src, GGML_TYPE_F16);
+                        }
+                        if (v_src && v_src->type != GGML_TYPE_F32 && v_src->type != GGML_TYPE_F16) {
+                            v_src = ggml_cast(ctx_, v_src, GGML_TYPE_F16);
+                        }
+
+                        struct ggml_tensor* k_dst = k_cache;
+                        struct ggml_tensor* v_dst = v_cache;
+                        if (slot_idx != 0 || k_cache->ne[3] != batch) {
+                            k_dst = ggml_view_4d(
+                                ctx_, k_cache, head_dim, k_cache->ne[1], num_kv_heads, batch,
+                                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], base_slot_offset_k);
+                            v_dst = ggml_view_4d(
+                                ctx_, v_cache, head_dim, v_cache->ne[1], num_kv_heads, batch,
+                                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], base_slot_offset_v);
+                        }
+
+                        struct ggml_tensor* k_set = ggml_set_rows(ctx_, k_dst, k_src, kv_indices_tensor_);
+                        struct ggml_tensor* v_set = ggml_set_rows(ctx_, v_dst, v_src, kv_indices_tensor_);
+                        ggml_build_forward_expand(cgraph_, k_set);
+                        ggml_build_forward_expand(cgraph_, v_set);
+
+                        struct ggml_tensor* k_active = ggml_view_4d(
+                            ctx_, k_cache, head_dim, n_kv, num_kv_heads, batch,
+                            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                            base_slot_offset_k);
+                        struct ggml_tensor* v_active = ggml_view_4d(
+                            ctx_, v_cache, head_dim, n_kv, num_kv_heads, batch,
+                            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                            base_slot_offset_v);
+
+                        struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                            ctx_, q, k_active, v_active, kv_work_mask_tensor_, scale, 0.0f, 0.0f);
+                        result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+
+                        if (is_decode_step) {
+                            decode_cached_n_kv_ = n_kv;
+                            AttnViewRefs refs;
+                            refs.k_active = k_active;
+                            refs.v_active = v_active;
+                            refs.mask = kv_work_mask_tensor_;
+                            refs.indices = kv_indices_tensor_;
+                            refs.slot_base_offset_k = base_slot_offset_k;
+                            refs.slot_base_offset_v = base_slot_offset_v;
+                            decode_attn_views_[op.id] = refs;
+                        }
+                    } else {
                     // View slot in cache for new tokens at offset pos
                     struct ggml_tensor* k_slot = ggml_view_4d(
                         ctx_, k_cache, head_dim, s_q, num_kv_heads, batch,
@@ -1530,6 +1675,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         refs.slot_base_offset_k = base_slot_offset_k;
                         refs.slot_base_offset_v = base_slot_offset_v;
                         chunk_attn_views_[op.id] = refs;
+                    }
                     }
                 } else {
                     auto is_fattn_supported = [](int64_t hd) {
@@ -1939,20 +2085,40 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
 
     // Initialize dynamic causal masks for Flash Attention
-    for (const auto& minfo : dynamic_causal_masks_) {
-        if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
-        size_t s_kv = static_cast<size_t>(minfo.s_kv);
-        size_t s_q = static_cast<size_t>(minfo.s_q);
-        int64_t pos = minfo.pos;
-        std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
-        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
-        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
-        for (size_t i = 0; i < s_q; ++i) {
-            for (size_t j = 0; j < s_kv; ++j) {
-                mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+    {
+        ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+        for (const auto& minfo : dynamic_causal_masks_) {
+            if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
+            size_t s_kv = static_cast<size_t>(minfo.s_kv);
+            size_t s_q = static_cast<size_t>(minfo.s_q);
+            int64_t pos = minfo.pos;
+            std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
+            ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+            for (size_t i = 0; i < s_q; ++i) {
+                for (size_t j = 0; j < s_kv; ++j) {
+                    mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+                }
+            }
+            ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        }
+        if (symbol_env.count("pos") > 0 && kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+            const int64_t pos = symbol_env.at("pos");
+            const int64_t n_idx = kv_indices_tensor_->ne[0];
+            if (n_idx == 1) {
+                int64_t idx = pos;
+                ggml_backend_tensor_set(kv_indices_tensor_, &idx, 0, sizeof(int64_t));
+            } else if (n_idx > 1) {
+                std::vector<int64_t> idxs(static_cast<size_t>(n_idx));
+                for (int64_t i = 0; i < n_idx; ++i) idxs[static_cast<size_t>(i)] = pos + i;
+                ggml_backend_tensor_set(kv_indices_tensor_, idxs.data(), 0, idxs.size() * sizeof(int64_t));
             }
         }
-        ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        if (symbol_env.count("pos") > 0 && kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            fill_f16_causal_mask(
+                kv_work_mask_tensor_, symbol_env.at("pos"),
+                kv_work_mask_tensor_->ne[1], kv_work_mask_tensor_->ne[0]);
+        }
     }
 
     if (is_decode_step) {
@@ -2026,6 +2192,7 @@ bool ModelExecutor::is_cuda_graph_bucket_captured(int batch_size) const {
 }
 
 void ModelExecutor::run(int n_threads) {
+    ScopedTimer timer(enable_profile_, profile_.run_ms, &profile_.n_run);
     if (!ctx_ || !cgraph_ || !backend_) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
@@ -2240,6 +2407,71 @@ size_t ModelExecutor::get_tensor_size_bytes(uint32_t tensor_id) const {
             it->second->type, (long long)ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
     }
     return sz;
+}
+
+void ModelExecutor::set_enable_profile(bool enable) {
+    enable_profile_ = enable;
+}
+
+void ModelExecutor::reset_profile() {
+    profile_ = ExecutorProfile{};
+}
+
+bool ModelExecutor::ggml_cuda_graphs_compiled() {
+#ifdef GGML_CUDA_USE_GRAPHS
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string ModelExecutor::runtime_graph_summary() const {
+    std::ostringstream oss;
+    if (!cgraph_) {
+        oss << "{\"n_nodes\":0,\"n_kernel_nodes\":0,\"ops\":{}}";
+        return oss.str();
+    }
+    const int n = ggml_graph_n_nodes(cgraph_);
+    std::map<std::string, int> hist;
+    int n_kernel = 0;
+    int n_cpy = 0;
+    int n_cont = 0;
+    int n_mul_mat = 0;
+    int n_fa = 0;
+    int n_set_rows = 0;
+    for (int i = 0; i < n; ++i) {
+        struct ggml_tensor* node = ggml_graph_node(cgraph_, i);
+        if (!node) continue;
+        const char* name = ggml_op_name(node->op);
+        hist[name]++;
+        if (!is_metadata_op(node->op)) n_kernel++;
+        if (node->op == GGML_OP_CPY) n_cpy++;
+        if (node->op == GGML_OP_CONT || node->op == GGML_OP_DUP) n_cont++;
+        if (node->op == GGML_OP_MUL_MAT) n_mul_mat++;
+        if (node->op == GGML_OP_FLASH_ATTN_EXT) n_fa++;
+        if (node->op == GGML_OP_SET_ROWS) n_set_rows++;
+    }
+    oss << "{\"n_nodes\":" << n
+        << ",\"n_kernel_nodes\":" << n_kernel
+        << ",\"n_cpy\":" << n_cpy
+        << ",\"n_cont_or_dup\":" << n_cont
+        << ",\"n_mul_mat\":" << n_mul_mat
+        << ",\"n_flash_attn\":" << n_fa
+        << ",\"n_set_rows\":" << n_set_rows
+        << ",\"kv_n_pad\":" << kv_n_pad_
+        << ",\"decode_cached_n_kv\":" << decode_cached_n_kv_
+        << ",\"set_rows_kv\":" << (kv_indices_tensor_ ? "true" : "false")
+        << ",\"ggml_cuda_graphs_compiled\":" << (ggml_cuda_graphs_compiled() ? "true" : "false")
+        << ",\"cuda_graph_manager_captured\":" << (is_cuda_graph_captured() ? "true" : "false")
+        << ",\"ops\":{";
+    bool first = true;
+    for (const auto& pair : hist) {
+        if (!first) oss << ",";
+        first = false;
+        oss << "\"" << pair.first << "\":" << pair.second;
+    }
+    oss << "}}";
+    return oss.str();
 }
 
 } // namespace ggmlc

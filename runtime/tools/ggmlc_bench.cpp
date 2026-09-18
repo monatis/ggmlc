@@ -10,9 +10,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iomanip>
+#include <map>
 
 #include "ggmlc/loader.h"
 #include "ggmlc/executor.h"
+#include "ggml.h"
 
 struct BenchResult {
     std::string engine = "ggmlc";
@@ -77,7 +79,15 @@ static void print_help(const char* prog_name) {
               << "  -ub, --ubatch <n>                     Prompt prefill physical chunk size (default: 512)\n"
               << "  --no-warmup                           Skip initial warmup passes\n"
               << "  --cuda-graph                          Enable CUDA graph capture on decode steps\n"
-              << "  --unplanned                           Disable planned arena reuse (debug mode)\n\n"
+              << "  --unplanned                           Disable planned arena reuse (debug mode)\n"
+              << "  --profile                             Print per-phase host/device timings\n"
+              << "  --dump-graph                          Print serialized + runtime op histograms\n"
+              << "  --diag-mode <normal|replay|host-only|no-pos-update>\n"
+              << "                                        Isolate decode bottlenecks (tg tests only)\n"
+              << "                                          normal: full prepare+KV mutate+run (default)\n"
+              << "                                          replay: capture once, replay identical graph\n"
+              << "                                          host-only: prepare/KV mutate, skip GPU run\n"
+              << "                                          no-pos-update: run every step at frozen pos=1\n\n"
               << "Examples:\n"
               << "  " << prog_name << " -m model.gguf -p 16,64,128,256,512 -n 0 -r 5 -o md\n"
               << "  " << prog_name << " -m model.gguf -p 0 -n 32,64,128 -d cuda -o json\n"
@@ -101,6 +111,9 @@ int main(int argc, char** argv) {
     bool no_warmup = false;
     bool use_cuda_graph = false;
     bool unplanned = false;
+    bool enable_profile = false;
+    bool dump_graph = false;
+    std::string diag_mode = "normal";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -129,6 +142,12 @@ int main(int argc, char** argv) {
             use_cuda_graph = true;
         } else if (arg == "--unplanned") {
             unplanned = true;
+        } else if (arg == "--profile") {
+            enable_profile = true;
+        } else if (arg == "--dump-graph") {
+            dump_graph = true;
+        } else if (arg == "--diag-mode" && i + 1 < argc) {
+            diag_mode = argv[++i];
         } else if (model_path.empty() && arg.rfind("-", 0) != 0) {
             model_path = arg;
         }
@@ -184,8 +203,28 @@ int main(int argc, char** argv) {
         if (use_cuda_graph) {
             executor.set_enable_cuda_graph(true);
         }
+        if (enable_profile) {
+            executor.set_enable_profile(true);
+        }
         if (use_kv_cache) {
             executor.init_kv_cache(max_ctx);
+        }
+
+        if (dump_graph) {
+            std::map<std::string, int> ser_hist;
+            for (const auto& op : model_graph.ops) {
+                const char* name = (op.opcode >= 0 && op.opcode < GGML_OP_COUNT)
+                    ? ggml_op_name(static_cast<enum ggml_op>(op.opcode))
+                    : "CUSTOM";
+                ser_hist[name]++;
+            }
+            std::cerr << "[ggmlc-bench] serialized_ops n=" << model_graph.ops.size()
+                      << " ggml_cuda_graphs_compiled="
+                      << (ggmlc::ModelExecutor::ggml_cuda_graphs_compiled() ? "1" : "0")
+                      << " diag_mode=" << diag_mode << "\n";
+            for (const auto& pair : ser_hist) {
+                std::cerr << "  ser " << pair.first << " " << pair.second << "\n";
+            }
         }
 
         uint64_t param_elements = 0;
@@ -243,6 +282,11 @@ int main(int argc, char** argv) {
                     if (use_kv_cache) symbol_env["pos"] = pos;
 
                     executor.prepare(symbol_env, !unplanned);
+                    if (dump_graph && chunk_idx == 0) {
+                        std::cerr << "[ggmlc-bench] runtime prefill graph P=" << P
+                                  << " chunk=" << c_len << ": "
+                                  << executor.runtime_graph_summary() << "\n";
+                    }
                     executor.set_input(in_tid, tokens.data() + c_start, c_len * sizeof(int32_t));
                     if (pos_tid >= 0) {
                         executor.set_input(pos_tid, pos_vec.data() + c_start, c_len * sizeof(int32_t));
@@ -311,6 +355,17 @@ int main(int argc, char** argv) {
             br.stddev_ts = std_ts;
             br.samples_ts = samples_ts;
             results.push_back(br);
+            if (enable_profile) {
+                auto p = executor.get_profile();
+                std::cerr << "[ggmlc-bench] profile pp" << P
+                          << " prepare_ms=" << p.prepare_ms
+                          << " set_chunk_pos_ms=" << p.set_chunk_pos_ms
+                          << " mask_fill_ms=" << p.mask_fill_ms
+                          << " run_ms=" << p.run_ms
+                          << " n_prepare=" << p.n_prepare
+                          << " n_run=" << p.n_run << "\n";
+                executor.reset_profile();
+            }
         }
 
         // ====================================================================
@@ -355,20 +410,56 @@ int main(int argc, char** argv) {
 
                 cur_pos = 0;
                 executor.prepare(sym_env, !unplanned);
+                if (dump_graph && r == 0) {
+                    std::cerr << "[ggmlc-bench] runtime decode graph: "
+                              << executor.runtime_graph_summary() << "\n";
+                    dump_graph = false;
+                }
                 executor.set_input(in_tid, &dummy_token, sizeof(int32_t));
                 if (pos_tid >= 0) executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
                 executor.run(n_threads);
                 executor.synchronize();
 
+                if (enable_profile) executor.reset_profile();
+
                 // Time pure N generation steps
                 auto t0 = std::chrono::high_resolution_clock::now();
-                for (int step = 1; step <= N; ++step) {
-                    cur_pos = step;
+                if (diag_mode == "replay") {
+                    // Freeze the graph at pos=1 and replay identical compute.
+                    cur_pos = 1;
                     if (use_kv_cache) sym_env["pos"] = cur_pos;
                     executor.prepare(sym_env, !unplanned);
                     executor.set_input(in_tid, &dummy_token, sizeof(int32_t));
                     if (pos_tid >= 0) executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
-                    executor.run(n_threads);
+                    for (int step = 1; step <= N; ++step) {
+                        executor.run(n_threads);
+                    }
+                } else if (diag_mode == "no-pos-update") {
+                    cur_pos = 1;
+                    if (use_kv_cache) sym_env["pos"] = cur_pos;
+                    executor.prepare(sym_env, !unplanned);
+                    for (int step = 1; step <= N; ++step) {
+                        executor.set_input(in_tid, &dummy_token, sizeof(int32_t));
+                        if (pos_tid >= 0) executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
+                        executor.run(n_threads);
+                    }
+                } else if (diag_mode == "host-only") {
+                    for (int step = 1; step <= N; ++step) {
+                        cur_pos = step;
+                        if (use_kv_cache) sym_env["pos"] = cur_pos;
+                        executor.prepare(sym_env, !unplanned);
+                        executor.set_input(in_tid, &dummy_token, sizeof(int32_t));
+                        if (pos_tid >= 0) executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
+                    }
+                } else {
+                    for (int step = 1; step <= N; ++step) {
+                        cur_pos = step;
+                        if (use_kv_cache) sym_env["pos"] = cur_pos;
+                        executor.prepare(sym_env, !unplanned);
+                        executor.set_input(in_tid, &dummy_token, sizeof(int32_t));
+                        if (pos_tid >= 0) executor.set_input(pos_tid, &cur_pos, sizeof(int32_t));
+                        executor.run(n_threads);
+                    }
                 }
                 executor.synchronize();
                 auto t1 = std::chrono::high_resolution_clock::now();
@@ -405,6 +496,18 @@ int main(int argc, char** argv) {
             br.stddev_ts = std_ts;
             br.samples_ts = samples_ts;
             results.push_back(br);
+            if (enable_profile) {
+                auto p = executor.get_profile();
+                std::cerr << "[ggmlc-bench] profile tg" << N
+                          << " diag=" << diag_mode
+                          << " prepare_ms=" << p.prepare_ms
+                          << " set_decode_pos_ms=" << p.set_decode_pos_ms
+                          << " run_ms=" << p.run_ms
+                          << " n_prepare=" << p.n_prepare
+                          << " n_set_decode_pos=" << p.n_set_decode_pos
+                          << " n_run=" << p.n_run << "\n";
+                executor.reset_profile();
+            }
         }
 
         // ====================================================================

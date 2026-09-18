@@ -99,6 +99,24 @@ public:
     bool is_cuda_graph_enabled() const { return enable_cuda_graph_; }
     bool is_cuda_graph_captured() const;
 
+    // Fine-grained profiling / graph inspection for bottleneck isolation
+    struct ExecutorProfile {
+        double prepare_ms = 0.0;
+        double set_decode_pos_ms = 0.0;
+        double set_chunk_pos_ms = 0.0;
+        double mask_fill_ms = 0.0;
+        double run_ms = 0.0;
+        int n_prepare = 0;
+        int n_set_decode_pos = 0;
+        int n_set_chunk_pos = 0;
+        int n_run = 0;
+    };
+    void set_enable_profile(bool enable);
+    void reset_profile();
+    ExecutorProfile get_profile() const { return profile_; }
+    std::string runtime_graph_summary() const;
+    static bool ggml_cuda_graphs_compiled();
+
     // Multi-bucket CUDA Graph execution (B in {1, 2, 4, 8, 16})
     void set_enable_cuda_graph_buckets(bool enable);
     bool is_cuda_graph_buckets_enabled() const { return enable_cuda_graph_buckets_; }
@@ -151,6 +169,9 @@ private:
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_k_;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_v_;
     struct ggml_tensor* shared_mask_tensor_ = nullptr;
+    struct ggml_tensor* kv_indices_tensor_ = nullptr;
+    struct ggml_tensor* kv_work_mask_tensor_ = nullptr;
+    int64_t kv_n_pad_ = 256;
 
     // Decode & Chunk Graph Cache: static execution graph and buffer for autoregressive steps
     struct AttnViewRefs {
@@ -164,11 +185,15 @@ private:
         struct ggml_tensor* scores = nullptr;
         struct ggml_tensor* probs = nullptr;
         struct ggml_tensor* v_t = nullptr;
+        struct ggml_tensor* indices = nullptr;
+        bool mask_is_precomputed_view = false;
+        size_t mask_row_nb = 0;
         size_t slot_base_offset_k = 0;
         size_t slot_base_offset_v = 0;
     };
     bool decode_graph_cached_ = false;
     int64_t decode_cached_pos_ = -1;
+    int64_t decode_cached_n_kv_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> decode_attn_views_;
 
     bool chunk_graph_cached_ = false;
@@ -188,6 +213,8 @@ private:
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;
     bool prepared_ = false;
+    bool enable_profile_ = false;
+    ExecutorProfile profile_;
 
     // CUDA Graph Management
     bool enable_cuda_graph_ = false;

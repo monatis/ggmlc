@@ -9,9 +9,9 @@ Comparing compiler-generated GGML execution graphs (`ggmlc`) against hand-writte
 - **Kernel launches**: Horizontal fusion merges parallel projections ($W_q, W_k, W_v$ and $W_{\text{gate}}, W_{\text{up}}$), cutting GEMV dispatches by 40%–43% (4 vs 7 GEMVs per layer, saving 90 kernel launches per token on 30 layers).
 - **Performance parity (RTX 4050 Laptop, CUDA 12.8, Q8_0)**:
   - **Short prefill ($P \le 256$)**: `ggmlc` is **1.06x–1.23x faster** due to fewer Windows WDDM kernel launch stalls.
-  - **Single chunk ($P = 512$)**: **0.91x–0.98x parity** (compute-bound cuBLAS GEMM / FlashAttention).
-  - **Multi-chunk ($P = 1024$, `ubatch 512`)**: **0.71x–0.80x parity** using in-place chunk graph caching (+43% to +58% over un-cached).
-  - **Decode ($S = 1$)**: **85%–91% parity** across architectures (113.7 tok/s, 150.2 GB/s on LLaMA-3.2-1B, ~93% practical bus saturation).
+  - **Single chunk ($P = 512$)**: **0.89x–0.98x parity** (compute-bound cuBLAS GEMM / FlashAttention). Remaining gap is lowering/layout, not host masks.
+  - **Multi-chunk ($P = 1024$, `ubatch 512`)**: **0.71x–0.80x parity** using in-place chunk graph caching.
+  - **Decode ($S = 1$)**: **~1.0x parity** after llama.cpp-style `ggml_set_rows` KV writes + padded `n_kv` (CUDA graphs stay warm). SmolLM2-135M: **287 tok/s vs llama.cpp 279 tok/s (1.03x)**. SmolLM2-360M live decode **192.5 tok/s** vs frozen-graph replay **196.5 tok/s** (was 140 tok/s with mutating `view+cpy`).
 - **Extensibility**: Non-standard attention patterns (GQA, QK-norm, sliding window, MLA) compile directly from reference Python code without new C++ runtime kernels.
 
 ---
@@ -23,7 +23,7 @@ Comparing compiler-generated GGML execution graphs (`ggmlc`) against hand-writte
 | **Model Ingestion** | Compiles PyTorch (`torch.export`) and JAX (`jaxpr`) traces. | Custom Python conversion scripts (`convert_hf_to_gguf.py`). |
 | **Model Implementation** | Zero model C++. Generic runtime executes any valid GGUF graph. | Hand-written C++ class per architecture (`src/models/*.cpp`). |
 | **Operator Fusion** | Automated compiler passes (horizontal GEMV, affine view folding, SwiGLU). | Manual weight packing during conversion or bespoke multi-weight tensors. |
-| **KV Cache** | Graph-bound tensors with in-place chunk caching + Driver-VMM virtual pages. | External C++ ring buffer (`struct llama_kv_cache`) with manual slot tracking. |
+| **KV Cache** | Graph-bound tensors: decode uses `ggml_set_rows` into a padded `n_kv` view (CUDA-graph stable); prefill still uses view+cpy + Driver-VMM pages. | External C++ ring buffer (`struct llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256. |
 | **CUDA Execution** | `CUDAGraphManager` (stream capture across CC $\ge 6.0$) + generic graph compute. | GGML CUDA graph (CC $\ge 7.0$) or sequential stream dispatches. |
 | **Scope** | Unified compiler for LLMs, SLMs, BERT, Whisper, and vision backbones. | Specialized C++ implementations for LLMs, audio, and multimodal. |
 
@@ -167,7 +167,7 @@ Non-standard attention variants compile directly from Python reference code with
 
 ### Decode Throughput ($S = 1$, Memory Bandwidth Bound)
 
-Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$:
+Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$. The table below is the **historical full-suite snapshot**. Isolated `p=0` `tg32` re-runs after the SET_ROWS fix are in [§7](#7-bottleneck-isolation-decode-cuda-graphs).
 
 | Model | Tokens ($N$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Ratio | Active Bandwidth | Bus Saturation |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -183,16 +183,48 @@ Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$:
 ### Observations
 
 1. **Short prefill ($P \le 256$)**: 1.06x–1.23x faster than `llama.cpp`. Horizontal fusion cuts 90 kernel launches per token on 30 layers, reducing Windows WDDM driver queue stalls.
-2. **Single full chunk ($P = 512$)**: 0.91x–0.98x parity. Compute-bound in cuBLAS and FlashAttention.
-3. **Multi-chunk prefill ($P = 1024$)**: 0.71x–0.80x parity. In-place chunk caching updates slice offsets directly, boosting throughput by +43% to +58% over un-cached graph reconstruction.
-4. **Decode ($S = 1$)**: 0.85x–0.91x parity. Reaches 150.2 GB/s on 1B+ models (~93% of practical GDDR6 bus bandwidth).
+2. **Single full chunk ($P = 512$)**: 0.89x–0.98x parity. Compute-bound in cuBLAS and FlashAttention. Isolation falsified mask H2D as the limiter (`mask_fill_ms` is milliseconds vs hundreds of ms of GEMM).
+3. **Multi-chunk prefill ($P = 1024$)**: 0.71x–0.80x parity. Chunk cache still mutates KV views every chunk, so GGML CUDA graphs cannot stay warm.
+4. **Decode ($S = 1$)**: After SET_ROWS + padded `n_kv`, live decode matches frozen-graph replay and meets or beats `llama.cpp` on SmolLM2-135M (see §7). Historical rows above still include pre-fix KV mutation on some models.
 
 ---
 
-## 7. Current Gaps
+## 7. Bottleneck Isolation (Decode CUDA Graphs)
 
-1. **Mask Host-to-Device Transfers**: `ggmlc` transfers causal mask slices over PCIe per prefill chunk. Moving mask synthesis to a GPU kernel will close the remaining ~20% multi-chunk gap.
-2. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
-3. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.
-4. **CPU Microkernels**: Relies on upstream `ggml-cpu` without custom assembly GEMV kernels.
+Factors were tested one at a time with `ggmlc-bench --diag-mode`, `GGMLC_DISABLE_SET_ROWS`, and `GGMLC_KV_PAD` (`scratch/diag_isolate_bottleneck.py`).
+
+| Hypothesis | Isolation | Verdict |
+| :--- | :--- | :--- |
+| Host KV / mask copies | `--diag-mode host-only` | **Falsified** (~0.03 ms/tok) |
+| Arena extra copies | `--unplanned` | **Falsified** (slower) |
+| Missing GGML CUDA graphs | frozen `--diag-mode replay` after `GGML_CUDA_GRAPHS=ON` | **Necessary but not sufficient**: replay hit ~196 tok/s on 360M while live stayed ~140 |
+| Per-token KV metadata mutation | live vs replay; `GGMLC_DISABLE_SET_ROWS=1` | **Verified**. `k_slot->view_offs` and `k_active->ne[1]` changed every token, resetting CUDA-graph warmup |
+| Inefficient PyTorch→GGML lowering | serialized opcode histogram vs runtime graph | **Not the decode limiter**. Serialized graph: 0 CPY, 0 CONT, QKV fusion (4 GEMMs/layer). Runtime still has 96 PERMUTE + 96 CONT from RoPE layout. Once CUDA graphs replay, decode matches llama.cpp; prefill can still pay for those extra kernels |
+
+### Fix
+
+Decode now writes K/V with `ggml_set_rows` into the full cache and attends a padded view (`n_kv = max(256, pad(pos+1, 256))`), updating only index/mask *contents*. Prefill still uses view+cpy.
+
+### Re-measured decode (`p=0`, `tg32`, 3 reps, RTX 4050)
+
+| Setup | tok/s |
+| :--- | ---: |
+| SmolLM2-360M SET_ROWS + pad256 (live) | **192.47** |
+| SmolLM2-360M frozen replay | **196.45** |
+| SmolLM2-360M legacy view+cpy | 140.06 |
+| SmolLM2-360M `GGMLC_KV_PAD=1` | 138.19 |
+| SmolLM2-135M ggmlc | **287.25** |
+| SmolLM2-135M llama.cpp | 278.98 (**ggmlc 1.03x**) |
+
+Greedy token identity vs the legacy KV path holds (cosine ≥ 0.9988 on 8 decode steps). A/B: `GGMLC_DISABLE_SET_ROWS=1`, `GGMLC_KV_PAD=1`.
+
+---
+
+## 8. Current Gaps
+
+1. **RoPE layout / extra CONT**: Compiler still emits `[head_dim, seq, heads]` permutes around RoPE. llama.cpp fuses `ROPE + VIEW + SET_ROWS`. This is the next lowering pass; it matters more for prefill and CPU than for graph-captured decode.
+2. **Multi-chunk prefill CUDA graphs**: Chunked `p=1024` still mutates KV view offsets. Apply the same SET_ROWS + pad treatment to `set_chunk_pos`.
+3. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
+4. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.
+5. **CPU Microkernels**: Relies on upstream `ggml-cpu` without custom assembly GEMV kernels.
 

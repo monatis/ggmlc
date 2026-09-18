@@ -80,6 +80,13 @@ NB_MODULE(_runtime, m) {
             return static_cast<int32_t>(t.type);
         });
 
+    nb::class_<ggmlc::SerializedOp>(m, "SerializedOp")
+        .def_ro("id", &ggmlc::SerializedOp::id)
+        .def_ro("opcode", &ggmlc::SerializedOp::opcode)
+        .def_ro("name", &ggmlc::SerializedOp::name)
+        .def_ro("inputs", &ggmlc::SerializedOp::inputs)
+        .def_ro("outputs", &ggmlc::SerializedOp::outputs);
+
     // SerializedModelGraph
     nb::class_<ggmlc::SerializedModelGraph>(m, "SerializedModelGraph")
         .def_ro("name", &ggmlc::SerializedModelGraph::name)
@@ -87,7 +94,8 @@ NB_MODULE(_runtime, m) {
         .def_ro("inputs", &ggmlc::SerializedModelGraph::inputs)
         .def_ro("outputs", &ggmlc::SerializedModelGraph::outputs)
         .def_ro("parameters", &ggmlc::SerializedModelGraph::parameters)
-        .def_ro("tensors", &ggmlc::SerializedModelGraph::tensors);
+        .def_ro("tensors", &ggmlc::SerializedModelGraph::tensors)
+        .def_ro("ops", &ggmlc::SerializedModelGraph::ops);
 
     // ModelLoader
     nb::class_<ggmlc::ModelLoader>(m, "ModelLoader")
@@ -193,7 +201,11 @@ NB_MODULE(_runtime, m) {
         .def("is_cuda_graph_captured", &ggmlc::ModelExecutor::is_cuda_graph_captured)
         .def("set_enable_cuda_graph_buckets", &ggmlc::ModelExecutor::set_enable_cuda_graph_buckets, "enable"_a)
         .def("is_cuda_graph_buckets_enabled", &ggmlc::ModelExecutor::is_cuda_graph_buckets_enabled)
-        .def("is_cuda_graph_bucket_captured", &ggmlc::ModelExecutor::is_cuda_graph_bucket_captured, "batch_size"_a);
+        .def("is_cuda_graph_bucket_captured", &ggmlc::ModelExecutor::is_cuda_graph_bucket_captured, "batch_size"_a)
+        .def("set_enable_profile", &ggmlc::ModelExecutor::set_enable_profile, "enable"_a)
+        .def("reset_profile", &ggmlc::ModelExecutor::reset_profile)
+        .def("runtime_graph_summary", &ggmlc::ModelExecutor::runtime_graph_summary)
+        .def_static("ggml_cuda_graphs_compiled", &ggmlc::ModelExecutor::ggml_cuda_graphs_compiled);
 
     // VMMBlockManager
     nb::class_<ggmlc::VMMBlockManager>(m, "NativeVMMBlockManager")
