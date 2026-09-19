@@ -234,7 +234,17 @@ After `ggml_set_rows` KV writes, padded `n_kv`, strided fused-QKV `VIEW→RESHAP
 | **SmolLM2-360M** | pp1024 | **8841** | 8812 | **1.00x** |
 | **GPT-2 Medium** | pp1024 | **9054** | 9022 | **1.00x** |
 
+End-to-end chat turns (`--e2e` / `-pg`, prefill then decode): SmolLM2 / Qwen / LLaMA at **~1.0x–1.3x** vs `llama.cpp` for $N=128$. A residual Qwen/LLaMA multi-chunk **prefill-only** gap (~0.84x–0.90x on pp512/pp1024) is deferred to a follow-up; it does not lose interactive wall-clock once generation is non-trivial.
+
 A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md).
+
+```bash
+# Throughput matrix (pp / tg separately)
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --ubatch 512 --runs 5
+
+# End-to-end wall clock (prefill + decode in one timed shot)
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --e2e --skip-numerical-check
+```
 
 ---
 

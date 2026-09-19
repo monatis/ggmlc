@@ -188,6 +188,18 @@ Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$. Aft
 3. **Multi-chunk prefill ($P = 1024$)**: llama-style `(s, n_kv)` graph buckets close the prior 0.71x–0.85x deficit — SmolLM2 / GPT-2 at **1.00x**; Qwen **0.88x** / LLaMA **0.90x** (was 0.71x / 0.79x).
 4. **Decode ($S = 1$)**: SET_ROWS + pad + buckets keep graphs warm — SmolLM2 / Qwen / LLaMA **beat** llama.cpp.
 
+### End-to-end wall clock (`--e2e` / `-pg`)
+
+User-shaped turns time **prefill then decode in one shot** (`ggmlc-bench -pg` vs `llama-bench -pg`). See `scratch/compare_ggmlc_vs_llama_e2e_summary.md`.
+
+| Chat-like ($N=128$) | vs llama.cpp wall ms |
+| :--- | :--- |
+| SmolLM2-360M ($P=64…1024$) | **1.20x–1.29x** (ahead) |
+| Qwen2.5-0.5B / LLaMA-3.2-1B | **~1.0x–1.1x** on $P\ge256$ (ahead/parity after remeasure) |
+| Prefill-heavy ($P=1024$, $N=16/32$) | Still ~0.90x–0.96x (prefill gap visible when decode is short) |
+
+**Go/no-go:** **EMBRACE** current stack for interactive chat — residual multi-chunk pp gap does not lose end-to-end latency once generation is non-trivial. Further multi-chunk pp investigation is **deferred to a follow-up PR**.
+
 ### Fusion A/B (prefill gap hypotheses, 2026-09-19)
 
 Harness: `--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv` + `--gguf-suffix` (never overwrites baseline `*_q8_0.gguf`). Full matrix vs `graph_buckets` baseline; details in `scratch/compare_ggmlc_vs_llama_fusion_ab_summary.md`.
@@ -265,7 +277,7 @@ Greedy token identity vs the legacy KV path holds (cosine ≥ 0.9988 on 8 decode
 ## 8. Current Gaps
 
 1. **Compiler-level RoPE layout pass**: Runtime strided reshape closes the CONT tax; a Canonical-IR pass that emits `[D,H,S]` views directly (and fuses `ROPE+VIEW+SET_ROWS` like llama.cpp CUDA) would shrink the IR further.
-2. **Residual prefill gap on Qwen / LLaMA**: multi-chunk bucket reuse is largely closed (SmolLM2/GPT-2 at 1.00x on pp1024); remaining 0.84x–0.90x on Qwen/LLaMA is **not** graph-switch tax and **not** horizontal MLP/QKV fusion (both A/Bs falsified — see §6 Fusion A/B). Likely deeper Q8 GEMM tile/layout efficiency on wide FFNs (`I≈4864` / `≈8192`).
+2. **Residual prefill gap on Qwen / LLaMA** *(deferred follow-up)*: multi-chunk bucket reuse is largely closed (SmolLM2/GPT-2 at 1.00x on pp1024); remaining 0.84x–0.90x on Qwen/LLaMA is **not** graph-switch tax and **not** horizontal MLP/QKV fusion (both A/Bs falsified — see §6 Fusion A/B). Likely deeper Q8 GEMM tile/layout efficiency on wide FFNs (`I≈4864` / `≈8192`). **Shipped decision:** e2e wall clock (`-pg`) **embraces** for chat-like $N=128$ turns (§6); further multi-chunk pp investigation is intentionally **out of this PR**.
 3. **Faster first-time rebuild**: bucket hits are cheap; the first `prepare()` per `(s, n_kv)` still walks Canonical IR. A lighter native rebuild (closer to llama `build_graph` cost) remains optional.
 4. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
 5. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.

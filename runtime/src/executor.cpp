@@ -2320,7 +2320,12 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 size_t nb2 = in0->nb[2] * (g_dim == 2 ? step : 1);
                 size_t nb3 = in0->nb[3] * (g_dim == 3 ? step : 1);
                 struct ggml_tensor* v = ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset);
-                if (env_flag_enabled("GGMLC_VIEW_FORCE_CONT") && !ggml_is_contiguous(v)) {
+                // Graph outputs must be host-readable via ggml_backend_tensor_get, which
+                // linearly copies ggml_nbytes (span of a strided view ≠ logical payload).
+                // Intermediate QKV/gate_up views stay non-contiguous for FA zero-copy.
+                const bool is_graph_output = std::find(
+                    model_graph_.outputs.begin(), model_graph_.outputs.end(), out_id) != model_graph_.outputs.end();
+                if ((is_graph_output || env_flag_enabled("GGMLC_VIEW_FORCE_CONT")) && !ggml_is_contiguous(v)) {
                     result = ggml_cont(ctx_, v);
                 } else {
                     result = v;
@@ -2857,10 +2862,19 @@ const void* ModelExecutor::get_output_data(uint32_t tensor_id) {
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    size_t sz = ggml_nbytes(it->second);
+    struct ggml_tensor* t = it->second;
+    // Logical payload (nelements), not ggml_nbytes span of a strided non-contiguous view.
+    const size_t type_size = ggml_type_size(t->type);
+    const int64_t blck = std::max<int64_t>(1, ggml_blck_size(t->type));
+    size_t sz = static_cast<size_t>(ggml_nelements(t) * type_size / blck);
+    if (!ggml_is_contiguous(t)) {
+        throw std::runtime_error(
+            "get_output_data: tensor " + std::to_string(tensor_id) +
+            " is a non-contiguous view; graph outputs must be materialized with ggml_cont");
+    }
     auto& host_buf = output_host_buffers_[tensor_id];
     host_buf.resize(sz);
-    ggml_backend_tensor_get(it->second, host_buf.data(), 0, sz);
+    ggml_backend_tensor_get(t, host_buf.data(), 0, sz);
     return host_buf.data();
 }
 
@@ -2877,11 +2891,14 @@ size_t ModelExecutor::get_tensor_size_bytes(uint32_t tensor_id) const {
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    size_t sz = ggml_nbytes(it->second);
+    struct ggml_tensor* t = it->second;
+    const size_t type_size = ggml_type_size(t->type);
+    const int64_t blck = std::max<int64_t>(1, ggml_blck_size(t->type));
+    size_t sz = static_cast<size_t>(ggml_nelements(t) * type_size / blck);
     if (sz == 0) {
         fprintf(stderr, "[DEBUG] tensor %u ne=[%lld,%lld,%lld,%lld] type=%d blck_size=%lld type_size=%zu\n",
-            tensor_id, (long long)it->second->ne[0], (long long)it->second->ne[1], (long long)it->second->ne[2], (long long)it->second->ne[3],
-            it->second->type, (long long)ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
+            tensor_id, (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
+            t->type, (long long)ggml_blck_size(t->type), ggml_type_size(t->type));
     }
     return sz;
 }

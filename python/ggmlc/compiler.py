@@ -70,9 +70,7 @@ def compile(
     # bake in default horizontal fusion that later A/B flags cannot undo.
     from ggmlc.transforms.fusion import FusionOptions as _FusionOptions
 
-    if fusion_options is None:
-        pass
-    elif isinstance(fusion_options, _FusionOptions):
+    if fusion_options is None or isinstance(fusion_options, _FusionOptions):
         pass
     elif isinstance(fusion_options, dict):
         normalized = _FusionOptions()
@@ -81,9 +79,7 @@ def compile(
                 setattr(normalized, k, v)
         fusion_options = normalized
     else:
-        raise TypeError(
-            f"fusion_options must be FusionOptions or dict, got {type(fusion_options)}"
-        )
+        raise TypeError(f"fusion_options must be FusionOptions or dict, got {type(fusion_options)}")
 
     # 1. Ingest model into Canonical IR Graph
     canonical_graph: Graph
