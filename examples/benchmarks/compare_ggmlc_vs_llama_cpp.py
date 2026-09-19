@@ -206,7 +206,8 @@ def compile_ggmlc_model(
     if fusion_options is not None:
         fusion_note = (
             f" fusion(mlp={fusion_options.enable_horizontal_mlp},"
-            f" qkv={fusion_options.enable_horizontal_qkv})"
+            f" qkv={fusion_options.enable_horizontal_qkv},"
+            f" bake_rms={fusion_options.enable_bake_rms_into_linear})"
         )
     print(
         f"⚙️ Compiling {model_name} (quantize={quantize}{fusion_note}) into ggmlc GGUF container...",
@@ -923,6 +924,11 @@ def main() -> int:
         help="Disable horizontal Q+K+V fusion at compile time (keeps MLP fusion unless also disabled)",
     )
     parser.add_argument(
+        "--fusion-bake-rms",
+        action="store_true",
+        help="Bake RMSNorm gamma into following Linear weights at compile time (Phase 3 bake)",
+    )
+    parser.add_argument(
         "--gguf-suffix",
         default="",
         help="Suffix for compiled GGUF (e.g. no_hmlp → scratch/{model}_q8_0_no_hmlp.gguf)",
@@ -951,12 +957,13 @@ def main() -> int:
 
     fusion_options = None
     gguf_suffix = args.gguf_suffix.strip()
-    if args.fusion_no_horizontal_mlp or args.fusion_no_horizontal_qkv:
+    if args.fusion_no_horizontal_mlp or args.fusion_no_horizontal_qkv or args.fusion_bake_rms:
         from ggmlc.transforms.fusion import FusionOptions
 
         fusion_options = FusionOptions(
             enable_horizontal_mlp=not args.fusion_no_horizontal_mlp,
             enable_horizontal_qkv=not args.fusion_no_horizontal_qkv,
+            enable_bake_rms_into_linear=bool(args.fusion_bake_rms),
         )
         if not gguf_suffix:
             parts: list[str] = []
@@ -964,6 +971,8 @@ def main() -> int:
                 parts.append("no_hmlp")
             if args.fusion_no_horizontal_qkv:
                 parts.append("no_hqkv")
+            if args.fusion_bake_rms:
+                parts.append("bake_rms")
             gguf_suffix = "_".join(parts)
 
     # 1. Locate binaries

@@ -1594,4 +1594,14 @@ extern DECL_MMQ_CASE(GGML_TYPE_NVFP4);
 void ggml_cuda_mul_mat_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst);
 
+// Phase 3b: MUL_MAT with src1 = rms_norm(x)*w fused into MMQ quantize (no F32 intermediate).
+// src0 = weights (Q8_0), x = RMS input, w = RMSNorm weight, dst = MUL_MAT output.
+void ggml_cuda_mul_mat_q_rms_norm_mul(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * x,
+        const ggml_tensor * w,
+        float eps,
+        ggml_tensor * dst);
+
 bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts);
