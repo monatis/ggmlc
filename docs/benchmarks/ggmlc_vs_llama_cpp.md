@@ -182,7 +182,7 @@ Both benches sample from a single final token’s logits after prefill:
 
 With `--full-logits` on `ggmlc-bench`, pp512 on the same machine drops relative to the default (larger drop on high-vocab models: Qwen V≈152k, LLaMA V≈128k, SmolLM V≈49k). That mode is for A/B only; it is not the fair `llama-bench` comparison.
 
-Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv`) does not close a fair-compare gap against llama when logits already match; default fusion remains on.
+Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv`) does not close a fair-compare gap against llama when logits already match; default fusion remains on. Compile-time RMS→Linear weight bake is **default ON** (opt out: `--fusion-no-bake-rms`); it removes post-norm `MUL` nodes without new CUDA kernels.
 
 ---
 

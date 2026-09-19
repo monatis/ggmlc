@@ -2960,18 +2960,110 @@ std::string ModelExecutor::runtime_graph_summary() const {
     int n_mul_mat = 0;
     int n_fa = 0;
     int n_set_rows = 0;
+
+    // Vertical / CUDA-adjacency fusion discovery counters.
+    // Stock ggml-cuda fuses only when ops are *consecutive* in cgraph->nodes.
+    int adj_rms_mul = 0;
+    int adj_rms_mul_add = 0;
+    int adj_rms_mul_rope = 0;
+    int adj_rms_mul_rope_set = 0;
+    int adj_rope_view_set = 0;
+    int adj_add_rms = 0;          // residual → norm (no stock CUDA fuse)
+    int adj_add_rms_mul = 0;      // residual → rms → weight (Phase 3 candidate)
+    int adj_mul_mul_mat = 0;      // scaled norm act → GEMM (already post RMS+MUL fuse)
+    int adj_norm_mul = 0;         // LayerNorm scale
+    int adj_add_norm = 0;
+    int broken_rms_then_mul = 0;  // RMS_NORM present but next kernel ≠ MUL
+    int rms_mul_edge_ok = 0;     // adjacent AND mul.src uses rms result
+    int rms_mul_edge_bad = 0;
+    std::map<std::string, int> kernel_bigrams;
+    std::vector<std::string> kernel_seq;
+    kernel_seq.reserve(static_cast<size_t>(n));
+
+    auto op_at = [&](int i) -> ggml_op {
+        struct ggml_tensor* t = ggml_graph_node(cgraph_, i);
+        return t ? t->op : GGML_OP_NONE;
+    };
+    auto tensor_at = [&](int i) -> struct ggml_tensor* {
+        return ggml_graph_node(cgraph_, i);
+    };
+    // Skip pure view/reshape metadata when scoring "next kernel" breaks.
+    auto next_kernel = [&](int i) -> int {
+        for (int j = i + 1; j < n; ++j) {
+            struct ggml_tensor* t = tensor_at(j);
+            if (!t) continue;
+            if (!is_metadata_op(t->op)) return j;
+        }
+        return -1;
+    };
+
     for (int i = 0; i < n; ++i) {
         struct ggml_tensor* node = ggml_graph_node(cgraph_, i);
         if (!node) continue;
         const char* name = ggml_op_name(node->op);
         hist[name]++;
-        if (!is_metadata_op(node->op)) n_kernel++;
+        if (!is_metadata_op(node->op)) {
+            n_kernel++;
+            kernel_seq.emplace_back(name);
+        }
         if (node->op == GGML_OP_CPY) n_cpy++;
         if (node->op == GGML_OP_CONT || node->op == GGML_OP_DUP) n_cont++;
         if (node->op == GGML_OP_MUL_MAT) n_mul_mat++;
         if (node->op == GGML_OP_FLASH_ATTN_EXT) n_fa++;
         if (node->op == GGML_OP_SET_ROWS) n_set_rows++;
+
+        // Strict consecutive adjacency (matches ggml_cuda_can_fuse indexing).
+        if (i + 1 < n && op_at(i) == GGML_OP_RMS_NORM && op_at(i + 1) == GGML_OP_MUL) {
+            adj_rms_mul++;
+            struct ggml_tensor* rms = tensor_at(i);
+            struct ggml_tensor* mul = tensor_at(i + 1);
+            if (mul && rms && (mul->src[0] == rms || mul->src[1] == rms)) {
+                rms_mul_edge_ok++;
+            } else {
+                rms_mul_edge_bad++;
+            }
+            if (i + 2 < n && op_at(i + 2) == GGML_OP_ADD) adj_rms_mul_add++;
+            if (i + 2 < n && op_at(i + 2) == GGML_OP_ROPE) {
+                adj_rms_mul_rope++;
+                if (i + 4 < n && op_at(i + 3) == GGML_OP_VIEW && op_at(i + 4) == GGML_OP_SET_ROWS) {
+                    adj_rms_mul_rope_set++;
+                }
+            }
+            if (i + 2 < n && op_at(i + 2) == GGML_OP_MUL_MAT) adj_mul_mul_mat++;
+        }
+        if (i + 2 < n && op_at(i) == GGML_OP_ROPE && op_at(i + 1) == GGML_OP_VIEW &&
+            op_at(i + 2) == GGML_OP_SET_ROWS) {
+            adj_rope_view_set++;
+        }
+        if (i + 1 < n && op_at(i) == GGML_OP_ADD && op_at(i + 1) == GGML_OP_RMS_NORM) {
+            adj_add_rms++;
+            if (i + 2 < n && op_at(i + 2) == GGML_OP_MUL) adj_add_rms_mul++;
+        }
+        if (i + 1 < n && op_at(i) == GGML_OP_NORM && op_at(i + 1) == GGML_OP_MUL) adj_norm_mul++;
+        if (i + 1 < n && op_at(i) == GGML_OP_ADD && op_at(i + 1) == GGML_OP_NORM) adj_add_norm++;
+
+        if (node->op == GGML_OP_RMS_NORM) {
+            if (!(i + 1 < n && op_at(i + 1) == GGML_OP_MUL)) {
+                // Also check if MUL is next *kernel* after metadata (still not CUDA-fusible).
+                const int nk = next_kernel(i);
+                if (nk < 0 || op_at(nk) != GGML_OP_MUL) {
+                    broken_rms_then_mul++;
+                } else {
+                    // MUL exists but not adjacent — CUDA fuse miss.
+                    broken_rms_then_mul++;
+                }
+            }
+        }
     }
+    for (size_t ki = 0; ki + 1 < kernel_seq.size(); ++ki) {
+        kernel_bigrams[kernel_seq[ki] + "->" + kernel_seq[ki + 1]]++;
+    }
+    // Keep top kernel bigrams for discovery (by count).
+    std::vector<std::pair<std::string, int>> bigram_sorted(kernel_bigrams.begin(), kernel_bigrams.end());
+    std::sort(bigram_sorted.begin(), bigram_sorted.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    const size_t bigram_keep = std::min<size_t>(24, bigram_sorted.size());
+
     oss << "{\"n_nodes\":" << n
         << ",\"n_kernel_nodes\":" << n_kernel
         << ",\"n_cpy\":" << n_cpy
@@ -2985,6 +3077,27 @@ std::string ModelExecutor::runtime_graph_summary() const {
         << ",\"set_rows_kv\":" << (kv_indices_tensor_ ? "true" : "false")
         << ",\"ggml_cuda_graphs_compiled\":" << (ggml_cuda_graphs_compiled() ? "true" : "false")
         << ",\"cuda_graph_manager_captured\":" << (is_cuda_graph_captured() ? "true" : "false")
+        << ",\"vertical\":{"
+        << "\"adj_rms_mul\":" << adj_rms_mul
+        << ",\"rms_mul_edge_ok\":" << rms_mul_edge_ok
+        << ",\"rms_mul_edge_bad\":" << rms_mul_edge_bad
+        << ",\"adj_rms_mul_add\":" << adj_rms_mul_add
+        << ",\"adj_rms_mul_rope\":" << adj_rms_mul_rope
+        << ",\"adj_rms_mul_rope_set\":" << adj_rms_mul_rope_set
+        << ",\"adj_rope_view_set\":" << adj_rope_view_set
+        << ",\"adj_add_rms\":" << adj_add_rms
+        << ",\"adj_add_rms_mul\":" << adj_add_rms_mul
+        << ",\"adj_mul_mul_mat\":" << adj_mul_mul_mat
+        << ",\"adj_norm_mul\":" << adj_norm_mul
+        << ",\"adj_add_norm\":" << adj_add_norm
+        << ",\"broken_rms_then_mul\":" << broken_rms_then_mul
+        << "}"
+        << ",\"kernel_bigrams\":{";
+    for (size_t bi = 0; bi < bigram_keep; ++bi) {
+        if (bi) oss << ",";
+        oss << "\"" << bigram_sorted[bi].first << "\":" << bigram_sorted[bi].second;
+    }
+    oss << "}"
         << ",\"ops\":{";
     bool first = true;
     for (const auto& pair : hist) {

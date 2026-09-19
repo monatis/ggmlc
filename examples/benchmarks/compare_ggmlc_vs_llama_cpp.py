@@ -206,7 +206,8 @@ def compile_ggmlc_model(
     if fusion_options is not None:
         fusion_note = (
             f" fusion(mlp={fusion_options.enable_horizontal_mlp},"
-            f" qkv={fusion_options.enable_horizontal_qkv})"
+            f" qkv={fusion_options.enable_horizontal_qkv},"
+            f" bake_rms={fusion_options.enable_bake_rms_into_linear})"
         )
     print(
         f"⚙️ Compiling {model_name} (quantize={quantize}{fusion_note}) into ggmlc GGUF container...",
@@ -923,6 +924,16 @@ def main() -> int:
         help="Disable horizontal Q+K+V fusion at compile time (keeps MLP fusion unless also disabled)",
     )
     parser.add_argument(
+        "--fusion-bake-rms",
+        action="store_true",
+        help="(Deprecated no-op) Bake RMS into Linear is ON by default; use --fusion-no-bake-rms to disable",
+    )
+    parser.add_argument(
+        "--fusion-no-bake-rms",
+        action="store_true",
+        help="Disable compile-time RMSNorm gamma bake into Linear weights",
+    )
+    parser.add_argument(
         "--gguf-suffix",
         default="",
         help="Suffix for compiled GGUF (e.g. no_hmlp → scratch/{model}_q8_0_no_hmlp.gguf)",
@@ -951,12 +962,19 @@ def main() -> int:
 
     fusion_options = None
     gguf_suffix = args.gguf_suffix.strip()
-    if args.fusion_no_horizontal_mlp or args.fusion_no_horizontal_qkv:
+    if (
+        args.fusion_no_horizontal_mlp
+        or args.fusion_no_horizontal_qkv
+        or args.fusion_no_bake_rms
+        or args.fusion_bake_rms
+    ):
         from ggmlc.transforms.fusion import FusionOptions
 
+        # Bake is default ON; --fusion-no-bake-rms disables. Legacy --fusion-bake-rms is a no-op.
         fusion_options = FusionOptions(
             enable_horizontal_mlp=not args.fusion_no_horizontal_mlp,
             enable_horizontal_qkv=not args.fusion_no_horizontal_qkv,
+            enable_bake_rms_into_linear=not args.fusion_no_bake_rms,
         )
         if not gguf_suffix:
             parts: list[str] = []
@@ -964,6 +982,8 @@ def main() -> int:
                 parts.append("no_hmlp")
             if args.fusion_no_horizontal_qkv:
                 parts.append("no_hqkv")
+            if args.fusion_no_bake_rms:
+                parts.append("no_bake_rms")
             gguf_suffix = "_".join(parts)
 
     # 1. Locate binaries
