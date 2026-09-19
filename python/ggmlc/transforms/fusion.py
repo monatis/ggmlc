@@ -30,17 +30,10 @@ class FusionOptions:
     enable_horizontal_qkv: bool = True
     enable_rope: bool = True
     enable_sdpa_transpose: bool = True
-    # Vertical residual prologue: ADD → RMS_NORM → weight MUL.
-    # IR already emits this chain adjacently via CUSTOM_RMS_NORM. CUDA runtime
-    # fuse is opt-in (GGML_CUDA_ENABLE_ADD_RMS_FUSION=1); default off after A/B
-    # showed ~flat tok/s vs stock under CUDA graphs.
-    enable_vertical_add_rms: bool = False
-    # Fold scaled RMS into the following MUL_MAT prologue (Phase 3b — cuts DRAM).
-    enable_vertical_norm_gemm: bool = False
     # Bake RMSNorm gamma into following Linear weight columns at compile time,
     # then emit weightless RMS_NORM. Removes the post-norm MUL (and gamma tensor)
     # without new CUDA kernels. Must run after horizontal fusion; quantize sees
-    # already-scaled W. Opt-in for A/B (default off).
+    # already-scaled W. Opt-in until Qwen/LLaMA A/B confirms (default off).
     enable_bake_rms_into_linear: bool = False
 
 

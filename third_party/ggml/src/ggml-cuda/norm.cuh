@@ -13,12 +13,6 @@ void ggml_cuda_op_rms_norm_fused_add(ggml_backend_cuda_context & ctx,
                                      ggml_tensor *               mul_tensor,
                                      ggml_tensor *               add_tensor);
 
-// Residual prologue: dst = rms_norm(add_a + add_b) * mul_weight
-void ggml_cuda_op_add_rms_norm_fused(ggml_backend_cuda_context & ctx,
-                                     ggml_tensor *               add_tensor,
-                                     ggml_tensor *               rms_norm_tensor,
-                                     ggml_tensor *               mul_tensor);
-
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 
 void ggml_cuda_op_l2_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst);

@@ -3270,45 +3270,6 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
-    // Residual prologue: ADD → RMS_NORM → MUL
-    // Writes both residual (ADD, kept live for the next block) and rms_norm(a+b)*w.
-    // Opt-in only: GGML_CUDA_ENABLE_ADD_RMS_FUSION=1
-    // Empirically ~flat vs stock ADD + RMS_NORM+MUL under CUDA graphs (same DRAM
-    // traffic; launch tax already amortized). Kept for kernel experiments.
-    {
-        static bool enable_add_rms = getenv("GGML_CUDA_ENABLE_ADD_RMS_FUSION") != nullptr &&
-                                     std::atoi(getenv("GGML_CUDA_ENABLE_ADD_RMS_FUSION"));
-        if (enable_add_rms && node->op == GGML_OP_ADD && i + 2 < cgraph->n_nodes &&
-            cgraph->nodes[i + 1]->op == GGML_OP_RMS_NORM &&
-            cgraph->nodes[i + 2]->op == GGML_OP_MUL) {
-            ggml_tensor * add_t = cgraph->nodes[i];
-            ggml_tensor * rms_t = cgraph->nodes[i + 1];
-            ggml_tensor * mul_t = cgraph->nodes[i + 2];
-            const bool subgraph_ok = ggml_can_fuse_subgraph(
-                cgraph, i, { GGML_OP_ADD, GGML_OP_RMS_NORM, GGML_OP_MUL }, { i, i + 2 });
-            const bool edges_ok = (rms_t->src[0] == add_t) &&
-                                  (mul_t->src[0] == rms_t || mul_t->src[1] == rms_t);
-            const bool types_ok = add_t->type == GGML_TYPE_F32 && rms_t->type == GGML_TYPE_F32 &&
-                                  mul_t->type == GGML_TYPE_F32 &&
-                                  add_t->src[0] && add_t->src[1] &&
-                                  add_t->src[0]->type == GGML_TYPE_F32 &&
-                                  add_t->src[1]->type == GGML_TYPE_F32 &&
-                                  ggml_are_same_shape(add_t->src[0], add_t->src[1]) &&
-                                  ggml_is_contiguous_rows(add_t->src[0]) &&
-                                  ggml_is_contiguous_rows(add_t->src[1]);
-            const ggml_tensor * w = (mul_t->src[0] == rms_t) ? mul_t->src[1] : mul_t->src[0];
-            const bool writes_ok = add_t->data && mul_t->data &&
-                                   add_t->data != mul_t->data &&
-                                   w && w->data &&
-                                   w->data != add_t->data &&
-                                   w->data != mul_t->data;
-            if (subgraph_ok && edges_ok && types_ok && writes_ok) {
-                ggml_cuda_op_add_rms_norm_fused(*cuda_ctx, add_t, rms_t, mul_t);
-                return 2;
-            }
-        }
-    }
-
     // gated_delta_net -> cpy: scatter recurrent-state snapshots into the cache
     if (node->op == GGML_OP_GATED_DELTA_NET) {
         ggml_cuda_gated_delta_net_fused_cache fused_state_cpy;
@@ -3998,44 +3959,6 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD }, {})) {
         ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2]);
         return 2;
-    }
-
-    // Phase 3b: RMS_NORM → MUL → MUL_MAT  (fold scale into MMQ quantize; skip F32 write)
-    // Opt-in: GGML_CUDA_ENABLE_NORM_GEMM_FUSION=1
-    {
-        static bool enable_norm_gemm = getenv("GGML_CUDA_ENABLE_NORM_GEMM_FUSION") != nullptr &&
-                                       std::atoi(getenv("GGML_CUDA_ENABLE_NORM_GEMM_FUSION"));
-        if (enable_norm_gemm && node->op == GGML_OP_RMS_NORM && i + 2 < cgraph->n_nodes &&
-            cgraph->nodes[i + 1]->op == GGML_OP_MUL &&
-            cgraph->nodes[i + 2]->op == GGML_OP_MUL_MAT &&
-            ggml_can_fuse_subgraph(cgraph, i,
-                { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_MUL_MAT }, { i + 2 })) {
-            ggml_tensor * rms_t = cgraph->nodes[i];
-            ggml_tensor * mul_t = cgraph->nodes[i + 1];
-            ggml_tensor * mm_t  = cgraph->nodes[i + 2];
-            const bool edges_ok = (mul_t->src[0] == rms_t || mul_t->src[1] == rms_t) &&
-                                  (mm_t->src[1] == mul_t);
-            const ggml_tensor * w = (mul_t->src[0] == rms_t) ? mul_t->src[1] : mul_t->src[0];
-            const ggml_tensor * x = rms_t->src[0];
-            const ggml_tensor * weights = mm_t->src[0];
-            float eps = 0.0f;
-            memcpy(&eps, rms_t->op_params, sizeof(float));
-            const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
-            // Prefill-only: at S=1 MMVQ is faster; forcing MMQ here regresses decode.
-            const int64_t n_tokens = x->ne[1];
-            const bool types_ok = edges_ok && x && w && weights &&
-                x->type == GGML_TYPE_F32 && w->type == GGML_TYPE_F32 &&
-                rms_t->type == GGML_TYPE_F32 && mul_t->type == GGML_TYPE_F32 &&
-                mm_t->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_Q8_0 &&
-                n_tokens >= 32 &&
-                ggml_is_contiguous_rows(x) && ggml_is_contiguous_rows(w) &&
-                w->ne[0] == x->ne[0] &&
-                ggml_cuda_should_use_mmq(weights->type, cc, n_tokens, /*n_experts=*/0);
-            if (types_ok) {
-                ggml_cuda_mul_mat_q_rms_norm_mul(*cuda_ctx, weights, x, w, eps, mm_t);
-                return 2;
-            }
-        }
     }
 
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
