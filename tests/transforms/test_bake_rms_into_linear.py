@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-
 from ggmlc.ir.dtype import DType
 from ggmlc.ir.graph import Graph
 from ggmlc.ir.op import OpCode
@@ -26,7 +25,9 @@ def _build_rms_linear_graph(
     t_gamma = g.add_tensor("gamma", Shape.from_tuple((hidden,)), DType.F32, StorageClass.PARAMETER)
     t_gamma.data = gamma.copy()
 
-    t_rms = g.add_tensor("rms_out", Shape.from_tuple((2, hidden)), DType.F32, StorageClass.ACTIVATION)
+    t_rms = g.add_tensor(
+        "rms_out", Shape.from_tuple((2, hidden)), DType.F32, StorageClass.ACTIVATION
+    )
     g.inputs = [t_x.id]
     g.parameters = [t_gamma.id]
     g.add_op(OpCode.RMS_NORM, [t_x.id, t_gamma.id], [t_rms.id], attributes={"eps": 1e-5})
