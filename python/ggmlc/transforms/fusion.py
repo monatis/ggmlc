@@ -33,8 +33,8 @@ class FusionOptions:
     # Bake RMSNorm gamma into following Linear weight columns at compile time,
     # then emit weightless RMS_NORM. Removes the post-norm MUL (and gamma tensor)
     # without new CUDA kernels. Must run after horizontal fusion; quantize sees
-    # already-scaled W. Opt-in until Qwen/LLaMA A/B confirms (default off).
-    enable_bake_rms_into_linear: bool = False
+    # already-scaled W. Default ON after SmolLM/Qwen/LLaMA A/B (stable, often faster).
+    enable_bake_rms_into_linear: bool = True
 
 
 class OperatorFusionPass(Pass):
