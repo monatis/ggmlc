@@ -96,6 +96,14 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
         _fuse_bias_gelu_patterns(graph)
 
     if options.enable_horizontal_mlp or options.enable_horizontal_qkv:
+        import os
+
+        if os.environ.get("GGMLC_DEBUG_FUSION"):
+            print(
+                f"[fusion] horizontal mlp={options.enable_horizontal_mlp} "
+                f"qkv={options.enable_horizontal_qkv}",
+                flush=True,
+            )
         _fuse_horizontal_linear_patterns(graph, options)
 
     if options.enable_swiglu and options.enable_horizontal_mlp:

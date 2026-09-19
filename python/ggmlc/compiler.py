@@ -66,6 +66,25 @@ def compile(
         >>> model_path = ggmlc.compile(model, (x,), output="resnet18.gguf")
         >>> runner = ggmlc.load(model_path)
     """
+    # Normalize fusion_options before export so the PyTorch exporter does not
+    # bake in default horizontal fusion that later A/B flags cannot undo.
+    from ggmlc.transforms.fusion import FusionOptions as _FusionOptions
+
+    if fusion_options is None:
+        pass
+    elif isinstance(fusion_options, _FusionOptions):
+        pass
+    elif isinstance(fusion_options, dict):
+        normalized = _FusionOptions()
+        for k, v in fusion_options.items():
+            if hasattr(normalized, k):
+                setattr(normalized, k, v)
+        fusion_options = normalized
+    else:
+        raise TypeError(
+            f"fusion_options must be FusionOptions or dict, got {type(fusion_options)}"
+        )
+
     # 1. Ingest model into Canonical IR Graph
     canonical_graph: Graph
     if isinstance(model, Graph):
@@ -77,7 +96,12 @@ def compile(
             raise ValueError("sample_inputs must be provided when compiling a PyTorch model.")
         inputs_tuple = tuple(sample_inputs) if isinstance(sample_inputs, list) else sample_inputs
         exported = export_torch_model(
-            model, inputs_tuple, dynamic_shapes=dynamic_shapes, model_name=model_name
+            model,
+            inputs_tuple,
+            dynamic_shapes=dynamic_shapes,
+            model_name=model_name,
+            enable_fusion=enable_fusion,
+            fusion_options=fusion_options,
         )
         canonical_graph = exported.main_graph
     elif callable(model) and not hasattr(model, "parameters"):  # JAX function or callable
@@ -99,7 +123,12 @@ def compile(
             raise ValueError("sample_inputs must be provided for model compilation.")
         inputs_tuple = tuple(sample_inputs) if isinstance(sample_inputs, list) else sample_inputs
         exported = export_torch_model(
-            model, inputs_tuple, dynamic_shapes=dynamic_shapes, model_name=model_name
+            model,
+            inputs_tuple,
+            dynamic_shapes=dynamic_shapes,
+            model_name=model_name,
+            enable_fusion=enable_fusion,
+            fusion_options=fusion_options,
         )
         canonical_graph = exported.main_graph
 

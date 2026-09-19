@@ -173,8 +173,16 @@ def compile_ggmlc_model(
     quantize: str = "q8_0",
     output_dir: str = "scratch",
     force_recompile: bool = False,
+    fusion_options: Any | None = None,
+    gguf_suffix: str = "",
 ) -> str:
-    """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container."""
+    """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container.
+
+    Args:
+        fusion_options: Optional ``FusionOptions`` instance passed to ``ggmlc.compile``.
+        gguf_suffix: Appended before ``.gguf`` (e.g. ``_no_hmlp``) so A/B artifacts do not
+            overwrite the default ``{model}_{quantize}.gguf`` baseline.
+    """
     import ggmlc
     from ggmlc.pipeline.tokenizer import BPETokenizer
 
@@ -188,13 +196,21 @@ def compile_ggmlc_model(
         load_smollm2_model,
     )
 
-    target_path = Path(output_dir) / f"{model_name}_{quantize}.gguf"
+    suffix = gguf_suffix if not gguf_suffix or gguf_suffix.startswith("_") else f"_{gguf_suffix}"
+    target_path = Path(output_dir) / f"{model_name}_{quantize}{suffix}.gguf"
     if target_path.is_file() and not force_recompile:
         return str(target_path.resolve())
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    fusion_note = ""
+    if fusion_options is not None:
+        fusion_note = (
+            f" fusion(mlp={fusion_options.enable_horizontal_mlp},"
+            f" qkv={fusion_options.enable_horizontal_qkv})"
+        )
     print(
-        f"⚙️ Compiling {model_name} (quantize={quantize}) into ggmlc GGUF container...", flush=True
+        f"⚙️ Compiling {model_name} (quantize={quantize}{fusion_note}) into ggmlc GGUF container...",
+        flush=True,
     )
 
     model_key = model_name.lower()
@@ -228,16 +244,20 @@ def compile_ggmlc_model(
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")
 
-    ggmlc.compile(
-        model=model,
-        sample_inputs=dummy_input,
-        output=str(target_path),
-        dynamic_shapes=dynamic_shapes,
-        model_name=model_name,
-        quantize=quantize,
-        pipeline=tokenizer,
-        tasks=["text-generation"],
-    )
+    compile_kwargs: dict[str, Any] = {
+        "model": model,
+        "sample_inputs": dummy_input,
+        "output": str(target_path),
+        "dynamic_shapes": dynamic_shapes,
+        "model_name": model_name,
+        "quantize": quantize,
+        "pipeline": tokenizer,
+        "tasks": ["text-generation"],
+    }
+    if fusion_options is not None:
+        compile_kwargs["fusion_options"] = fusion_options
+        compile_kwargs["enable_fusion"] = True
+    ggmlc.compile(**compile_kwargs)
 
     del model
     del dummy_input
@@ -721,11 +741,43 @@ def main() -> int:
     parser.add_argument(
         "--force-recompile", action="store_true", help="Force re-export and compilation of models"
     )
+    parser.add_argument(
+        "--fusion-no-horizontal-mlp",
+        action="store_true",
+        help="Disable horizontal Gate+Up MLP fusion at compile time (keeps QKV fusion unless also disabled)",
+    )
+    parser.add_argument(
+        "--fusion-no-horizontal-qkv",
+        action="store_true",
+        help="Disable horizontal Q+K+V fusion at compile time (keeps MLP fusion unless also disabled)",
+    )
+    parser.add_argument(
+        "--gguf-suffix",
+        default="",
+        help="Suffix for compiled GGUF (e.g. no_hmlp → scratch/{model}_q8_0_no_hmlp.gguf)",
+    )
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     prompt_lens = [int(p.strip()) for p in args.prompt_lens.split(",") if p.strip()]
     gen_lens = [int(n.strip()) for n in args.gen_lens.split(",") if n.strip()]
+
+    fusion_options = None
+    gguf_suffix = args.gguf_suffix.strip()
+    if args.fusion_no_horizontal_mlp or args.fusion_no_horizontal_qkv:
+        from ggmlc.transforms.fusion import FusionOptions
+
+        fusion_options = FusionOptions(
+            enable_horizontal_mlp=not args.fusion_no_horizontal_mlp,
+            enable_horizontal_qkv=not args.fusion_no_horizontal_qkv,
+        )
+        if not gguf_suffix:
+            parts: list[str] = []
+            if args.fusion_no_horizontal_mlp:
+                parts.append("no_hmlp")
+            if args.fusion_no_horizontal_qkv:
+                parts.append("no_hqkv")
+            gguf_suffix = "_".join(parts)
 
     # 1. Locate binaries
     ggml_bench_bin = find_binary("ggmlc-bench", args.ggmlc_bench_bin) or find_binary("ggml-bench", args.ggmlc_bench_bin)
@@ -756,7 +808,11 @@ def main() -> int:
 
         # A. Compile or locate ggmlc GGUF
         ggmlc_gguf = compile_ggmlc_model(
-            model_name, quantize=args.quantize, force_recompile=args.force_recompile
+            model_name,
+            quantize=args.quantize,
+            force_recompile=args.force_recompile,
+            fusion_options=fusion_options,
+            gguf_suffix=gguf_suffix,
         )
 
         # B. Check numerical parity

@@ -188,6 +188,18 @@ Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$. Aft
 3. **Multi-chunk prefill ($P = 1024$)**: llama-style `(s, n_kv)` graph buckets close the prior 0.71x–0.85x deficit — SmolLM2 / GPT-2 at **1.00x**; Qwen **0.88x** / LLaMA **0.90x** (was 0.71x / 0.79x).
 4. **Decode ($S = 1$)**: SET_ROWS + pad + buckets keep graphs warm — SmolLM2 / Qwen / LLaMA **beat** llama.cpp.
 
+### Fusion A/B (prefill gap hypotheses, 2026-09-19)
+
+Harness: `--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv` + `--gguf-suffix` (never overwrites baseline `*_q8_0.gguf`). Full matrix vs `graph_buckets` baseline; details in `scratch/compare_ggmlc_vs_llama_fusion_ab_summary.md`.
+
+| Variant | Qwen Δ pp512/1024 | LLaMA Δ pp512/1024 | SmolLM/GPT-2 | Adopt? |
+| :--- | :---: | :---: | :--- | :--- |
+| `no_hmlp` (MLP off, QKV on) | +0.019 | +0.044 | 8 regressions | **No** |
+| `no_hqkv` (QKV off, MLP on) | −0.004 | +0.037 | 15 regressions | **No** |
+| Qwen bias-split | — | — | — | **Skipped** (HQKV-off did not help Qwen) |
+
+**Keep default fusion ON.** Residual Qwen/LLaMA prefill gap is not fixed by unfusing Gate+Up or QKV (incl. Qwen bias-concat).
+
 ---
 
 ## 7. Bottleneck Isolation (Decode CUDA Graphs)
@@ -253,7 +265,7 @@ Greedy token identity vs the legacy KV path holds (cosine ≥ 0.9988 on 8 decode
 ## 8. Current Gaps
 
 1. **Compiler-level RoPE layout pass**: Runtime strided reshape closes the CONT tax; a Canonical-IR pass that emits `[D,H,S]` views directly (and fuses `ROPE+VIEW+SET_ROWS` like llama.cpp CUDA) would shrink the IR further.
-2. **Residual prefill gap on Qwen / LLaMA**: multi-chunk bucket reuse is largely closed (SmolLM2/GPT-2 at 1.00x on pp1024); remaining 0.84x–0.90x on Qwen/LLaMA looks like compute/layout density, not graph-switch tax.
+2. **Residual prefill gap on Qwen / LLaMA**: multi-chunk bucket reuse is largely closed (SmolLM2/GPT-2 at 1.00x on pp1024); remaining 0.84x–0.90x on Qwen/LLaMA is **not** graph-switch tax and **not** horizontal MLP/QKV fusion (both A/Bs falsified — see §6 Fusion A/B). Likely deeper Q8 GEMM tile/layout efficiency on wide FFNs (`I≈4864` / `≈8192`).
 3. **Faster first-time rebuild**: bucket hits are cheap; the first `prepare()` per `(s, n_kv)` still walks Canonical IR. A lighter native rebuild (closer to llama `build_graph` cost) remains optional.
 4. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
 5. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.
