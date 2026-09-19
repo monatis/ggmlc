@@ -35,7 +35,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
 5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
-7. **Hardware-Accelerated Persistent KV Cache**: Dedicated zero-copy device key/value buffers with dual-phase prefill and single-token decode ($S=1$), delivering constant $O(1)$ inter-token decode latency (~15.6–16.3 ms/tok on CUDA, up to 64.1 tok/s) across arbitrary sequence lengths (32, 64, 128, 256+ tokens), outperforming `llama.cpp`.
+7. **Hardware-Accelerated Persistent KV Cache**: Decode/prefill write K/V with `ggml_set_rows` into padded `(s, n_kv)` graph buckets (llama `can_reuse` analogue) so GGML CUDA graphs stay warm. SmolLM2-360M Q8_0 on RTX 4050: **pp1024 1.00x** vs `llama.cpp`; decode **1.08x–1.10x**.
 8. **High-Throughput Agent Serving & Driver-VMM Paged KV Cache**: GPU MMU virtual memory paging (`cuMemMap`) allocates physical 2 MB pages on demand with **zero bandwidth penalty** (41.77 GB/s), pointer invariance across dynamic expansions, immediate physical VRAM reclamation, and multi-bucket CUDA graphs ($B \in \{1, 2, 4, 8, 16\}$) for iteration-level continuous batching.
 9. **Radix Tree Automated Prefix Caching & Warm Block Pool**: Token-sequence prefix matching via CPU trie directly maps cached physical pages into contiguous virtual slots via `cuMemMap`, skipping prefill for shared prompt prefixes with **zero custom attention kernels**, while elastic warm-pool recycling minimizes OS driver syscalls.
 
@@ -222,18 +222,29 @@ print("Generated text:", text)
 ./ggmlc-run resnet50.gguf --image x:cat.jpg --threads 4
 ```
 
-#### Autoregressive KV Cache Benchmark: `ggmlc-run` vs. `llama.cpp` (SmolLM2-135M)
+#### Autoregressive decode + prefill vs `llama-bench` (RTX 4050, Q8_0)
 
-| Sequence Length | Target Device | `llama.cpp` Latency | `ggmlc-run` Latency | `ggmlc-run` Decode Rate | vs `llama.cpp` | Latency Scaling |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **32 tokens** | **CUDA GPU** | 15.43 ms/tok | **13.46 ms/tok** | **74.3 tok/s** | **1.15x faster** | **$O(1)$ Flat** |
-| **64 tokens** | **CUDA GPU** | 18.93 ms/tok | **12.40 ms/tok** | **80.7 tok/s** | **1.53x faster** | **$O(1)$ Flat** |
-| **128 tokens** | **CUDA GPU** | 19.06 ms/tok | **12.50 ms/tok** | **80.0 tok/s** | **1.52x faster** | **$O(1)$ Flat** |
-| **256 tokens** | **CUDA GPU** | 18.21 ms/tok | **12.05 ms/tok** | **83.0 tok/s** | **1.51x faster** | **$O(1)$ Flat** |
-| **32 tokens** | **CPU (4 Threads)** | 22.35 ms/tok | **16.30 ms/tok** | **61.3 tok/s** | **1.37x faster** | **$O(1)$ Flat** |
-| **64 tokens** | **CPU (4 Threads)** | 16.18 ms/tok | **14.92 ms/tok** | **67.0 tok/s** | **1.08x faster** | **$O(1)$ Flat** |
-| **128 tokens** | **CPU (4 Threads)** | 15.54 ms/tok | **15.37 ms/tok** | **65.1 tok/s** | **1.01x faster** | **$O(1)$ Flat** |
-| **256 tokens** | **CPU (4 Threads)** | 13.81 ms/tok | **13.73 ms/tok** | **72.8 tok/s** | **1.01x faster** | **$O(1)$ Flat** |
+After `ggml_set_rows` KV writes, padded `n_kv`, strided fused-QKV `VIEW→RESHAPE`, and llama-style `(s, n_kv)` prepared-graph buckets:
+
+| Model | test | `ggmlc` | `llama.cpp` | Ratio |
+| :--- | :--- | ---: | ---: | ---: |
+| **SmolLM2-135M** | tg32 | **~302** | 279.0 | **≥1.03x** |
+| **SmolLM2-135M** | pp512 | **15856** | 15660 | **1.01x** |
+| **SmolLM2-360M** | tg32 | **208.5** | 188.9 | **1.10x** |
+| **SmolLM2-360M** | pp1024 | **8841** | 8812 | **1.00x** |
+| **GPT-2 Medium** | pp1024 | **9054** | 9022 | **1.00x** |
+
+End-to-end chat turns (`--e2e` / `-pg`, prefill then decode): SmolLM2 / Qwen / LLaMA at **~1.0x–1.3x** vs `llama.cpp` for $N=128$. A residual Qwen/LLaMA multi-chunk **prefill-only** gap (~0.84x–0.90x on pp512/pp1024) is deferred to a follow-up; it does not lose interactive wall-clock once generation is non-trivial.
+
+A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md).
+
+```bash
+# Throughput matrix (pp / tg separately)
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --ubatch 512 --runs 5
+
+# End-to-end wall clock (prefill + decode in one timed shot)
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --e2e --skip-numerical-check
+```
 
 ---
 

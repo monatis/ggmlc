@@ -17,8 +17,17 @@ def export_torch_model(
     dynamic_shapes: Any | None = None,
     model_name: str = "model",
     optimize: bool = True,
+    enable_fusion: bool = True,
+    fusion_options: Any | None = None,
 ) -> Model:
-    """Exports a PyTorch model into a ggmlc Model containing Canonical IR graphs."""
+    """Exports a PyTorch model into a ggmlc Model containing Canonical IR graphs.
+
+    Args:
+        enable_fusion: When optimize=True, whether OperatorFusionPass runs.
+        fusion_options: Optional FusionOptions (or dict) controlling fusion passes.
+            Must be threaded from ``ggmlc.compile`` so A/B flags are not overwritten
+            by a default-options export pass.
+    """
     model.eval()
     ep = export(
         model,
@@ -28,7 +37,9 @@ def export_torch_model(
     )
     g = import_exported_program(ep, graph_name="main")
     if optimize:
-        pipeline = create_standard_optimization_pipeline()
+        pipeline = create_standard_optimization_pipeline(
+            enable_fusion=enable_fusion, options=fusion_options
+        )
         g = pipeline(g)
     m = Model(name=model_name)
     m.add_graph(g, is_main=True)

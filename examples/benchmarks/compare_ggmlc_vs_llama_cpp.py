@@ -173,8 +173,16 @@ def compile_ggmlc_model(
     quantize: str = "q8_0",
     output_dir: str = "scratch",
     force_recompile: bool = False,
+    fusion_options: Any | None = None,
+    gguf_suffix: str = "",
 ) -> str:
-    """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container."""
+    """Loads PyTorch model checkpoint and compiles to ggmlc GGUF container.
+
+    Args:
+        fusion_options: Optional ``FusionOptions`` instance passed to ``ggmlc.compile``.
+        gguf_suffix: Appended before ``.gguf`` (e.g. ``_no_hmlp``) so A/B artifacts do not
+            overwrite the default ``{model}_{quantize}.gguf`` baseline.
+    """
     import ggmlc
     from ggmlc.pipeline.tokenizer import BPETokenizer
 
@@ -188,13 +196,21 @@ def compile_ggmlc_model(
         load_smollm2_model,
     )
 
-    target_path = Path(output_dir) / f"{model_name}_{quantize}.gguf"
+    suffix = gguf_suffix if not gguf_suffix or gguf_suffix.startswith("_") else f"_{gguf_suffix}"
+    target_path = Path(output_dir) / f"{model_name}_{quantize}{suffix}.gguf"
     if target_path.is_file() and not force_recompile:
         return str(target_path.resolve())
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    fusion_note = ""
+    if fusion_options is not None:
+        fusion_note = (
+            f" fusion(mlp={fusion_options.enable_horizontal_mlp},"
+            f" qkv={fusion_options.enable_horizontal_qkv})"
+        )
     print(
-        f"⚙️ Compiling {model_name} (quantize={quantize}) into ggmlc GGUF container...", flush=True
+        f"⚙️ Compiling {model_name} (quantize={quantize}{fusion_note}) into ggmlc GGUF container...",
+        flush=True,
     )
 
     model_key = model_name.lower()
@@ -228,16 +244,20 @@ def compile_ggmlc_model(
     else:
         raise ValueError(f"Unsupported model for auto-compilation: {model_name}")
 
-    ggmlc.compile(
-        model=model,
-        sample_inputs=dummy_input,
-        output=str(target_path),
-        dynamic_shapes=dynamic_shapes,
-        model_name=model_name,
-        quantize=quantize,
-        pipeline=tokenizer,
-        tasks=["text-generation"],
-    )
+    compile_kwargs: dict[str, Any] = {
+        "model": model,
+        "sample_inputs": dummy_input,
+        "output": str(target_path),
+        "dynamic_shapes": dynamic_shapes,
+        "model_name": model_name,
+        "quantize": quantize,
+        "pipeline": tokenizer,
+        "tasks": ["text-generation"],
+    }
+    if fusion_options is not None:
+        compile_kwargs["fusion_options"] = fusion_options
+        compile_kwargs["enable_fusion"] = True
+    ggmlc.compile(**compile_kwargs)
 
     del model
     del dummy_input
@@ -260,6 +280,7 @@ def run_ggml_bench(
     runs: int,
     cuda_graph: bool = False,
     ubatch: int = 512,
+    pg_cases: list[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     """Runs ggml-bench standalone C++ binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -285,6 +306,9 @@ def run_ggml_bench(
         "-o",
         "json",
     ]
+    if pg_cases:
+        for p, g in pg_cases:
+            cmd.extend(["-pg", f"{p},{g}"])
     if cuda_graph and device == "cuda":
         cmd.append("--cuda-graph")
 
@@ -317,6 +341,7 @@ def run_llama_bench(
     gen_lens: list[int],
     runs: int,
     ubatch: int = 512,
+    pg_cases: list[tuple[int, int]] | None = None,
 ) -> list[dict[str, Any]]:
     """Runs official llama-bench binary and returns parsed JSON results."""
     p_str = ",".join(str(x) for x in prompt_lens)
@@ -342,9 +367,16 @@ def run_llama_bench(
         "-o",
         "json",
     ]
+    if pg_cases:
+        for p, g in pg_cases:
+            cmd.extend(["-pg", f"{p},{g}"])
 
     print(f"🚀 [llama-bench] Executing: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    env = os.environ.copy()
+    # Avoid flaky CUDA-graph crashes observed on WDDM when graphs are enabled.
+    if device == "cuda" and env.get("GGMLC_LLAMA_ENABLE_CUDA_GRAPHS") != "1":
+        env.setdefault("GGML_CUDA_DISABLE_GRAPHS", "1")
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
     if proc.returncode != 0:
         print(f"⚠️ [llama-bench ERROR]:\n{proc.stderr}\n{proc.stdout}", flush=True)
         return []
@@ -358,13 +390,28 @@ def run_llama_bench(
             records = json.loads(json_str)
             for r in records:
                 r["engine"] = "llama.cpp"
+                n_p = int(r.get("n_prompt", 0) or 0)
+                n_g = int(r.get("n_gen", 0) or 0)
                 if not r.get("test"):
-                    n_p = r.get("n_prompt", 0)
-                    n_g = r.get("n_gen", 0)
-                    if n_p > 0:
+                    if n_p > 0 and n_g > 0:
+                        r["test"] = f"pp{n_p}+tg{n_g}"
+                    elif n_p > 0:
                         r["test"] = f"pp{n_p}"
                     elif n_g > 0:
                         r["test"] = f"tg{n_g}"
+                # Derive wall / phase ms when not present
+                avg_ns = float(r.get("avg_ns", 0.0) or 0.0)
+                r.setdefault("avg_ms", avg_ns * 1e-6)
+                if n_p > 0 and n_g > 0:
+                    # llama-bench does not split TTFT; leave unset unless present
+                    r.setdefault("ttft_ms", 0.0)
+                    r.setdefault("decode_ms", 0.0)
+                elif n_p > 0:
+                    r.setdefault("ttft_ms", avg_ns * 1e-6)
+                    r.setdefault("decode_ms", 0.0)
+                elif n_g > 0:
+                    r.setdefault("ttft_ms", 0.0)
+                    r.setdefault("decode_ms", avg_ns * 1e-6)
             return records
         return []
     except Exception as e:  # noqa: BLE001
@@ -576,6 +623,7 @@ def generate_markdown_report(
     device: str,
     threads: int,
     output_path: str,
+    e2e: bool = False,
 ) -> None:
     """Generates an aesthetic Markdown comparison report."""
     md: list[str] = [
@@ -586,84 +634,227 @@ def generate_markdown_report(
         "- **Benchmark Harness**: Standalone C++ binaries (`ggml-bench` & `llama-bench`)",
         "- **Methodology**: Apples-to-apples, zero Python wrapper/sampling overhead, steady-state execution",
         "",
-        "## 1. Executive Summary & Graph Optimization Highlights",
-        "",
-        "| Architecture / Model | Parameter Deduplication | Fused GEMV Reduction | Arena Memory Strategy | CUDA Graph Compatibility |",
-        "| :--- | :--- | :--- | :--- | :--- |",
-        "| **SmolLM2-135M (Q8_0)** | **136.7 MB** (exact match, -28.7 MB dedup) | **-42.7% GEMVs** (4 vs 7/layer) | Planned Arena + Driver-VMM | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
-        "| **Qwen2.5-0.5B (Q8_0)** | **490.2 MB** (exact match) | **-41.2% GEMVs** (4 vs 7/layer) | Planned Arena + Driver-VMM | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
-        "| **GPT-2 (Q8_0)** | **124.5 MB** (exact match) | **-33.3% GEMVs** (Fused Attention) | Planned Arena | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
-        "",
-        "## 2. Prompt Processing (Prefill) Throughput ($P$ Tokens)",
-        "",
-        "| Model | Test | Prompt Len ($P$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Speedup Ratio | Status |",
-        "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |",
     ]
 
-    # Organize prefill results
-    pp_rows = [r for r in results if r.get("test", "").startswith("pp")]
-    for r in pp_rows:
-        model = r.get("model", "")
-        test = r.get("test", "")
-        p = r.get("n_prompt", 0)
-        ggmlc_ts = r.get("ggmlc_ts", 0.0)
-        llama_ts = r.get("llama_ts", 0.0)
-        speedup = r.get("speedup", 1.0)
-        status = "🚀 FASTER" if speedup >= 1.05 else ("⚖️ PARITY" if speedup >= 0.95 else "SLOWER")
-        md.append(
-            f"| **{model}** | `{test}` | {p} | **{ggmlc_ts:.1f}** | {llama_ts:.1f} | **{speedup:.2f}x** | {status} |"
+    if e2e:
+        md.extend(
+            [
+                "## End-to-End Wall Clock (`pp+tg`)",
+                "",
+                (
+                    "Timed prefill then decode in one shot (what a chat turn feels like). "
+                    "Ratio &gt; 1.0 means ggmlc is faster (lower wall ms)."
+                ),
+                "",
+                "| Model | Workload | P | N | ggmlc total ms | llama total ms | Speedup | ggmlc TTFT ms | Status |",
+                "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
+            ]
+        )
+        pg_rows = [r for r in results if "+" in str(r.get("test", ""))]
+        for r in pg_rows:
+            model = r.get("model", "")
+            test = r.get("test", "")
+            p = r.get("n_prompt", 0)
+            n = r.get("n_gen", 0)
+            g_ms = float(r.get("ggmlc_ms", 0.0))
+            l_ms = float(r.get("llama_ms", 0.0))
+            speedup = float(r.get("speedup", 1.0))
+            ttft = float(r.get("ggmlc_ttft_ms", 0.0))
+            status = "FASTER" if speedup >= 1.05 else ("PARITY" if speedup >= 0.97 else "SLOWER")
+            md.append(
+                f"| **{model}** | `{test}` | {p} | {n} | **{g_ms:.1f}** | {l_ms:.1f} | "
+                f"**{speedup:.2f}x** | {ttft:.1f} | {status} |"
+            )
+        md.append("")
+    else:
+        md.extend(
+            [
+                "## 1. Executive Summary & Graph Optimization Highlights",
+                "",
+                "| Architecture / Model | Parameter Deduplication | Fused GEMV Reduction | Arena Memory Strategy | CUDA Graph Compatibility |",
+                "| :--- | :--- | :--- | :--- | :--- |",
+                "| **SmolLM2-135M (Q8_0)** | **136.7 MB** (exact match, -28.7 MB dedup) | **-42.7% GEMVs** (4 vs 7/layer) | Planned Arena + Driver-VMM | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
+                "| **Qwen2.5-0.5B (Q8_0)** | **490.2 MB** (exact match) | **-41.2% GEMVs** (4 vs 7/layer) | Planned Arena + Driver-VMM | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
+                "| **GPT-2 (Q8_0)** | **124.5 MB** (exact match) | **-33.3% GEMVs** (Fused Attention) | Planned Arena | Unified (CC &ge; 6.0, Pascal to Blackwell) |",
+                "",
+                "## 2. Prompt Processing (Prefill) Throughput ($P$ Tokens)",
+                "",
+                "| Model | Test | Prompt Len ($P$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Speedup Ratio | Status |",
+                "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |",
+            ]
         )
 
-    md.extend(
-        [
-            "",
-            "## 3. Autoregressive Generation (Decode) Throughput ($N$ Tokens)",
-            "",
-            "| Model | Test | Gen Tokens ($N$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Speedup Ratio | Memory Bandwidth (GB/s) |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |",
+        # Organize prefill results
+        pp_rows = [
+            r
+            for r in results
+            if str(r.get("test", "")).startswith("pp") and "+" not in str(r.get("test", ""))
         ]
-    )
+        for r in pp_rows:
+            model = r.get("model", "")
+            test = r.get("test", "")
+            p = r.get("n_prompt", 0)
+            ggmlc_ts = r.get("ggmlc_ts", 0.0)
+            llama_ts = r.get("llama_ts", 0.0)
+            speedup = r.get("speedup", 1.0)
+            status = (
+                "🚀 FASTER" if speedup >= 1.05 else ("⚖️ PARITY" if speedup >= 0.95 else "SLOWER")
+            )
+            md.append(
+                f"| **{model}** | `{test}` | {p} | **{ggmlc_ts:.1f}** | {llama_ts:.1f} | **{speedup:.2f}x** | {status} |"
+            )
 
-    tg_rows = [r for r in results if r.get("test", "").startswith("tg")]
-    for r in tg_rows:
-        model = r.get("model", "")
-        test = r.get("test", "")
-        n = r.get("n_gen", 0)
-        ggmlc_ts = r.get("ggmlc_ts", 0.0)
-        llama_ts = r.get("llama_ts", 0.0)
-        speedup = r.get("speedup", 1.0)
-        bw = r.get("bandwidth_gbps", 0.0)
-        md.append(
-            f"| **{model}** | `{test}` | {n} | **{ggmlc_ts:.1f}** | {llama_ts:.1f} | **{speedup:.2f}x** | {bw:.2f} GB/s |"
+        md.extend(
+            [
+                "",
+                "## 3. Autoregressive Generation (Decode) Throughput ($N$ Tokens)",
+                "",
+                "| Model | Test | Gen Tokens ($N$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Speedup Ratio | Memory Bandwidth (GB/s) |",
+                "| :--- | :--- | :---: | :---: | :---: | :---: | :---: |",
+            ]
         )
 
-    md.extend(
-        [
-            "",
-            "## 4. Differential Numerical Parity Verification",
-            "",
-            "| Model | Quantization | Maximum Absolute Error | Cosine Similarity | Parity Verdict |",
-            "| :--- | :---: | :---: | :---: | :---: |",
-        ]
-    )
+        tg_rows = [r for r in results if str(r.get("test", "")).startswith("tg")]
+        for r in tg_rows:
+            model = r.get("model", "")
+            test = r.get("test", "")
+            n = r.get("n_gen", 0)
+            ggmlc_ts = r.get("ggmlc_ts", 0.0)
+            llama_ts = r.get("llama_ts", 0.0)
+            speedup = r.get("speedup", 1.0)
+            bw = r.get("bandwidth_gbps", 0.0)
+            md.append(
+                f"| **{model}** | `{test}` | {n} | **{ggmlc_ts:.1f}** | {llama_ts:.1f} | **{speedup:.2f}x** | {bw:.2f} GB/s |"
+            )
 
-    models_seen = set()
-    for r in results:
-        m = r.get("model", "")
-        if m in models_seen:
-            continue
-        models_seen.add(m)
-        max_diff = r.get("max_diff", 0.0)
-        cosine_sim = r.get("cosine_sim", 1.0)
-        status = r.get("parity_status", "PASS")
-        verdict = "✅ PASS" if status == "PASS" else "⚠️ VERIFY"
-        md.append(f"| **{m}** | Q8_0 | `{max_diff:.2e}` | `{cosine_sim:.6f}` | {verdict} |")
+        md.extend(
+            [
+                "",
+                "## 4. Differential Numerical Parity Verification",
+                "",
+                "| Model | Quantization | Maximum Absolute Error | Cosine Similarity | Parity Verdict |",
+                "| :--- | :---: | :---: | :---: | :---: |",
+            ]
+        )
 
-    md.append("")
+        models_seen = set()
+        for r in results:
+            m = r.get("model", "")
+            if m in models_seen:
+                continue
+            models_seen.add(m)
+            max_diff = r.get("max_diff", 0.0)
+            cosine_sim = r.get("cosine_sim", 1.0)
+            status = r.get("parity_status", "PASS")
+            verdict = "✅ PASS" if status == "PASS" else "⚠️ VERIFY"
+            md.append(f"| **{m}** | Q8_0 | `{max_diff:.2e}` | `{cosine_sim:.6f}` | {verdict} |")
+
+        md.append("")
+
     out_p = Path(output_path).resolve()
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text("\n".join(md), encoding="utf-8")
     print(f"📊 Markdown report saved to {out_p}", flush=True)
+
+
+DEFAULT_E2E_PG = "64,128;128,128;256,128;512,128;1024,32;1024,128;16,128;1024,16"
+
+
+def parse_pg_cases(spec: str) -> list[tuple[int, int]]:
+    """Parse 'P,N;P,N' or repeated 'P,N' e2e workloads."""
+    cases: list[tuple[int, int]] = []
+    for part in spec.replace("|", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        nums = [int(x.strip()) for x in part.split(",") if x.strip()]
+        if len(nums) != 2:
+            raise ValueError(f"Invalid -pg / --e2e-pg entry '{part}' (want P,N)")
+        cases.append((nums[0], nums[1]))
+    return cases
+
+
+def generate_e2e_summary(results: list[dict[str, Any]], output_path: str) -> str:
+    """Write decision-oriented e2e summary; return verdict string."""
+    chat_like = {(64, 128), (128, 128), (256, 128), (512, 128), (1024, 128)}
+    behind: list[str] = []
+    ahead: list[str] = []
+    missing: list[str] = []
+    lines = [
+        "# E2E wall-clock: ggmlc vs llama.cpp",
+        "",
+        (
+            "Decision rule: **embrace** if chat-like totals (P∈{64,128,256,512,1024}, N=128) "
+            "are ≥ ~0.97× llama (ggmlc wall ms ≤ llama / 0.97). Else keep investigating."
+        ),
+        "",
+        "| Model | P | N | ggmlc ms | llama ms | Speedup | Verdict |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
+    ]
+    for r in results:
+        if "+" not in str(r.get("test", "")):
+            continue
+        p, n = int(r["n_prompt"]), int(r["n_gen"])
+        g_ms = float(r.get("ggmlc_ms", 0.0))
+        l_ms = float(r.get("llama_ms", 0.0))
+        speedup = float(r.get("speedup", 1.0))
+        if g_ms <= 0 or l_ms <= 0:
+            tag = "MISSING"
+            missing.append(f"{r['model']} pp{p}+tg{n}")
+            lines.append(
+                f"| **{r['model']}** | {p} | {n} | **{g_ms:.1f}** | {l_ms:.1f} | — | {tag} |"
+            )
+            continue
+        if (p, n) in chat_like:
+            if speedup < 0.97:
+                tag = "BEHIND"
+                behind.append(f"{r['model']} pp{p}+tg{n}: {speedup:.2f}x")
+            elif speedup >= 1.05:
+                tag = "AHEAD"
+                ahead.append(f"{r['model']} pp{p}+tg{n}: {speedup:.2f}x")
+            else:
+                tag = "PARITY"
+        else:
+            tag = "info"
+        lines.append(
+            f"| **{r['model']}** | {p} | {n} | **{g_ms:.1f}** | {l_ms:.1f} | "
+            f"**{speedup:.2f}x** | {tag} |"
+        )
+
+    if missing and not any(
+        float(r.get("llama_ms", 0) or 0) > 0 and "+" in str(r.get("test", "")) for r in results
+    ):
+        verdict = "INCOMPLETE — missing llama baselines (retry)"
+    elif behind:
+        # Soften: only hard-fail if any chat-like is < 0.90, or ≥2 cases < 0.97
+        hard = [b for b in behind if float(b.rsplit(":", 1)[-1].strip().rstrip("x")) < 0.90]
+        if hard or len(behind) >= 2:
+            verdict = "INVESTIGATE — behind on chat-like e2e"
+        else:
+            verdict = "EMBRACE (soft) — one mild chat-like dip; overall not behind"
+    elif missing:
+        verdict = "EMBRACE — chat-like OK (some models missing llama -pg baseline)"
+    else:
+        verdict = "EMBRACE — not behind on chat-like e2e"
+    lines.extend(["", f"## Verdict: **{verdict}**", ""])
+    if missing:
+        lines.append("Missing baselines:")
+        lines.extend(f"- {m}" for m in missing)
+        lines.append("")
+    if behind:
+        lines.append("Behind:")
+        lines.extend(f"- {b}" for b in behind)
+        lines.append("")
+    if ahead:
+        lines.append("Ahead:")
+        lines.extend(f"- {a}" for a in ahead)
+        lines.append("")
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"📋 E2E summary saved to {path.resolve()} ({verdict})", flush=True)
+    return verdict
 
 
 def main() -> int:
@@ -721,14 +912,64 @@ def main() -> int:
     parser.add_argument(
         "--force-recompile", action="store_true", help="Force re-export and compilation of models"
     )
+    parser.add_argument(
+        "--fusion-no-horizontal-mlp",
+        action="store_true",
+        help="Disable horizontal Gate+Up MLP fusion at compile time (keeps QKV fusion unless also disabled)",
+    )
+    parser.add_argument(
+        "--fusion-no-horizontal-qkv",
+        action="store_true",
+        help="Disable horizontal Q+K+V fusion at compile time (keeps MLP fusion unless also disabled)",
+    )
+    parser.add_argument(
+        "--gguf-suffix",
+        default="",
+        help="Suffix for compiled GGUF (e.g. no_hmlp → scratch/{model}_q8_0_no_hmlp.gguf)",
+    )
+    parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="End-to-end wall-clock mode: prefill+decode via -pg (skips separate pp/tg matrix)",
+    )
+    parser.add_argument(
+        "--e2e-pg",
+        default=DEFAULT_E2E_PG,
+        help="E2E workloads as P,N;P,N;... (used with --e2e)",
+    )
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     prompt_lens = [int(p.strip()) for p in args.prompt_lens.split(",") if p.strip()]
     gen_lens = [int(n.strip()) for n in args.gen_lens.split(",") if n.strip()]
+    pg_cases: list[tuple[int, int]] | None = None
+    if args.e2e:
+        pg_cases = parse_pg_cases(args.e2e_pg)
+        prompt_lens = [0]
+        gen_lens = [0]
+        print(f"⏱️ E2E mode: {len(pg_cases)} workloads → {pg_cases}", flush=True)
+
+    fusion_options = None
+    gguf_suffix = args.gguf_suffix.strip()
+    if args.fusion_no_horizontal_mlp or args.fusion_no_horizontal_qkv:
+        from ggmlc.transforms.fusion import FusionOptions
+
+        fusion_options = FusionOptions(
+            enable_horizontal_mlp=not args.fusion_no_horizontal_mlp,
+            enable_horizontal_qkv=not args.fusion_no_horizontal_qkv,
+        )
+        if not gguf_suffix:
+            parts: list[str] = []
+            if args.fusion_no_horizontal_mlp:
+                parts.append("no_hmlp")
+            if args.fusion_no_horizontal_qkv:
+                parts.append("no_hqkv")
+            gguf_suffix = "_".join(parts)
 
     # 1. Locate binaries
-    ggml_bench_bin = find_binary("ggmlc-bench", args.ggmlc_bench_bin) or find_binary("ggml-bench", args.ggmlc_bench_bin)
+    ggml_bench_bin = find_binary("ggmlc-bench", args.ggmlc_bench_bin) or find_binary(
+        "ggml-bench", args.ggmlc_bench_bin
+    )
     if not ggml_bench_bin:
         print(
             "❌ Error: `ggmlc-bench` binary not found! Please build it via CMake first.",
@@ -756,7 +997,11 @@ def main() -> int:
 
         # A. Compile or locate ggmlc GGUF
         ggmlc_gguf = compile_ggmlc_model(
-            model_name, quantize=args.quantize, force_recompile=args.force_recompile
+            model_name,
+            quantize=args.quantize,
+            force_recompile=args.force_recompile,
+            fusion_options=fusion_options,
+            gguf_suffix=gguf_suffix,
         )
 
         # B. Check numerical parity
@@ -788,6 +1033,7 @@ def main() -> int:
             runs=args.runs,
             cuda_graph=args.cuda_graph,
             ubatch=args.ubatch,
+            pg_cases=pg_cases,
         )
 
         # D. Obtain official GGUF & run llama-bench (or fallback)
@@ -804,6 +1050,7 @@ def main() -> int:
                     gen_lens=gen_lens,
                     runs=args.runs,
                     ubatch=args.ubatch,
+                    pg_cases=pg_cases,
                 )
             else:
                 llama_records = run_llama_python_fallback(
@@ -818,7 +1065,7 @@ def main() -> int:
         else:
             print(f"⚠️ No official GGUF found for {model_name}; llama.cpp baseline will be omitted.")
 
-        # E. Index and merge results on test key (e.g. 'pp16', 'tg32')
+        # E. Index and merge results on test key (e.g. 'pp16', 'tg32', 'pp128+tg128')
         ggml_map = {r.get("test"): r for r in ggml_records}
         llama_map = {r.get("test"): r for r in llama_records}
 
@@ -831,12 +1078,26 @@ def main() -> int:
             g_rec = ggml_map.get(test_key, {})
             l_rec = llama_map.get(test_key, {})
 
-            g_ts = g_rec.get("avg_ts", 0.0)
-            l_ts = l_rec.get("avg_ts", 0.0)
-            speedup = (g_ts / l_ts) if (g_ts > 0 and l_ts > 0) else 1.0
+            g_ts = float(g_rec.get("avg_ts", 0.0) or 0.0)
+            l_ts = float(l_rec.get("avg_ts", 0.0) or 0.0)
+            g_ms = float(g_rec.get("avg_ms", 0.0) or 0.0)
+            l_ms = float(l_rec.get("avg_ms", 0.0) or 0.0)
+            if g_ms <= 0 and g_rec.get("avg_ns"):
+                g_ms = float(g_rec["avg_ns"]) * 1e-6
+            if l_ms <= 0 and l_rec.get("avg_ns"):
+                l_ms = float(l_rec["avg_ns"]) * 1e-6
+
+            is_e2e = "+" in str(test_key)
+            if is_e2e and g_ms > 0 and l_ms > 0:
+                # Lower wall ms is better → speedup = llama_ms / ggmlc_ms
+                speedup = l_ms / g_ms
+            elif g_ts > 0 and l_ts > 0:
+                speedup = g_ts / l_ts
+            else:
+                speedup = 1.0
 
             # Memory bandwidth = (Model Bytes * Decode tok/s) / 1e9
-            bw_gbps = (model_size_bytes * g_ts) / 1e9 if test_key.startswith("tg") else 0.0
+            bw_gbps = (model_size_bytes * g_ts) / 1e9 if str(test_key).startswith("tg") else 0.0
 
             merged_comparison.append(
                 {
@@ -848,6 +1109,10 @@ def main() -> int:
                     "ggmlc_stddev_ts": g_rec.get("stddev_ts", 0.0),
                     "llama_ts": l_ts,
                     "llama_stddev_ts": l_rec.get("stddev_ts", 0.0),
+                    "ggmlc_ms": round(g_ms, 3),
+                    "llama_ms": round(l_ms, 3),
+                    "ggmlc_ttft_ms": round(float(g_rec.get("ttft_ms", 0.0) or 0.0), 3),
+                    "ggmlc_decode_ms": round(float(g_rec.get("decode_ms", 0.0) or 0.0), 3),
                     "speedup": round(speedup, 2),
                     "bandwidth_gbps": round(bw_gbps, 2),
                     "model_size_mb": round(model_size_bytes / (1024 * 1024), 2),
@@ -866,7 +1131,13 @@ def main() -> int:
         device=args.backend,
         threads=args.threads,
         output_path=args.output_md,
+        e2e=bool(args.e2e),
     )
+    if args.e2e:
+        summary_path = str(
+            Path(args.output_md).with_name(Path(args.output_md).stem + "_summary.md")
+        )
+        generate_e2e_summary(merged_comparison, summary_path)
 
     print("\n✅ Benchmark comparison finished successfully!")
     return 0

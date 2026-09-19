@@ -99,6 +99,24 @@ public:
     bool is_cuda_graph_enabled() const { return enable_cuda_graph_; }
     bool is_cuda_graph_captured() const;
 
+    // Fine-grained profiling / graph inspection for bottleneck isolation
+    struct ExecutorProfile {
+        double prepare_ms = 0.0;
+        double set_decode_pos_ms = 0.0;
+        double set_chunk_pos_ms = 0.0;
+        double mask_fill_ms = 0.0;
+        double run_ms = 0.0;
+        int n_prepare = 0;
+        int n_set_decode_pos = 0;
+        int n_set_chunk_pos = 0;
+        int n_run = 0;
+    };
+    void set_enable_profile(bool enable);
+    void reset_profile();
+    ExecutorProfile get_profile() const { return profile_; }
+    std::string runtime_graph_summary() const;
+    static bool ggml_cuda_graphs_compiled();
+
     // Multi-bucket CUDA Graph execution (B in {1, 2, 4, 8, 16})
     void set_enable_cuda_graph_buckets(bool enable);
     bool is_cuda_graph_buckets_enabled() const { return enable_cuda_graph_buckets_; }
@@ -151,6 +169,9 @@ private:
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_k_;
     std::unordered_map<uint32_t, struct ggml_tensor*> kv_cache_v_;
     struct ggml_tensor* shared_mask_tensor_ = nullptr;
+    struct ggml_tensor* kv_indices_tensor_ = nullptr;
+    struct ggml_tensor* kv_work_mask_tensor_ = nullptr;
+    int64_t kv_n_pad_ = 256;
 
     // Decode & Chunk Graph Cache: static execution graph and buffer for autoregressive steps
     struct AttnViewRefs {
@@ -164,16 +185,21 @@ private:
         struct ggml_tensor* scores = nullptr;
         struct ggml_tensor* probs = nullptr;
         struct ggml_tensor* v_t = nullptr;
+        struct ggml_tensor* indices = nullptr;
+        bool mask_is_precomputed_view = false;
+        size_t mask_row_nb = 0;
         size_t slot_base_offset_k = 0;
         size_t slot_base_offset_v = 0;
     };
     bool decode_graph_cached_ = false;
     int64_t decode_cached_pos_ = -1;
+    int64_t decode_cached_n_kv_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> decode_attn_views_;
 
     bool chunk_graph_cached_ = false;
     int64_t chunk_cached_pos_ = -1;
     int64_t chunk_cached_s_ = -1;
+    int64_t chunk_cached_n_kv_ = -1;
     std::unordered_map<uint32_t, AttnViewRefs> chunk_attn_views_;
     struct MaskInitInfo {
         struct ggml_tensor* mask_tensor = nullptr;
@@ -185,9 +211,44 @@ private:
     std::vector<std::pair<struct ggml_tensor*, uint32_t>> decode_rope_arange_tensors_;
     std::vector<uint32_t> pos_input_tids_;
 
+    // llama.cpp-style graph reuse: keep one prepared compute graph per
+    // (s_q, n_kv) pad bucket and swap instead of mutating FA shapes in-place.
+    struct PreparedGraphBucket {
+        int64_t s = -1;
+        int64_t n_kv = -1;
+        int64_t pos = -1;
+        ggml_backend_buffer_t buffer = nullptr;
+        ggml_gallocr_t galloc = nullptr;
+        struct ggml_context* ctx = nullptr;
+        struct ggml_cgraph* cgraph = nullptr;
+        std::unordered_map<uint32_t, struct ggml_tensor*> compute_tensors;
+        std::unordered_map<uint32_t, AttnViewRefs> attn_views;
+        struct ggml_tensor* kv_indices = nullptr;
+        struct ggml_tensor* kv_work_mask = nullptr;
+        std::vector<MaskInitInfo> dynamic_causal_masks;
+        std::vector<std::pair<struct ggml_tensor*, uint32_t>> rope_arange_tensors;
+        std::unordered_map<uint32_t, std::array<int64_t, 4>> concrete_shapes;
+        std::vector<std::unique_ptr<CustomOpParams>> custom_params;
+    };
+    std::unordered_map<int64_t, PreparedGraphBucket> decode_graph_buckets_;
+    std::unordered_map<int64_t, PreparedGraphBucket> chunk_graph_buckets_;
+
+    static int64_t graph_bucket_key(int64_t s, int64_t n_kv);
+    void free_prepared_bucket(PreparedGraphBucket& bucket);
+    void clear_decode_graph_buckets();
+    void clear_chunk_graph_buckets();
+    void clear_all_graph_buckets();
+    void stash_active_decode_bucket();
+    void stash_active_chunk_bucket();
+    bool activate_decode_bucket(int64_t n_kv);
+    bool activate_chunk_bucket(int64_t s, int64_t n_kv);
+    void relink_ggml_tensors_from_compute();
+
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;
     bool prepared_ = false;
+    bool enable_profile_ = false;
+    ExecutorProfile profile_;
 
     // CUDA Graph Management
     bool enable_cuda_graph_ = false;

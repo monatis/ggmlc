@@ -5,6 +5,11 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <chrono>
+#include <map>
+#include <sstream>
+#include <cstdlib>
+#include <vector>
 #include "ggml.h"
 #include "ggml-impl.h"
 #include "ggml-backend.h"
@@ -19,6 +24,111 @@
 #include "ggmlc/stdlib_kernels.h"
 
 namespace ggmlc {
+
+namespace {
+struct ScopedTimer {
+    double& acc;
+    int* count;
+    bool enabled;
+    std::chrono::high_resolution_clock::time_point t0;
+    ScopedTimer(bool enable, double& acc_ms, int* n = nullptr)
+        : acc(acc_ms), count(n), enabled(enable) {
+        if (enabled) t0 = std::chrono::high_resolution_clock::now();
+    }
+    ~ScopedTimer() {
+        if (!enabled) return;
+        acc += std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        if (count) (*count)++;
+    }
+};
+
+bool is_metadata_op(enum ggml_op op) {
+    return op == GGML_OP_NONE || op == GGML_OP_RESHAPE || op == GGML_OP_VIEW ||
+           op == GGML_OP_PERMUTE || op == GGML_OP_TRANSPOSE;
+}
+
+int64_t pad_kv_len(int64_t n_kv, int64_t max_ctx, int64_t n_pad) {
+    if (n_kv < 1) n_kv = 1;
+    if (n_pad <= 1) return std::min(n_kv, max_ctx);
+    int64_t padded = std::max(n_pad, static_cast<int64_t>(GGML_PAD(n_kv, n_pad)));
+    if (padded > max_ctx) padded = max_ctx;
+    return padded;
+}
+
+bool env_flag_enabled(const char* name) {
+    const char* e = std::getenv(name);
+    if (!e || !e[0]) return false;
+    return e[0] == '1' || e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T';
+}
+
+// Reinterpret a row-strided fused-QKV (or gate_up) slice as a head-split layout
+// without CONT. Only matches VIEW into a wider parent where the outer stride
+// still carries the packed-parent gap (nb[1] > ne[0]*nb[0]).
+struct ggml_tensor* try_reshape_strided_view(
+    struct ggml_context* ctx,
+    struct ggml_tensor* in0,
+    const std::array<int64_t, 4>& ne
+) {
+    if (!in0 || !ctx) return nullptr;
+    if (!in0->view_src) return nullptr;
+    if (ggml_nelements(in0) != ne[0] * ne[1] * ne[2] * ne[3]) return nullptr;
+    if (!ggml_is_contiguous_rows(in0)) return nullptr;
+    // Must be a slice of a wider packed parent (fused QKV / gate_up).
+    if (in0->view_src->ne[0] <= in0->ne[0]) return nullptr;
+    if (in0->nb[1] <= in0->ne[0] * in0->nb[0]) return nullptr;
+
+    // Split ne[0] -> (ne[0], ne[1]) while keeping trailing dims: [E, S, A, B] -> [D, H, S, A]
+    if (in0->ne[0] == ne[0] * ne[1] &&
+        in0->ne[1] == ne[2] &&
+        in0->ne[2] == ne[3] &&
+        in0->ne[3] == 1) {
+        const size_t nb0 = in0->nb[0];
+        const size_t nb1 = nb0 * static_cast<size_t>(ne[0]);
+        const size_t nb2 = in0->nb[1];
+        const size_t nb3 = nb2 * static_cast<size_t>(ne[2]);
+        return ggml_view_4d(ctx, in0, ne[0], ne[1], ne[2], ne[3], nb1, nb2, nb3, 0);
+    }
+
+    // [E, S, 1, 1] -> [D, H, S, 1]
+    if (in0->ne[0] == ne[0] * ne[1] &&
+        in0->ne[1] == ne[2] &&
+        ne[3] == 1 &&
+        in0->ne[2] == 1 && in0->ne[3] == 1) {
+        const size_t nb0 = in0->nb[0];
+        const size_t nb1 = nb0 * static_cast<size_t>(ne[0]);
+        const size_t nb2 = in0->nb[1];
+        const size_t nb3 = nb2 * static_cast<size_t>(ne[2]);
+        return ggml_view_4d(ctx, in0, ne[0], ne[1], ne[2], ne[3], nb1, nb2, nb3, 0);
+    }
+
+    return nullptr;
+}
+
+struct ggml_tensor* reshape4d_contig(
+    struct ggml_context* ctx,
+    struct ggml_tensor* t,
+    int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3
+) {
+    if (!t) return nullptr;
+    if (!ggml_is_contiguous(t)) t = ggml_cont(ctx, t);
+    return ggml_reshape_4d(ctx, t, ne0, ne1, ne2, ne3);
+}
+
+void fill_f16_causal_mask(struct ggml_tensor* mask, int64_t pos, int64_t s_q, int64_t s_kv) {
+    if (!mask || mask->buffer == nullptr || s_q <= 0 || s_kv <= 0) return;
+    std::vector<ggml_fp16_t> mask_data(static_cast<size_t>(s_kv * s_q));
+    ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+    ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+    for (int64_t i = 0; i < s_q; ++i) {
+        for (int64_t j = 0; j < s_kv; ++j) {
+            mask_data[static_cast<size_t>(i * s_kv + j)] =
+                (j <= pos + i) ? zero_f16 : neg_inf_f16;
+        }
+    }
+    ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+}
+} // namespace
 
 std::vector<std::string> ModelExecutor::get_available_devices() {
     std::vector<std::string> devices = {"cpu"};
@@ -102,6 +212,7 @@ ModelExecutor::~ModelExecutor() {
         ggml_threadpool_free(cpu_threadpool_);
         cpu_threadpool_ = nullptr;
     }
+    clear_all_graph_buckets();
     if (galloc_) {
         ggml_gallocr_free(galloc_);
         galloc_ = nullptr;
@@ -286,6 +397,9 @@ void ModelExecutor::init_states(const std::unordered_map<std::string, int64_t>& 
 void ModelExecutor::init_kv_cache(int64_t max_ctx) {
     if (kv_cache_buffer_) return;
     kv_cache_max_ctx_ = max_ctx;
+    if (const char* env_pad = std::getenv("GGMLC_KV_PAD")) {
+        kv_n_pad_ = std::max<int64_t>(1, std::atoll(env_pad));
+    }
 
     // Only enable KV cache if model supports positional offsets (RoPE, explicit pos symbol, or arange constant tensors).
     // Models with absolute position embeddings hardcoded to input length (e.g. GPT-2)
@@ -389,13 +503,17 @@ void ModelExecutor::reset_kv_cache() {
         for (int i = 0; i < static_cast<int>(paged_slots_.size()); ++i) {
             paged_kv_free_slot(i);
         }
+        // Paged slot teardown invalidates view offsets into VMM windows.
+        clear_all_graph_buckets();
         decode_graph_cached_ = false;
         decode_attn_views_.clear();
         decode_rope_arange_tensors_.clear();
+        decode_cached_n_kv_ = -1;
         chunk_graph_cached_ = false;
         chunk_attn_views_.clear();
         chunk_cached_pos_ = -1;
         chunk_cached_s_ = -1;
+        chunk_cached_n_kv_ = -1;
         return;
     }
     for (const auto& pair : kv_cache_k_) {
@@ -408,13 +526,8 @@ void ModelExecutor::reset_kv_cache() {
             ggml_backend_tensor_memset(pair.second, 0, 0, ggml_nbytes(pair.second));
         }
     }
-    decode_graph_cached_ = false;
-    decode_attn_views_.clear();
-    decode_rope_arange_tensors_.clear();
-    chunk_graph_cached_ = false;
-    chunk_attn_views_.clear();
-    chunk_cached_pos_ = -1;
-    chunk_cached_s_ = -1;
+    // Keep prepared (s, n_kv) graph buckets alive across resets — llama.cpp
+    // likewise reuses can_reuse graphs after clearing KV contents.
 }
 
 void ModelExecutor::init_paged_kv_cache(size_t max_batch, size_t max_ctx) {
@@ -705,46 +818,313 @@ void ModelExecutor::paged_kv_extract_page_handles(
     }
 }
 
+int64_t ModelExecutor::graph_bucket_key(int64_t s, int64_t n_kv) {
+    return (s << 32) ^ n_kv;
+}
+
+void ModelExecutor::free_prepared_bucket(PreparedGraphBucket& bucket) {
+    if (bucket.galloc) {
+        ggml_gallocr_free(bucket.galloc);
+        bucket.galloc = nullptr;
+    }
+    if (bucket.buffer) {
+        ggml_backend_buffer_free(bucket.buffer);
+        bucket.buffer = nullptr;
+    }
+    if (bucket.ctx) {
+        ggml_free(bucket.ctx);
+        bucket.ctx = nullptr;
+    }
+    bucket.cgraph = nullptr;
+    bucket.compute_tensors.clear();
+    bucket.attn_views.clear();
+    bucket.kv_indices = nullptr;
+    bucket.kv_work_mask = nullptr;
+    bucket.dynamic_causal_masks.clear();
+    bucket.rope_arange_tensors.clear();
+    bucket.concrete_shapes.clear();
+    bucket.custom_params.clear();
+    bucket.s = -1;
+    bucket.n_kv = -1;
+    bucket.pos = -1;
+}
+
+void ModelExecutor::clear_decode_graph_buckets() {
+    for (auto& pair : decode_graph_buckets_) {
+        free_prepared_bucket(pair.second);
+    }
+    decode_graph_buckets_.clear();
+}
+
+void ModelExecutor::clear_chunk_graph_buckets() {
+    for (auto& pair : chunk_graph_buckets_) {
+        free_prepared_bucket(pair.second);
+    }
+    chunk_graph_buckets_.clear();
+}
+
+void ModelExecutor::clear_all_graph_buckets() {
+    clear_decode_graph_buckets();
+    clear_chunk_graph_buckets();
+}
+
+void ModelExecutor::relink_ggml_tensors_from_compute() {
+    ggml_tensors_.clear();
+    for (const auto& pair : weight_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+    for (const auto& pair : state_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+    for (const auto& pair : compute_tensors_) {
+        ggml_tensors_[pair.first] = pair.second;
+    }
+}
+
+void ModelExecutor::stash_active_decode_bucket() {
+    if (!decode_graph_cached_ || decode_cached_n_kv_ < 0 || !ctx_) return;
+    const int64_t key = decode_cached_n_kv_;
+    PreparedGraphBucket& slot = decode_graph_buckets_[key];
+    if (slot.ctx && slot.ctx != ctx_) {
+        free_prepared_bucket(slot);
+    }
+    slot.s = 1;
+    slot.n_kv = decode_cached_n_kv_;
+    slot.pos = decode_cached_pos_;
+    slot.buffer = buffer_;
+    slot.galloc = galloc_;
+    slot.ctx = ctx_;
+    slot.cgraph = cgraph_;
+    slot.compute_tensors = std::move(compute_tensors_);
+    slot.attn_views = std::move(decode_attn_views_);
+    slot.kv_indices = kv_indices_tensor_;
+    slot.kv_work_mask = kv_work_mask_tensor_;
+    slot.dynamic_causal_masks = std::move(dynamic_causal_masks_);
+    slot.rope_arange_tensors = std::move(decode_rope_arange_tensors_);
+    slot.concrete_shapes = concrete_shapes_;
+    slot.custom_params = std::move(custom_params_storage_);
+
+    buffer_ = nullptr;
+    galloc_ = nullptr;
+    ctx_ = nullptr;
+    cgraph_ = nullptr;
+    compute_tensors_.clear();
+    decode_attn_views_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
+    dynamic_causal_masks_.clear();
+    decode_rope_arange_tensors_.clear();
+    custom_params_storage_.clear();
+    decode_graph_cached_ = false;
+    decode_cached_n_kv_ = -1;
+    decode_cached_pos_ = -1;
+    prepared_ = false;
+}
+
+void ModelExecutor::stash_active_chunk_bucket() {
+    if (!chunk_graph_cached_ || chunk_cached_n_kv_ < 0 || chunk_cached_s_ < 0 || !ctx_) return;
+    const int64_t key = graph_bucket_key(chunk_cached_s_, chunk_cached_n_kv_);
+    PreparedGraphBucket& slot = chunk_graph_buckets_[key];
+    if (slot.ctx && slot.ctx != ctx_) {
+        free_prepared_bucket(slot);
+    }
+    slot.s = chunk_cached_s_;
+    slot.n_kv = chunk_cached_n_kv_;
+    slot.pos = chunk_cached_pos_;
+    slot.buffer = buffer_;
+    slot.galloc = galloc_;
+    slot.ctx = ctx_;
+    slot.cgraph = cgraph_;
+    slot.compute_tensors = std::move(compute_tensors_);
+    slot.attn_views = std::move(chunk_attn_views_);
+    slot.kv_indices = kv_indices_tensor_;
+    slot.kv_work_mask = kv_work_mask_tensor_;
+    slot.dynamic_causal_masks = std::move(dynamic_causal_masks_);
+    slot.rope_arange_tensors = std::move(decode_rope_arange_tensors_);
+    slot.concrete_shapes = concrete_shapes_;
+    slot.custom_params = std::move(custom_params_storage_);
+
+    buffer_ = nullptr;
+    galloc_ = nullptr;
+    ctx_ = nullptr;
+    cgraph_ = nullptr;
+    compute_tensors_.clear();
+    chunk_attn_views_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
+    dynamic_causal_masks_.clear();
+    decode_rope_arange_tensors_.clear();
+    custom_params_storage_.clear();
+    chunk_graph_cached_ = false;
+    chunk_cached_n_kv_ = -1;
+    chunk_cached_pos_ = -1;
+    chunk_cached_s_ = -1;
+    prepared_ = false;
+}
+
+bool ModelExecutor::activate_decode_bucket(int64_t n_kv) {
+    auto it = decode_graph_buckets_.find(n_kv);
+    if (it == decode_graph_buckets_.end() || !it->second.ctx) return false;
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    PreparedGraphBucket slot = std::move(it->second);
+    decode_graph_buckets_.erase(it);
+
+    stash_active_chunk_bucket();
+    if (decode_graph_cached_ && decode_cached_n_kv_ >= 0 && decode_cached_n_kv_ != n_kv) {
+        stash_active_decode_bucket();
+    } else if (ctx_ && !(decode_graph_cached_ && decode_cached_n_kv_ == n_kv)) {
+        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
+        if (buffer_) { ggml_backend_buffer_free(buffer_); buffer_ = nullptr; }
+        if (ctx_) { ggml_free(ctx_); ctx_ = nullptr; }
+        cgraph_ = nullptr;
+        compute_tensors_.clear();
+        custom_params_storage_.clear();
+        decode_attn_views_.clear();
+        dynamic_causal_masks_.clear();
+        decode_rope_arange_tensors_.clear();
+        kv_indices_tensor_ = nullptr;
+        kv_work_mask_tensor_ = nullptr;
+    }
+
+    buffer_ = slot.buffer;
+    galloc_ = slot.galloc;
+    ctx_ = slot.ctx;
+    cgraph_ = slot.cgraph;
+    compute_tensors_ = std::move(slot.compute_tensors);
+    decode_attn_views_ = std::move(slot.attn_views);
+    kv_indices_tensor_ = slot.kv_indices;
+    kv_work_mask_tensor_ = slot.kv_work_mask;
+    dynamic_causal_masks_ = std::move(slot.dynamic_causal_masks);
+    decode_rope_arange_tensors_ = std::move(slot.rope_arange_tensors);
+    concrete_shapes_ = std::move(slot.concrete_shapes);
+    custom_params_storage_ = std::move(slot.custom_params);
+
+    chunk_graph_cached_ = false;
+    chunk_attn_views_.clear();
+    chunk_cached_n_kv_ = -1;
+    chunk_cached_s_ = -1;
+    chunk_cached_pos_ = -1;
+
+    decode_graph_cached_ = true;
+    decode_cached_n_kv_ = n_kv;
+    decode_cached_pos_ = slot.pos;
+    relink_ggml_tensors_from_compute();
+    prepared_ = true;
+    if (cuda_graph_mgr_) {
+        cuda_graph_mgr_->reset();
+    }
+    cuda_graph_needs_update_ = false;
+    return true;
+}
+
+bool ModelExecutor::activate_chunk_bucket(int64_t s, int64_t n_kv) {
+    const int64_t key = graph_bucket_key(s, n_kv);
+    auto it = chunk_graph_buckets_.find(key);
+    if (it == chunk_graph_buckets_.end() || !it->second.ctx) return false;
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    PreparedGraphBucket slot = std::move(it->second);
+    chunk_graph_buckets_.erase(it);
+
+    stash_active_decode_bucket();
+    if (chunk_graph_cached_ && (chunk_cached_s_ != s || chunk_cached_n_kv_ != n_kv)) {
+        stash_active_chunk_bucket();
+    } else if (ctx_ && !(chunk_graph_cached_ && chunk_cached_s_ == s && chunk_cached_n_kv_ == n_kv)) {
+        if (galloc_) { ggml_gallocr_free(galloc_); galloc_ = nullptr; }
+        if (buffer_) { ggml_backend_buffer_free(buffer_); buffer_ = nullptr; }
+        if (ctx_) { ggml_free(ctx_); ctx_ = nullptr; }
+        cgraph_ = nullptr;
+        compute_tensors_.clear();
+        custom_params_storage_.clear();
+        chunk_attn_views_.clear();
+        dynamic_causal_masks_.clear();
+        decode_rope_arange_tensors_.clear();
+        kv_indices_tensor_ = nullptr;
+        kv_work_mask_tensor_ = nullptr;
+    }
+
+    buffer_ = slot.buffer;
+    galloc_ = slot.galloc;
+    ctx_ = slot.ctx;
+    cgraph_ = slot.cgraph;
+    compute_tensors_ = std::move(slot.compute_tensors);
+    chunk_attn_views_ = std::move(slot.attn_views);
+    kv_indices_tensor_ = slot.kv_indices;
+    kv_work_mask_tensor_ = slot.kv_work_mask;
+    dynamic_causal_masks_ = std::move(slot.dynamic_causal_masks);
+    decode_rope_arange_tensors_ = std::move(slot.rope_arange_tensors);
+    concrete_shapes_ = std::move(slot.concrete_shapes);
+    custom_params_storage_ = std::move(slot.custom_params);
+
+    decode_graph_cached_ = false;
+    decode_attn_views_.clear();
+    decode_cached_n_kv_ = -1;
+    decode_cached_pos_ = -1;
+
+    chunk_graph_cached_ = true;
+    chunk_cached_s_ = s;
+    chunk_cached_n_kv_ = n_kv;
+    chunk_cached_pos_ = slot.pos;
+    relink_ggml_tensors_from_compute();
+    prepared_ = true;
+    if (cuda_graph_mgr_) {
+        cuda_graph_mgr_->reset();
+    }
+    cuda_graph_needs_update_ = false;
+    return true;
+}
+
 void ModelExecutor::set_decode_pos(int64_t pos) {
+    ScopedTimer timer(enable_profile_, profile_.set_decode_pos_ms, &profile_.n_set_decode_pos);
     if (!decode_graph_cached_) return;
     decode_cached_pos_ = pos;
 
-    // 1. Update attention KV views in-place
-    for (auto& pair : decode_attn_views_) {
-        uint32_t op_id = pair.first;
-        auto& refs = pair.second;
-        struct ggml_tensor* k_cache = kv_cache_k_[op_id];
-        struct ggml_tensor* v_cache = kv_cache_v_[op_id];
-
-        // Slot offsets
-        refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
-        refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
-
-        refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
-        refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
-
-        if (refs.k_cpy) {
-            refs.k_cpy->view_offs = refs.k_slot->view_offs;
-            refs.k_cpy->data = refs.k_slot->data;
+    if (kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+        int64_t idx = pos;
+        ggml_backend_tensor_set(kv_indices_tensor_, &idx, 0, sizeof(int64_t));
+        if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+            const int64_t mask_s_q = kv_work_mask_tensor_->ne[1];
+            const int64_t mask_n_kv = decode_cached_n_kv_ > 0
+                ? decode_cached_n_kv_
+                : pad_kv_len(pos + 1, kv_cache_max_ctx_, kv_n_pad_);
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, mask_s_q, mask_n_kv);
         }
-        if (refs.v_cpy) {
-            refs.v_cpy->view_offs = refs.v_slot->view_offs;
-            refs.v_cpy->data = refs.v_slot->data;
-        }
+    } else {
+        // Legacy view+cpy path: mutate destination offsets and active KV length.
+        for (auto& pair : decode_attn_views_) {
+            uint32_t op_id = pair.first;
+            auto& refs = pair.second;
+            struct ggml_tensor* k_cache = kv_cache_k_[op_id];
+            struct ggml_tensor* v_cache = kv_cache_v_[op_id];
 
-        // Active sequence length
-        int64_t s_kv = pos + 1;
-        refs.k_active->ne[1] = s_kv;
-        refs.v_active->ne[1] = s_kv;
+            refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
+            refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
 
-        if (refs.scores) {
-            refs.scores->ne[0] = s_kv;
+            refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
+            refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
+
+            if (refs.k_cpy) {
+                refs.k_cpy->view_offs = refs.k_slot->view_offs;
+                refs.k_cpy->data = refs.k_slot->data;
+            }
+            if (refs.v_cpy) {
+                refs.v_cpy->view_offs = refs.v_slot->view_offs;
+                refs.v_cpy->data = refs.v_slot->data;
+            }
+
+            int64_t s_kv = pos + 1;
+            refs.k_active->ne[1] = s_kv;
+            refs.v_active->ne[1] = s_kv;
+            if (refs.scores) refs.scores->ne[0] = s_kv;
+            if (refs.probs) refs.probs->ne[0] = s_kv;
+            if (refs.v_t) refs.v_t->ne[1] = s_kv;
         }
-        if (refs.probs) {
-            refs.probs->ne[0] = s_kv;
-        }
-        if (refs.v_t) {
-            refs.v_t->ne[1] = s_kv;
+        if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+            cuda_graph_needs_update_ = true;
         }
     }
 
@@ -777,78 +1157,99 @@ void ModelExecutor::set_decode_pos(int64_t pos) {
             }
         }
     }
-
-    if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
-        cuda_graph_needs_update_ = true;
-    }
 }
 
 void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
+    ScopedTimer timer(enable_profile_, profile_.set_chunk_pos_ms, &profile_.n_set_chunk_pos);
     if (!chunk_graph_cached_) return;
     chunk_cached_pos_ = pos;
     chunk_cached_s_ = s_q;
-    int64_t s_kv = pos + s_q;
 
-    // 1. Update attention KV views in-place
-    for (auto& pair : chunk_attn_views_) {
-        uint32_t op_id = pair.first;
-        auto& refs = pair.second;
-        struct ggml_tensor* k_cache = kv_cache_k_[op_id];
-        struct ggml_tensor* v_cache = kv_cache_v_[op_id];
-
-        // Slot offsets
-        refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
-        refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
-
-        refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
-        refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
-
-        if (refs.k_cpy) {
-            refs.k_cpy->view_offs = refs.k_slot->view_offs;
-            refs.k_cpy->data = refs.k_slot->data;
+    // SET_ROWS path: write via indices (no CPY). Graph shapes stay fixed for the
+    // active (s_q, n_kv) pad bucket — matching llama.cpp can_reuse semantics.
+    if (kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+        if (kv_indices_tensor_->ne[0] == s_q) {
+            std::vector<int64_t> idxs(static_cast<size_t>(s_q));
+            for (int64_t i = 0; i < s_q; ++i) idxs[static_cast<size_t>(i)] = pos + i;
+            ggml_backend_tensor_set(kv_indices_tensor_, idxs.data(), 0, idxs.size() * sizeof(int64_t));
         }
-        if (refs.v_cpy) {
-            refs.v_cpy->view_offs = refs.v_slot->view_offs;
-            refs.v_cpy->data = refs.v_slot->data;
+        const int64_t n_kv = chunk_cached_n_kv_ > 0
+            ? chunk_cached_n_kv_
+            : pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
+        if (kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+            // Fill the parent buffer; FA reads the active view prefix of width n_kv.
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, s_q, n_kv);
         }
+    } else {
+        // Legacy view+cpy path: mutate destination offsets and active KV length.
+        const int64_t s_kv = pos + s_q;
+        for (auto& pair : chunk_attn_views_) {
+            uint32_t op_id = pair.first;
+            auto& refs = pair.second;
+            struct ggml_tensor* k_cache = kv_cache_k_[op_id];
+            struct ggml_tensor* v_cache = kv_cache_v_[op_id];
 
-        // Active sequence length
-        refs.k_active->ne[1] = s_kv;
-        refs.v_active->ne[1] = s_kv;
+            refs.k_slot->view_offs = refs.slot_base_offset_k + pos * k_cache->nb[1];
+            refs.k_slot->data = static_cast<char*>(k_cache->data) + refs.k_slot->view_offs;
 
-        if (refs.mask) {
-            refs.mask->ne[0] = s_kv;
-            refs.mask->ne[1] = s_q;
-            refs.mask->nb[0] = sizeof(ggml_fp16_t);
-            refs.mask->nb[1] = s_kv * sizeof(ggml_fp16_t);
-            refs.mask->nb[2] = s_q * refs.mask->nb[1];
-            refs.mask->nb[3] = refs.mask->nb[2];
-        }
-    }
+            refs.v_slot->view_offs = refs.slot_base_offset_v + pos * v_cache->nb[1];
+            refs.v_slot->data = static_cast<char*>(v_cache->data) + refs.v_slot->view_offs;
 
-    // 2. Update dynamic causal masks in-place
-    for (auto& minfo : dynamic_causal_masks_) {
-        if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
-        minfo.mask_tensor->ne[0] = s_kv;
-        minfo.mask_tensor->ne[1] = s_q;
-        minfo.mask_tensor->nb[0] = sizeof(ggml_fp16_t);
-        minfo.mask_tensor->nb[1] = s_kv * sizeof(ggml_fp16_t);
-        minfo.mask_tensor->nb[2] = s_q * minfo.mask_tensor->nb[1];
-        minfo.mask_tensor->nb[3] = minfo.mask_tensor->nb[2];
-        minfo.pos = pos;
-        minfo.s_kv = s_kv;
-        minfo.s_q = s_q;
-        size_t s_kv_sz = static_cast<size_t>(s_kv);
-        size_t s_q_sz = static_cast<size_t>(s_q);
-        std::vector<ggml_fp16_t> mask_data(s_kv_sz * s_q_sz);
-        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
-        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
-        for (size_t i = 0; i < s_q_sz; ++i) {
-            for (size_t j = 0; j < s_kv_sz; ++j) {
-                mask_data[i * s_kv_sz + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+            if (refs.k_cpy) {
+                refs.k_cpy->view_offs = refs.k_slot->view_offs;
+                refs.k_cpy->data = refs.k_slot->data;
+            }
+            if (refs.v_cpy) {
+                refs.v_cpy->view_offs = refs.v_slot->view_offs;
+                refs.v_cpy->data = refs.v_slot->data;
+            }
+
+            refs.k_active->ne[1] = s_kv;
+            refs.v_active->ne[1] = s_kv;
+
+            if (refs.mask) {
+                refs.mask->ne[0] = s_kv;
+                refs.mask->ne[1] = s_q;
+                refs.mask->nb[0] = sizeof(ggml_fp16_t);
+                refs.mask->nb[1] = s_kv * sizeof(ggml_fp16_t);
+                refs.mask->nb[2] = s_q * refs.mask->nb[1];
+                refs.mask->nb[3] = refs.mask->nb[2];
             }
         }
-        ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+
+        for (auto& minfo : dynamic_causal_masks_) {
+            if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
+            minfo.mask_tensor->ne[0] = s_kv;
+            minfo.mask_tensor->ne[1] = s_q;
+            minfo.mask_tensor->nb[0] = sizeof(ggml_fp16_t);
+            minfo.mask_tensor->nb[1] = s_kv * sizeof(ggml_fp16_t);
+            minfo.mask_tensor->nb[2] = s_q * minfo.mask_tensor->nb[1];
+            minfo.mask_tensor->nb[3] = minfo.mask_tensor->nb[2];
+            minfo.pos = pos;
+            minfo.s_kv = s_kv;
+            minfo.s_q = s_q;
+            size_t s_kv_sz = static_cast<size_t>(s_kv);
+            size_t s_q_sz = static_cast<size_t>(s_q);
+            std::vector<ggml_fp16_t> mask_data(s_kv_sz * s_q_sz);
+            ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+            {
+                ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+                for (size_t i = 0; i < s_q_sz; ++i) {
+                    for (size_t j = 0; j < s_kv_sz; ++j) {
+                        mask_data[i * s_kv_sz + j] =
+                            (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+                    }
+                }
+                ggml_backend_tensor_set(
+                    minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+            }
+        }
+
+        if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
+            cuda_graph_needs_update_ = true;
+        }
     }
 
     // 3. Update RoPE arange position constants
@@ -891,6 +1292,7 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
 }
 
 void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symbol_env, bool enable_arena_reuse) {
+    ScopedTimer timer(enable_profile_, profile_.prepare_ms, &profile_.n_prepare);
     if (!weights_loaded_) {
         init_weights();
     }
@@ -921,7 +1323,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    // Fast path 1: if decode graph is cached, mutate in-place
+    // Fast path 1: decode graph reuse (llama.cpp can_reuse analogue).
+    // Same topology when all symbols except pos match and padded n_kv matches.
     bool can_use_cached_decode = is_decode_step && decode_graph_cached_ && !getenv("GGMLC_DISABLE_DECODE_CACHE");
     if (can_use_cached_decode) {
         for (const auto& pair : symbol_env) {
@@ -933,13 +1336,48 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
         }
     }
+    int64_t decode_n_kv = -1;
+    if (is_decode_step && kv_cache_enabled_ && symbol_env.count("pos") > 0 && kv_n_pad_ > 1) {
+        decode_n_kv = pad_kv_len(symbol_env.at("pos") + 1, kv_cache_max_ctx_, kv_n_pad_);
+    }
+    if (can_use_cached_decode && decode_n_kv > 0 && decode_n_kv != decode_cached_n_kv_) {
+        can_use_cached_decode = false;
+    }
     if (can_use_cached_decode) {
         set_decode_pos(symbol_env.at("pos"));
         last_symbol_env_ = symbol_env;
         return;
     }
+    if (is_decode_step && decode_n_kv > 0 && !getenv("GGMLC_DISABLE_DECODE_CACHE")) {
+        bool symbols_ok = true;
+        for (const auto& pair : symbol_env) {
+            if (pair.first == "pos") continue;
+            auto it = last_symbol_env_.find(pair.first);
+            if (it == last_symbol_env_.end() || it->second != pair.second) {
+                symbols_ok = false;
+                break;
+            }
+        }
+        // Also accept first decode after a chunked prefill if only s/pos differ.
+        if (!symbols_ok && last_symbol_env_.count("s") && last_symbol_env_.at("s") != 1) {
+            symbols_ok = true;
+            for (const auto& pair : symbol_env) {
+                if (pair.first == "pos" || pair.first == "s") continue;
+                auto it = last_symbol_env_.find(pair.first);
+                if (it != last_symbol_env_.end() && it->second != pair.second) {
+                    symbols_ok = false;
+                    break;
+                }
+            }
+        }
+        if (symbols_ok && activate_decode_bucket(decode_n_kv)) {
+            set_decode_pos(symbol_env.at("pos"));
+            last_symbol_env_ = symbol_env;
+            return;
+        }
+    }
 
-    // Fast path 2: if chunked prefill graph is cached (same chunk size s, changing pos), mutate in-place
+    // Fast path 2: chunked prefill graph reuse / (s, n_kv) bucket swap.
     int64_t current_s = symbol_env.count("s") > 0 ? symbol_env.at("s") : -1;
     if (current_s < 0) {
         for (const auto& sym : model_graph_.symbol_table) {
@@ -948,6 +1386,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
         }
+    }
+    int64_t chunk_n_kv = -1;
+    if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token && current_s > 0) {
+        chunk_n_kv = pad_kv_len(symbol_env.at("pos") + current_s, kv_cache_max_ctx_, kv_n_pad_);
     }
     bool can_use_cached_chunk = kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token &&
                                 chunk_graph_cached_ && chunk_cached_s_ == current_s && current_s > 0 &&
@@ -962,23 +1404,83 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
         }
     }
+    if (can_use_cached_chunk && kv_indices_tensor_) {
+        // llama-style: reuse only when padded n_kv matches; otherwise swap buckets.
+        if (kv_indices_tensor_->ne[0] != current_s ||
+            (chunk_n_kv > 0 && chunk_cached_n_kv_ > 0 && chunk_n_kv != chunk_cached_n_kv_)) {
+            can_use_cached_chunk = false;
+        }
+    } else if (can_use_cached_chunk && !kv_indices_tensor_) {
+        // Legacy path still mutates s_kv in-place via set_chunk_pos.
+    }
     if (can_use_cached_chunk) {
         set_chunk_pos(symbol_env.at("pos"), current_s);
         last_symbol_env_ = symbol_env;
         return;
+    }
+    if (kv_cache_enabled_ && symbol_env.count("pos") > 0 && !is_single_token &&
+        current_s > 0 && chunk_n_kv > 0 && !getenv("GGMLC_DISABLE_CHUNK_CACHE")) {
+        bool symbols_ok = true;
+        for (const auto& pair : symbol_env) {
+            if (pair.first == "pos") continue;
+            auto it = last_symbol_env_.find(pair.first);
+            if (it == last_symbol_env_.end() || it->second != pair.second) {
+                symbols_ok = false;
+                break;
+            }
+        }
+        if (symbols_ok && activate_chunk_bucket(current_s, chunk_n_kv)) {
+            set_chunk_pos(symbol_env.at("pos"), current_s);
+            last_symbol_env_ = symbol_env;
+            return;
+        }
     }
 
     if (prepared_ && symbol_env == last_symbol_env_ && enable_arena_reuse == last_enable_arena_reuse_) {
         return;
     }
 
-    // Invalidate decode and chunk cache if recompiling
-    decode_graph_cached_ = false;
-    decode_attn_views_.clear();
-    chunk_graph_cached_ = false;
-    chunk_attn_views_.clear();
+    // Rebuild path: stash the live bucket (so it can be swapped back later),
+    // then free only the current compute context. Preserve sibling buckets.
+    if (backend_) {
+        ggml_backend_synchronize(backend_);
+    }
+    const bool keep_chunk_buckets =
+        kv_cache_enabled_ && !is_single_token && current_s > 0 && chunk_n_kv > 0 &&
+        !getenv("GGMLC_DISABLE_CHUNK_CACHE");
+    const bool keep_decode_buckets =
+        is_decode_step && decode_n_kv > 0 && !getenv("GGMLC_DISABLE_DECODE_CACHE");
+
+    if (keep_chunk_buckets) {
+        stash_active_chunk_bucket();
+        stash_active_decode_bucket();
+        // Drop chunk buckets with a different s_q — topology differs.
+        for (auto it = chunk_graph_buckets_.begin(); it != chunk_graph_buckets_.end(); ) {
+            if (it->second.s != current_s) {
+                free_prepared_bucket(it->second);
+                it = chunk_graph_buckets_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else if (keep_decode_buckets) {
+        stash_active_decode_bucket();
+        stash_active_chunk_bucket();
+    } else {
+        clear_all_graph_buckets();
+        decode_graph_cached_ = false;
+        decode_cached_n_kv_ = -1;
+        decode_attn_views_.clear();
+        chunk_graph_cached_ = false;
+        chunk_cached_n_kv_ = -1;
+        chunk_cached_s_ = -1;
+        chunk_attn_views_.clear();
+    }
+
     decode_rope_arange_tensors_.clear();
     dynamic_causal_masks_.clear();
+    kv_indices_tensor_ = nullptr;
+    kv_work_mask_tensor_ = nullptr;
     if (cuda_graph_mgr_) {
         cuda_graph_mgr_->reset();
     }
@@ -1088,10 +1590,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
 
             // If a or b is a 1D channel vector matching the other's channel dim (GGML dim 2), reshape to [1, 1, C, 1]
             if (a->ne[1] == 1 && a->ne[2] == 1 && a->ne[3] == 1 && a->ne[0] == b->ne[2]) {
-                a = ggml_reshape_4d(ctx_, a, 1, 1, a->ne[0], 1);
+                a = reshape4d_contig(ctx_, a, 1, 1, a->ne[0], 1);
             }
             if (b->ne[1] == 1 && b->ne[2] == 1 && b->ne[3] == 1 && b->ne[0] == a->ne[2]) {
-                b = ggml_reshape_4d(ctx_, b, 1, 1, b->ne[0], 1);
+                b = reshape4d_contig(ctx_, b, 1, 1, b->ne[0], 1);
             }
 
             if (ggml_can_repeat(b, a)) return {a, b};
@@ -1141,7 +1643,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int64_t in_elements = in0->ne[0] * in0->ne[1] * in0->ne[2] * in0->ne[3];
                 int64_t out_elements = out_ne[0] * out_ne[1] * out_ne[2] * out_ne[3];
                 if (in_elements == out_elements) {
-                    result = ggml_reshape_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                    result = reshape4d_contig(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 } else {
                     result = ggml_repeat_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 }
@@ -1198,6 +1700,8 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_SQRT: {
+                // CUDA unary kernels require contiguous src0 (unary.cu).
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 if (op.attributes.count("is_rsqrt") && op.attributes.at("is_rsqrt")) {
                     struct ggml_tensor* sqrt_x = ggml_sqrt(ctx_, in0);
                     result = ggml_div(ctx_, sqrt_x, in0);
@@ -1207,6 +1711,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 break;
             }
             case GGML_OP_SQR: {
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 float exp = 2.0f;
                 if (op.attributes.count("exponent")) {
                     exp = static_cast<float>(op.attributes.at("exponent"));
@@ -1229,7 +1734,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else if (g_dim >= 2) {
                     // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
-                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    struct ggml_tensor* flat_hw = reshape4d_contig(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
                     flat_hw = ggml_cont(ctx_, flat_hw);
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_mean(ctx_, t);
@@ -1237,7 +1742,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 } else {
                     result = ggml_mean(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_SUM:
@@ -1250,7 +1755,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_cont(ctx_, ggml_transpose(ctx_, t));
                 } else if (g_dim >= 2) {
                     // Spatial reduction over dims 1 and 2 (e.g. NHWC global pool: [C, W, H, B] -> [C, 1, 1, B])
-                    struct ggml_tensor* flat_hw = ggml_reshape_4d(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
+                    struct ggml_tensor* flat_hw = reshape4d_contig(ctx_, in0, in0->ne[0], in0->ne[1] * in0->ne[2], 1, in0->ne[3]);
                     flat_hw = ggml_cont(ctx_, flat_hw);
                     struct ggml_tensor* t = ggml_cont(ctx_, ggml_transpose(ctx_, flat_hw));
                     t = ggml_sum_rows(ctx_, t);
@@ -1258,19 +1763,22 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 } else {
                     result = ggml_sum_rows(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_CONT:
                 result = ggml_cont(ctx_, in0);
                 break;
             case GGML_OP_SIN:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_sin(ctx_, in0);
                 break;
             case GGML_OP_COS:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_cos(ctx_, in0);
                 break;
             case GGML_OP_LOG:
+                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
                 result = ggml_log(ctx_, in0);
                 break;
             case GGML_OP_UNARY: {
@@ -1290,6 +1798,9 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         }
                     }
                 }
+                // Soft-cap / activations on fused-QKV views (e.g. Gemma3 tanh) need CONT;
+                // keep the VIEW itself non-contiguous for the RoPE→FA prefill path.
+                if (act_in && !ggml_is_contiguous(act_in)) act_in = ggml_cont(ctx_, act_in);
                 auto it = op.attributes.find("unary_op");
                 int u = (it != op.attributes.end()) ? static_cast<int>(it->second) : 6; // default RELU
                 if (u == 6) { // RELU
@@ -1361,7 +1872,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     raw_rows = ggml_cast(ctx_, raw_rows, GGML_TYPE_I64);
                 }
                 const auto& out_ne = concrete_shapes_[out_id];
-                result = ggml_reshape_4d(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, raw_rows, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_ROPE: {
@@ -1440,6 +1951,91 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     size_t base_slot_offset_k = slot_idx * k_cache->nb[3];
                     size_t base_slot_offset_v = slot_idx * v_cache->nb[3];
 
+                    // Decode (s_q==1) and chunked prefill (s_q>1) both use SET_ROWS into a
+                    // padded n_kv view so topology stays CUDA-graph stable within a pad bucket.
+                    // Crossing a pad boundary (e.g. 512→1024) rebuilds once — same as llama.cpp.
+                    const bool use_set_rows = kv_n_pad_ > 1 && !paged_kv_enabled_ &&
+                                              !env_flag_enabled("GGMLC_DISABLE_SET_ROWS");
+
+                    if (use_set_rows) {
+                        const int64_t n_kv = pad_kv_len(pos + s_q, kv_cache_max_ctx_, kv_n_pad_);
+                        if (!kv_indices_tensor_) {
+                            kv_indices_tensor_ = ggml_new_tensor_1d(ctx_, GGML_TYPE_I64, s_q);
+                            ggml_set_input(kv_indices_tensor_);
+                            ggml_set_output(kv_indices_tensor_);
+                            ggml_set_name(kv_indices_tensor_, "kv_row_indices");
+                        }
+                        if (!kv_work_mask_tensor_) {
+                            // Parent buffer sized for max ctx; each (s, n_kv) bucket
+                            // views a fixed-width prefix (llama.cpp-style pad buckets).
+                            kv_work_mask_tensor_ = ggml_new_tensor_4d(
+                                ctx_, GGML_TYPE_F16, kv_cache_max_ctx_, s_q, 1, 1);
+                            ggml_set_input(kv_work_mask_tensor_);
+                            ggml_set_output(kv_work_mask_tensor_);
+                            ggml_set_name(kv_work_mask_tensor_, "kv_work_mask");
+                        }
+                        struct ggml_tensor* mask_active = ggml_view_4d(
+                            ctx_, kv_work_mask_tensor_, n_kv, s_q, 1, 1,
+                            n_kv * sizeof(ggml_fp16_t),
+                            s_q * n_kv * sizeof(ggml_fp16_t),
+                            s_q * n_kv * sizeof(ggml_fp16_t),
+                            0);
+
+                        struct ggml_tensor* k_src = k;
+                        struct ggml_tensor* v_src = v;
+                        if (k_src && !ggml_is_contiguous_rows(k_src)) k_src = ggml_cont(ctx_, k_src);
+                        if (v_src && !ggml_is_contiguous_rows(v_src)) v_src = ggml_cont(ctx_, v_src);
+                        if (k_src && k_src->type != GGML_TYPE_F32 && k_src->type != GGML_TYPE_F16) {
+                            k_src = ggml_cast(ctx_, k_src, GGML_TYPE_F16);
+                        }
+                        if (v_src && v_src->type != GGML_TYPE_F32 && v_src->type != GGML_TYPE_F16) {
+                            v_src = ggml_cast(ctx_, v_src, GGML_TYPE_F16);
+                        }
+
+                        struct ggml_tensor* k_dst = k_cache;
+                        struct ggml_tensor* v_dst = v_cache;
+                        if (slot_idx != 0 || k_cache->ne[3] != batch) {
+                            k_dst = ggml_view_4d(
+                                ctx_, k_cache, head_dim, k_cache->ne[1], num_kv_heads, batch,
+                                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], base_slot_offset_k);
+                            v_dst = ggml_view_4d(
+                                ctx_, v_cache, head_dim, v_cache->ne[1], num_kv_heads, batch,
+                                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], base_slot_offset_v);
+                        }
+
+                        struct ggml_tensor* k_set = ggml_set_rows(ctx_, k_dst, k_src, kv_indices_tensor_);
+                        struct ggml_tensor* v_set = ggml_set_rows(ctx_, v_dst, v_src, kv_indices_tensor_);
+                        ggml_build_forward_expand(cgraph_, k_set);
+                        ggml_build_forward_expand(cgraph_, v_set);
+
+                        struct ggml_tensor* k_active = ggml_view_4d(
+                            ctx_, k_cache, head_dim, n_kv, num_kv_heads, batch,
+                            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                            base_slot_offset_k);
+                        struct ggml_tensor* v_active = ggml_view_4d(
+                            ctx_, v_cache, head_dim, n_kv, num_kv_heads, batch,
+                            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                            base_slot_offset_v);
+
+                        struct ggml_tensor* fattn_out = ggml_flash_attn_ext(
+                            ctx_, q, k_active, v_active, mask_active, scale, 0.0f, 0.0f);
+                        result = fused_transpose ? fattn_out : ggml_permute(ctx_, fattn_out, 0, 2, 1, 3);
+
+                        AttnViewRefs refs;
+                        refs.k_active = k_active;
+                        refs.v_active = v_active;
+                        refs.mask = mask_active;
+                        refs.indices = kv_indices_tensor_;
+                        refs.slot_base_offset_k = base_slot_offset_k;
+                        refs.slot_base_offset_v = base_slot_offset_v;
+                        if (is_decode_step) {
+                            decode_cached_n_kv_ = n_kv;
+                            decode_attn_views_[op.id] = refs;
+                        } else if (s_q > 1) {
+                            chunk_cached_n_kv_ = n_kv;
+                            chunk_attn_views_[op.id] = refs;
+                        }
+                    } else {
                     // View slot in cache for new tokens at offset pos
                     struct ggml_tensor* k_slot = ggml_view_4d(
                         ctx_, k_cache, head_dim, s_q, num_kv_heads, batch,
@@ -1530,6 +2126,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                         refs.slot_base_offset_k = base_slot_offset_k;
                         refs.slot_base_offset_v = base_slot_offset_v;
                         chunk_attn_views_[op.id] = refs;
+                    }
                     }
                 } else {
                     auto is_fattn_supported = [](int64_t hd) {
@@ -1642,21 +2239,60 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
             }
             case GGML_OP_RESHAPE: {
                 const auto& ne = concrete_shapes_[out_id];
+                // Prefer a strided view over CONT for fused-QKV VIEW->RESHAPE->ROPE/FA.
+                // GGMLC_RESHAPE_FORCE_CONT=1 restores eager materialization for A/B.
+                if (in0 && !ggml_is_contiguous(in0) && !env_flag_enabled("GGMLC_RESHAPE_FORCE_CONT")) {
+                    struct ggml_tensor* viewed = try_reshape_strided_view(ctx_, in0, ne);
+                    if (viewed) {
+                        result = viewed;
+                        break;
+                    }
+                }
                 if (in0 && !ggml_is_contiguous(in0)) {
                     in0 = ggml_cont(ctx_, in0);
                 }
-                result = ggml_reshape_4d(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
+                result = reshape4d_contig(ctx_, in0, ne[0], ne[1], ne[2], ne[3]);
                 break;
             }
             case GGML_OP_PERMUTE: {
-                if (in0 && !ggml_is_contiguous(in0)) in0 = ggml_cont(ctx_, in0);
+                // Keep permutes as metadata views when every consumer is FlashAttention
+                // (RoPE->[D,H,S]->PERMUTE->[D,S,H]->FA). Vision graphs that feed CONV/LINEAR
+                // after a permute still need CONT. GGMLC_PERMUTE_FORCE_CONT=1 always materializes.
                 int ax0 = op.attributes.count("axis0") ? static_cast<int>(op.attributes.at("axis0")) : 1;
                 int ax1 = op.attributes.count("axis1") ? static_cast<int>(op.attributes.at("axis1")) : 0;
                 int ax2 = op.attributes.count("axis2") ? static_cast<int>(op.attributes.at("axis2")) : 2;
                 int ax3 = op.attributes.count("axis3") ? static_cast<int>(op.attributes.at("axis3")) : 3;
                 result = ggml_permute(ctx_, in0, ax0, ax1, ax2, ax3);
-                if (ggml_nelements(result) < 10000000) {
-                    result = ggml_cont(ctx_, result);
+
+                bool force_cont = env_flag_enabled("GGMLC_PERMUTE_FORCE_CONT");
+                bool fa_only = !op.outputs.empty();
+                if (fa_only && !force_cont) {
+                    const uint32_t pout = op.outputs[0];
+                    bool saw_consumer = false;
+                    for (const auto& other : model_graph_.ops) {
+                        bool uses = false;
+                        for (uint32_t iid : other.inputs) {
+                            if (iid == pout) { uses = true; break; }
+                        }
+                        if (!uses) continue;
+                        saw_consumer = true;
+                        if (other.opcode != GGML_OP_FLASH_ATTN_EXT) {
+                            fa_only = false;
+                            break;
+                        }
+                    }
+                    if (!saw_consumer) fa_only = false;
+                } else {
+                    fa_only = false;
+                }
+
+                if (force_cont || !fa_only) {
+                    if (in0 && !ggml_is_contiguous(in0) && force_cont) {
+                        // already permuted from possibly non-contig src; materialize result
+                    }
+                    if (ggml_nelements(result) < 10000000) {
+                        result = ggml_cont(ctx_, result);
+                    }
                 }
                 break;
             }
@@ -1669,7 +2305,14 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 int g_dim = op.attributes.count("ggml_dim") ? static_cast<int>(op.attributes.at("ggml_dim")) : 0;
                 int64_t start = op.attributes.count("start") ? op.attributes.at("start") : 0;
                 int64_t step = op.attributes.count("step") ? op.attributes.at("step") : 1;
-                if (in0 && (!ggml_is_contiguous(in0) || in0->view_src != nullptr)) {
+                // Default: keep QKV fusion slices as non-contiguous views (zero copy).
+                // GGMLC_VIEW_FORCE_CONT=1 restores eager materialization for A/B.
+                if (env_flag_enabled("GGMLC_VIEW_FORCE_CONT")) {
+                    if (in0 && (!ggml_is_contiguous(in0) || in0->view_src != nullptr)) {
+                        in0 = ggml_cont(ctx_, in0);
+                    }
+                } else if (in0 && in0->view_src != nullptr && !ggml_is_contiguous(in0)) {
+                    // Break pathological view-of-view chains that break offset math.
                     in0 = ggml_cont(ctx_, in0);
                 }
                 size_t offset = start * in0->nb[g_dim];
@@ -1677,7 +2320,16 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 size_t nb2 = in0->nb[2] * (g_dim == 2 ? step : 1);
                 size_t nb3 = in0->nb[3] * (g_dim == 3 ? step : 1);
                 struct ggml_tensor* v = ggml_view_4d(ctx_, in0, out_ne[0], out_ne[1], out_ne[2], out_ne[3], nb1, nb2, nb3, offset);
-                result = ggml_is_contiguous(v) ? v : ggml_cont(ctx_, v);
+                // Graph outputs must be host-readable via ggml_backend_tensor_get, which
+                // linearly copies ggml_nbytes (span of a strided view ≠ logical payload).
+                // Intermediate QKV/gate_up views stay non-contiguous for FA zero-copy.
+                const bool is_graph_output = std::find(
+                    model_graph_.outputs.begin(), model_graph_.outputs.end(), out_id) != model_graph_.outputs.end();
+                if ((is_graph_output || env_flag_enabled("GGMLC_VIEW_FORCE_CONT")) && !ggml_is_contiguous(v)) {
+                    result = ggml_cont(ctx_, v);
+                } else {
+                    result = v;
+                }
                 break;
             }
             case GGML_OP_ARGMAX: {
@@ -1687,7 +2339,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 }
                 result = ggml_argmax(ctx_, in0);
                 const auto& out_ne = concrete_shapes_[out_id];
-                result = ggml_reshape_4d(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
+                result = reshape4d_contig(ctx_, result, out_ne[0], out_ne[1], out_ne[2], out_ne[3]);
                 break;
             }
             case GGML_OP_CONCAT: {
@@ -1715,10 +2367,10 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 bool is_1d = op.attributes.count("is_1d") && op.attributes.at("is_1d") != 0;
                 if (is_1d) {
                     if (in0->ne[3] == 1) {
-                        in0 = ggml_reshape_4d(ctx_, in0, in0->ne[0], 1, in0->ne[1], in0->ne[2]);
+                        in0 = reshape4d_contig(ctx_, in0, in0->ne[0], 1, in0->ne[1], in0->ne[2]);
                     }
                     if (in1->ne[3] == 1) {
-                        in1 = ggml_reshape_4d(ctx_, in1, in1->ne[0], 1, in1->ne[1], in1->ne[2]);
+                        in1 = reshape4d_contig(ctx_, in1, in1->ne[0], 1, in1->ne[1], in1->ne[2]);
                     }
                 }
                 int s0 = op.attributes.count("stride_w") ? static_cast<int>(op.attributes.at("stride_w")) : 1;
@@ -1733,7 +2385,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     if (bias) {
                         if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
-                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                            bias = reshape4d_contig(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
                         if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
@@ -1745,7 +2397,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     result = ggml_relu(ctx_, result);
                 }
                 if (is_1d && result->ne[1] == 1) {
-                    result = ggml_reshape_4d(ctx_, result, result->ne[0], result->ne[2], result->ne[3], 1);
+                    result = reshape4d_contig(ctx_, result, result->ne[0], result->ne[2], result->ne[3], 1);
                 }
                 break;
             }
@@ -1763,7 +2415,7 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     if (bias) {
                         if (!ggml_is_contiguous(bias)) bias = ggml_cont(ctx_, bias);
                         if (bias->ne[0] == result->ne[2] && bias->ne[1] == 1 && bias->ne[2] == 1) {
-                            bias = ggml_reshape_4d(ctx_, bias, 1, 1, result->ne[2], 1);
+                            bias = reshape4d_contig(ctx_, bias, 1, 1, result->ne[2], 1);
                         }
                         if (!ggml_are_same_shape(bias, result) && ggml_can_repeat(bias, result)) {
                             bias = ggml_repeat(ctx_, bias, result);
@@ -1884,18 +2536,19 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
         }
     }
 
-    // Ensure all output tensors are anchored at the end of cgraph_ so that
-    // ggml_gallocr treats them as live outputs throughout execution and never
-    // frees or reuses their memory buffers for subsequent intermediate operations.
-    for (uint32_t out_id : model_graph_.outputs) {
-        if (ggml_tensors_.count(out_id)) {
-            struct ggml_tensor* out_t = ggml_tensors_[out_id];
-            ggml_set_output(out_t);
-            struct ggml_tensor* anchor = ggml_reshape_4d(ctx_, out_t, out_t->ne[0], out_t->ne[1], out_t->ne[2], out_t->ne[3]);
-            ggml_set_name(anchor, "output_anchor");
-            ggml_build_forward_expand(cgraph_, anchor);
-        }
-    }
+            // Ensure all output tensors are anchored at the end of cgraph_ so that
+            // ggml_gallocr treats them as live outputs throughout execution and never
+            // frees or reuses their memory buffers for subsequent intermediate operations.
+            for (uint32_t out_id : model_graph_.outputs) {
+                if (ggml_tensors_.count(out_id)) {
+                    struct ggml_tensor* out_t = ggml_tensors_[out_id];
+                    ggml_set_output(out_t);
+                    struct ggml_tensor* anchor = reshape4d_contig(
+                        ctx_, out_t, out_t->ne[0], out_t->ne[1], out_t->ne[2], out_t->ne[3]);
+                    ggml_set_name(anchor, "output_anchor");
+                    ggml_build_forward_expand(cgraph_, anchor);
+                }
+            }
 
     // 4. Allocate tensor storage for compute activations on backend (CPU or CUDA)
     if (enable_arena_reuse) {
@@ -1939,20 +2592,45 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
     }
 
     // Initialize dynamic causal masks for Flash Attention
-    for (const auto& minfo : dynamic_causal_masks_) {
-        if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
-        size_t s_kv = static_cast<size_t>(minfo.s_kv);
-        size_t s_q = static_cast<size_t>(minfo.s_q);
-        int64_t pos = minfo.pos;
-        std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
-        ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
-        ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
-        for (size_t i = 0; i < s_q; ++i) {
-            for (size_t j = 0; j < s_kv; ++j) {
-                mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+    {
+        ScopedTimer mask_timer(enable_profile_, profile_.mask_fill_ms);
+        for (const auto& minfo : dynamic_causal_masks_) {
+            if (!minfo.mask_tensor || minfo.mask_tensor->buffer == nullptr) continue;
+            size_t s_kv = static_cast<size_t>(minfo.s_kv);
+            size_t s_q = static_cast<size_t>(minfo.s_q);
+            int64_t pos = minfo.pos;
+            std::vector<ggml_fp16_t> mask_data(s_kv * s_q);
+            ggml_fp16_t zero_f16 = ggml_fp32_to_fp16(0.0f);
+            ggml_fp16_t neg_inf_f16 = ggml_fp32_to_fp16(ATTN_MASK_MIN_FP16);
+            for (size_t i = 0; i < s_q; ++i) {
+                for (size_t j = 0; j < s_kv; ++j) {
+                    mask_data[i * s_kv + j] = (j <= static_cast<size_t>(pos + i)) ? zero_f16 : neg_inf_f16;
+                }
+            }
+            ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        }
+        if (symbol_env.count("pos") > 0 && kv_indices_tensor_ && kv_indices_tensor_->buffer) {
+            const int64_t pos = symbol_env.at("pos");
+            const int64_t n_idx = kv_indices_tensor_->ne[0];
+            if (n_idx == 1) {
+                int64_t idx = pos;
+                ggml_backend_tensor_set(kv_indices_tensor_, &idx, 0, sizeof(int64_t));
+            } else if (n_idx > 1) {
+                std::vector<int64_t> idxs(static_cast<size_t>(n_idx));
+                for (int64_t i = 0; i < n_idx; ++i) idxs[static_cast<size_t>(i)] = pos + i;
+                ggml_backend_tensor_set(kv_indices_tensor_, idxs.data(), 0, idxs.size() * sizeof(int64_t));
             }
         }
-        ggml_backend_tensor_set(minfo.mask_tensor, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+        if (symbol_env.count("pos") > 0 && kv_work_mask_tensor_ && kv_work_mask_tensor_->buffer) {
+            const int64_t pos = symbol_env.at("pos");
+            const int64_t s_q_mask = kv_indices_tensor_ ? kv_indices_tensor_->ne[0]
+                                                        : kv_work_mask_tensor_->ne[1];
+            int64_t n_kv_mask = is_decode_step ? decode_cached_n_kv_ : chunk_cached_n_kv_;
+            if (n_kv_mask < 1) {
+                n_kv_mask = pad_kv_len(pos + s_q_mask, kv_cache_max_ctx_, kv_n_pad_);
+            }
+            fill_f16_causal_mask(kv_work_mask_tensor_, pos, s_q_mask, n_kv_mask);
+        }
     }
 
     if (is_decode_step) {
@@ -2026,6 +2704,7 @@ bool ModelExecutor::is_cuda_graph_bucket_captured(int batch_size) const {
 }
 
 void ModelExecutor::run(int n_threads) {
+    ScopedTimer timer(enable_profile_, profile_.run_ms, &profile_.n_run);
     if (!ctx_ || !cgraph_ || !backend_) {
         throw std::runtime_error("Executor not prepared. Call prepare() first.");
     }
@@ -2085,39 +2764,9 @@ void ModelExecutor::run(int n_threads) {
         }
     }
 
-    if (is_cuda_ && enable_cuda_graph_) {
-        if (!cuda_graph_mgr_) {
-            cuda_graph_mgr_ = std::make_unique<CUDAGraphManager>();
-        }
-        if (!cuda_graph_mgr_->is_initialized()) {
-            cuda_graph_mgr_->init(backend_);
-        }
-
-        if (cuda_graph_mgr_->is_initialized()) {
-            if (!cuda_graph_mgr_->is_captured()) {
-                // First run: capture stream and instantiate CUDA graph
-                if (cuda_graph_mgr_->begin_capture()) {
-                    ggml_backend_graph_compute_async(backend_, cgraph_);
-                    if (cuda_graph_mgr_->end_capture_and_instantiate()) {
-                        cuda_graph_needs_update_ = false;
-                        if (cuda_graph_mgr_->launch()) {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                // Subsequent run: update if pos changed or execute directly
-                if (cuda_graph_needs_update_) {
-                    cuda_graph_mgr_->update_executable(cgraph_, backend_);
-                    cuda_graph_needs_update_ = false;
-                }
-                if (cuda_graph_mgr_->launch()) {
-                    return;
-                }
-            }
-        }
-        // Fallback to standard compute if graph capture/launch failed
-    }
+    // enable_cuda_graph_: rely on GGML's built-in CUDA graphs (keyed per cgraph).
+    // Outer CUDAGraphManager capture nests with ggml_backend_cuda_graph_compute and
+    // aborts on bucket switches; pad-stable SET_ROWS graphs make that wrapper unnecessary.
 
     enum ggml_status status = ggml_backend_graph_compute(backend_, cgraph_);
     if (status != GGML_STATUS_SUCCESS) {
@@ -2213,10 +2862,19 @@ const void* ModelExecutor::get_output_data(uint32_t tensor_id) {
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    size_t sz = ggml_nbytes(it->second);
+    struct ggml_tensor* t = it->second;
+    // Logical payload (nelements), not ggml_nbytes span of a strided non-contiguous view.
+    const size_t type_size = ggml_type_size(t->type);
+    const int64_t blck = std::max<int64_t>(1, ggml_blck_size(t->type));
+    size_t sz = static_cast<size_t>(ggml_nelements(t) * type_size / blck);
+    if (!ggml_is_contiguous(t)) {
+        throw std::runtime_error(
+            "get_output_data: tensor " + std::to_string(tensor_id) +
+            " is a non-contiguous view; graph outputs must be materialized with ggml_cont");
+    }
     auto& host_buf = output_host_buffers_[tensor_id];
     host_buf.resize(sz);
-    ggml_backend_tensor_get(it->second, host_buf.data(), 0, sz);
+    ggml_backend_tensor_get(t, host_buf.data(), 0, sz);
     return host_buf.data();
 }
 
@@ -2233,13 +2891,82 @@ size_t ModelExecutor::get_tensor_size_bytes(uint32_t tensor_id) const {
     if (it == ggml_tensors_.end()) {
         throw std::runtime_error("Tensor ID not found in executor: " + std::to_string(tensor_id));
     }
-    size_t sz = ggml_nbytes(it->second);
+    struct ggml_tensor* t = it->second;
+    const size_t type_size = ggml_type_size(t->type);
+    const int64_t blck = std::max<int64_t>(1, ggml_blck_size(t->type));
+    size_t sz = static_cast<size_t>(ggml_nelements(t) * type_size / blck);
     if (sz == 0) {
         fprintf(stderr, "[DEBUG] tensor %u ne=[%lld,%lld,%lld,%lld] type=%d blck_size=%lld type_size=%zu\n",
-            tensor_id, (long long)it->second->ne[0], (long long)it->second->ne[1], (long long)it->second->ne[2], (long long)it->second->ne[3],
-            it->second->type, (long long)ggml_blck_size(it->second->type), ggml_type_size(it->second->type));
+            tensor_id, (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
+            t->type, (long long)ggml_blck_size(t->type), ggml_type_size(t->type));
     }
     return sz;
+}
+
+void ModelExecutor::set_enable_profile(bool enable) {
+    enable_profile_ = enable;
+}
+
+void ModelExecutor::reset_profile() {
+    profile_ = ExecutorProfile{};
+}
+
+bool ModelExecutor::ggml_cuda_graphs_compiled() {
+#ifdef GGML_CUDA_USE_GRAPHS
+    return true;
+#else
+    return false;
+#endif
+}
+
+std::string ModelExecutor::runtime_graph_summary() const {
+    std::ostringstream oss;
+    if (!cgraph_) {
+        oss << "{\"n_nodes\":0,\"n_kernel_nodes\":0,\"ops\":{}}";
+        return oss.str();
+    }
+    const int n = ggml_graph_n_nodes(cgraph_);
+    std::map<std::string, int> hist;
+    int n_kernel = 0;
+    int n_cpy = 0;
+    int n_cont = 0;
+    int n_mul_mat = 0;
+    int n_fa = 0;
+    int n_set_rows = 0;
+    for (int i = 0; i < n; ++i) {
+        struct ggml_tensor* node = ggml_graph_node(cgraph_, i);
+        if (!node) continue;
+        const char* name = ggml_op_name(node->op);
+        hist[name]++;
+        if (!is_metadata_op(node->op)) n_kernel++;
+        if (node->op == GGML_OP_CPY) n_cpy++;
+        if (node->op == GGML_OP_CONT || node->op == GGML_OP_DUP) n_cont++;
+        if (node->op == GGML_OP_MUL_MAT) n_mul_mat++;
+        if (node->op == GGML_OP_FLASH_ATTN_EXT) n_fa++;
+        if (node->op == GGML_OP_SET_ROWS) n_set_rows++;
+    }
+    oss << "{\"n_nodes\":" << n
+        << ",\"n_kernel_nodes\":" << n_kernel
+        << ",\"n_cpy\":" << n_cpy
+        << ",\"n_cont_or_dup\":" << n_cont
+        << ",\"n_mul_mat\":" << n_mul_mat
+        << ",\"n_flash_attn\":" << n_fa
+        << ",\"n_set_rows\":" << n_set_rows
+        << ",\"kv_n_pad\":" << kv_n_pad_
+        << ",\"decode_cached_n_kv\":" << decode_cached_n_kv_
+        << ",\"chunk_cached_n_kv\":" << chunk_cached_n_kv_
+        << ",\"set_rows_kv\":" << (kv_indices_tensor_ ? "true" : "false")
+        << ",\"ggml_cuda_graphs_compiled\":" << (ggml_cuda_graphs_compiled() ? "true" : "false")
+        << ",\"cuda_graph_manager_captured\":" << (is_cuda_graph_captured() ? "true" : "false")
+        << ",\"ops\":{";
+    bool first = true;
+    for (const auto& pair : hist) {
+        if (!first) oss << ",";
+        first = false;
+        oss << "\"" << pair.first << "\":" << pair.second;
+    }
+    oss << "}}";
+    return oss.str();
 }
 
 } // namespace ggmlc

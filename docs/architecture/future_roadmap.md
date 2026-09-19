@@ -89,10 +89,12 @@ The standalone C++ export creates a direct path for custom hardware acceleration
    - Activation-aware weight quantization and second-order error compensation integrated directly into Canonical IR passes.
 2. **Mixed-Precision K-Quants**:
    - Automated per-tensor sensitivity analysis selecting the optimal GGML k-quant mix (`Q4_K_M`, `Q5_K_M`, `Q6_K`) to maximize throughput while minimizing perplexity loss.
-3. **Attention Kernel Specialization**:
+3. **Wide-FFN Q8 Prefill Parity (Qwen / LLaMA)**:
+   - Residual multi-chunk prefill gap (~0.84x–0.90x vs `llama.cpp` on pp512/pp1024) after graph buckets + fusion A/Bs; likely Q8 GEMM tile/layout density on fat FFNs. Deferred from the llama.cpp parity PR once e2e chat wall-clock embraced.
+4. **Attention Kernel Specialization**:
    - FlashAttention v2/v3 kernels for long-context execution ($L > 2048$).
    - Sliding-window and chunked local attention lowerings (e.g. for Gemma 3 and Mistral architectures).
-4. **Static Arena Planning**:
+5. **Static Arena Planning**:
    - Interval-graph lifetime analysis to pre-allocate a single static scratchpad buffer, eliminating all runtime memory allocations during forward passes.
 
 ### F. High-Throughput Serving & Dynamic KV-Cache
