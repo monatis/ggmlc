@@ -12,6 +12,7 @@ ContinuousBatchScheduler::ContinuousBatchScheduler(ModelExecutor& executor, size
     if (!executor_.is_paged_kv_cache_enabled()) {
         executor_.init_paged_kv_cache(max_batch_size_, 2048);
     }
+    executor_.set_logits_last_only(true);
     executor_.set_enable_cuda_graph_buckets(false);
     radix_tree_ = std::make_unique<PagedRadixTree>(executor_.get_tokens_per_page());
 }
@@ -239,8 +240,17 @@ StepResult ContinuousBatchScheduler::step() {
         // Sample first token from prefill logits
         const float* logits_data = static_cast<const float*>(executor_.get_output_data(out_tid));
         size_t total_elements = executor_.get_tensor_size_bytes(out_tid) / sizeof(float);
-        size_t vocab_size = total_elements / effective_s;
-        const float* last_logits = logits_data + (effective_s - 1) * vocab_size;
+        auto out_shape = executor_.get_tensor_shape(out_tid);
+        size_t vocab_size = 0;
+        const float* last_logits = nullptr;
+        if (!out_shape.empty() && out_shape.size() >= 2 && out_shape[1] == 1) {
+            // logits_last_only: output is [vocab, 1]
+            vocab_size = static_cast<size_t>(out_shape[0]);
+            last_logits = logits_data;
+        } else {
+            vocab_size = total_elements / static_cast<size_t>(std::max<int64_t>(1, effective_s));
+            last_logits = logits_data + (effective_s - 1) * vocab_size;
+        }
         int32_t first_tok = sample_next_token(last_logits, vocab_size, req->temperature);
 
         req->generated_tokens.push_back(first_tok);

@@ -115,7 +115,14 @@ public:
     void reset_profile();
     ExecutorProfile get_profile() const { return profile_; }
     std::string runtime_graph_summary() const;
+    // Unique MUL_MAT (and FA) shape histogram for tile/layout diagnosis.
+    std::string runtime_mul_mat_shape_summary() const;
     static bool ggml_cuda_graphs_compiled();
+
+    // Match llama.cpp n_outputs=1: gather last token before graph-output MUL_MAT (lm_head).
+    // Saves full-seq vocab GEMM + logits write on prefill. Default off (numerical tests).
+    void set_logits_last_only(bool enable);
+    bool logits_last_only() const { return logits_last_only_; }
 
     // Multi-bucket CUDA Graph execution (B in {1, 2, 4, 8, 16})
     void set_enable_cuda_graph_buckets(bool enable);
@@ -249,6 +256,7 @@ private:
     bool prepared_ = false;
     bool enable_profile_ = false;
     ExecutorProfile profile_;
+    bool logits_last_only_ = false;
 
     // CUDA Graph Management
     bool enable_cuda_graph_ = false;

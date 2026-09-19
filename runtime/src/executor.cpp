@@ -10,6 +10,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <vector>
+#include <climits>
 #include "ggml.h"
 #include "ggml-impl.h"
 #include "ggml-backend.h"
@@ -2218,6 +2219,21 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                 if (!is_q && in0 && transpose_in0) {
                     in0 = ggml_cont(ctx_, ggml_transpose(ctx_, in0));
                 }
+                // llama.cpp n_outputs=1 analogue: graph-output MUL_MAT (lm_head / tied
+                // embed) only needs the last token during prefill/decode sampling.
+                if (logits_last_only_ && in1 && in1->ne[1] > 1) {
+                    bool is_graph_output = false;
+                    for (uint32_t oid : model_graph_.outputs) {
+                        if (oid == out_id) { is_graph_output = true; break; }
+                    }
+                    if (is_graph_output) {
+                        const int64_t last = in1->ne[1] - 1;
+                        in1 = ggml_view_2d(ctx_, in1, in1->ne[0], 1, in1->nb[1], last * in1->nb[1]);
+                        if (!ggml_is_contiguous(in1)) {
+                            in1 = ggml_cont(ctx_, in1);
+                        }
+                    }
+                }
                 if (in0->ne[0] != in1->ne[0]) {
                     fprintf(stderr, "[MUL_MAT CANNOT COMPUTE!] op=%s explicit_trans=%d trans_in0=%d\n  in0 name=%s ne=[%lld,%lld,%lld,%lld]\n  in1 name=%s ne=[%lld,%lld,%lld,%lld]\n",
                         op.name.c_str(), (int)explicit_transpose, (int)transpose_in0,
@@ -2907,6 +2923,17 @@ void ModelExecutor::set_enable_profile(bool enable) {
     enable_profile_ = enable;
 }
 
+void ModelExecutor::set_logits_last_only(bool enable) {
+    if (logits_last_only_ == enable) return;
+    logits_last_only_ = enable;
+    // Force graph rebuild so lm_head gather is applied/removed.
+    prepared_ = false;
+    if (cgraph_) {
+        // Drop prepared compute graph; next prepare() rebuilds.
+        // Buckets similarly invalidated via prepared_ flag path.
+    }
+}
+
 void ModelExecutor::reset_profile() {
     profile_ = ExecutorProfile{};
 }
@@ -2966,6 +2993,93 @@ std::string ModelExecutor::runtime_graph_summary() const {
         oss << "\"" << pair.first << "\":" << pair.second;
     }
     oss << "}}";
+    return oss.str();
+}
+
+std::string ModelExecutor::runtime_mul_mat_shape_summary() const {
+    std::ostringstream oss;
+    if (!cgraph_) {
+        return "{\"mul_mat\":[],\"flash_attn\":[]}";
+    }
+    // key -> count; key encodes type, ne, contiguity, mmq-fallback
+    std::map<std::string, int> mm;
+    std::map<std::string, int> fa;
+    const int n = ggml_graph_n_nodes(cgraph_);
+    for (int i = 0; i < n; ++i) {
+        struct ggml_tensor* node = ggml_graph_node(cgraph_, i);
+        if (!node) continue;
+        if (node->op == GGML_OP_MUL_MAT) {
+            const struct ggml_tensor* a = node->src[0];
+            const struct ggml_tensor* b = node->src[1];
+            if (!a || !b) continue;
+            const bool fallback = (a->ne[1] % 128) != 0;
+            const bool a_cont = ggml_is_contiguous(a);
+            const bool b_cont = ggml_is_contiguous(b);
+            // Predicted MMQ J tile for ampere/ada Q8 path: largest J|8 that
+            // minimizes ceil(ncols_max / J); ncols_max ~= b->ne[1] (tokens).
+            const int64_t ncols = b->ne[1];
+            int j_best = 0;
+            int ntiles_best = INT_MAX;
+            for (int J = 8; J <= 128; J += 8) {
+                // Ampere Q8_0 fast: J in {8,16,24,...,128}; fallback skips some.
+                if (fallback && (J % 16 != 0) && J != 8) {
+                    // rough: fallback configs are sparser; keep all multiples of 8 for dump
+                }
+                const int ntiles = static_cast<int>((ncols + J - 1) / J);
+                if (ntiles < ntiles_best) {
+                    ntiles_best = ntiles;
+                    j_best = J;
+                }
+            }
+            std::ostringstream key;
+            key << ggml_type_name(a->type)
+                << " w=[" << a->ne[0] << "," << a->ne[1] << "," << a->ne[2] << "," << a->ne[3] << "]"
+                << " x=[" << b->ne[0] << "," << b->ne[1] << "," << b->ne[2] << "," << b->ne[3] << "]"
+                << " dst=[" << node->ne[0] << "," << node->ne[1] << "]"
+                << " a_cont=" << (a_cont ? 1 : 0)
+                << " b_cont=" << (b_cont ? 1 : 0)
+                << " nb0=[" << a->nb[0] << "," << a->nb[1] << "]"
+                << " nb1=[" << b->nb[0] << "," << b->nb[1] << "]"
+                << " fallback=" << (fallback ? 1 : 0)
+                << " J~=" << j_best;
+            mm[key.str()]++;
+        } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+            std::ostringstream key;
+            key << "q=[";
+            for (int d = 0; d < 4; ++d) {
+                if (d) key << ",";
+                key << (node->src[0] ? node->src[0]->ne[d] : 0);
+            }
+            key << "] k=[";
+            for (int d = 0; d < 4; ++d) {
+                if (d) key << ",";
+                key << (node->src[1] ? node->src[1]->ne[d] : 0);
+            }
+            key << "] v=[";
+            for (int d = 0; d < 4; ++d) {
+                if (d) key << ",";
+                key << (node->src[2] ? node->src[2]->ne[d] : 0);
+            }
+            key << "]";
+            fa[key.str()]++;
+        }
+    }
+    oss << "{\"mul_mat\":[";
+    bool first = true;
+    for (const auto& p : mm) {
+        if (!first) oss << ",";
+        first = false;
+        // escape is unnecessary: keys have no quotes
+        oss << "{\"n\":" << p.second << ",\"shape\":\"" << p.first << "\"}";
+    }
+    oss << "],\"flash_attn\":[";
+    first = true;
+    for (const auto& p : fa) {
+        if (!first) oss << ",";
+        first = false;
+        oss << "{\"n\":" << p.second << ",\"shape\":\"" << p.first << "\"}";
+    }
+    oss << "]}";
     return oss.str();
 }
 
