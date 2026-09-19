@@ -35,7 +35,7 @@ Deploying modern neural networks on edge devices, CPU servers, and GPU systems o
 4. **Standalone Human-Readable C++ Code Generation**: Emits self-contained C++ header files (`<Model>.h`), native entry points (`ggmlc_main.cpp`), and `CMakeLists.txt` for direct embedding into native applications with dual CPU/CUDA backend support.
 5. **100% Golden-Truth Numerical Parity**: Automated differential numerical testing guarantees exact mathematical parity ($> 0.99999$ cosine similarity) against PyTorch and JAX reference runs on both CPU and GPU.
 6. **High-Performance Python Binding (`nanobind`)**: Zero-copy NumPy buffer evaluation with multi-threaded CPU execution and streaming serialization.
-7. **Hardware-Accelerated Persistent KV Cache**: Decode/prefill write K/V with `ggml_set_rows` into padded `(s, n_kv)` graph buckets (llama `can_reuse` analogue) so GGML CUDA graphs stay warm. SmolLM2-360M Q8_0 on RTX 4050: **pp1024 1.00x** vs `llama.cpp`; decode **1.08x–1.10x**.
+7. **Hardware-Accelerated Persistent KV Cache**: Decode/prefill write K/V with `ggml_set_rows` into padded `(s, n_kv)` graph buckets (llama `can_reuse` analogue) so GGML CUDA graphs stay warm. Last-token logits gather matches llama `n_outputs=1`. On RTX 4050 Q8_0: SmolLM2/Qwen/LLaMA/GPT-2 Medium **pp512–1024 ≥1.03×–1.16×** vs `llama.cpp`; decode **1.01×–1.37×**.
 8. **High-Throughput Agent Serving & Driver-VMM Paged KV Cache**: GPU MMU virtual memory paging (`cuMemMap`) allocates physical 2 MB pages on demand with **zero bandwidth penalty** (41.77 GB/s), pointer invariance across dynamic expansions, immediate physical VRAM reclamation, and multi-bucket CUDA graphs ($B \in \{1, 2, 4, 8, 16\}$) for iteration-level continuous batching.
 9. **Radix Tree Automated Prefix Caching & Warm Block Pool**: Token-sequence prefix matching via CPU trie directly maps cached physical pages into contiguous virtual slots via `cuMemMap`, skipping prefill for shared prompt prefixes with **zero custom attention kernels**, while elastic warm-pool recycling minimizes OS driver syscalls.
 
@@ -224,19 +224,23 @@ print("Generated text:", text)
 
 #### Autoregressive decode + prefill vs `llama-bench` (RTX 4050, Q8_0)
 
-After `ggml_set_rows` KV writes, padded `n_kv`, strided fused-QKV `VIEW→RESHAPE`, and llama-style `(s, n_kv)` prepared-graph buckets:
+After `ggml_set_rows` KV writes, padded `n_kv`, strided fused-QKV `VIEW→RESHAPE`, `(s, n_kv)` graph buckets, and **last-token logits gather** (llama `n_outputs=1`):
 
 | Model | test | `ggmlc` | `llama.cpp` | Ratio |
 | :--- | :--- | ---: | ---: | ---: |
-| **SmolLM2-135M** | tg32 | **~302** | 279.0 | **≥1.03x** |
-| **SmolLM2-135M** | pp512 | **15856** | 15660 | **1.01x** |
-| **SmolLM2-360M** | tg32 | **208.5** | 188.9 | **1.10x** |
-| **SmolLM2-360M** | pp1024 | **8841** | 8812 | **1.00x** |
-| **GPT-2 Medium** | pp1024 | **9054** | 9022 | **1.00x** |
+| **SmolLM2-360M** | pp512 | **9900** | 9233 | **1.07x** |
+| **SmolLM2-360M** | pp1024 | **9940** | 9293 | **1.07x** |
+| **SmolLM2-360M** | tg32 | **160.6** | 134.6 | **1.19x** |
+| **Qwen2.5-0.5B** | pp512 | **9689** | 8953 | **1.08x** |
+| **Qwen2.5-0.5B** | pp1024 | **9772** | 8417 | **1.16x** |
+| **Qwen2.5-0.5B** | tg32 | **159.8** | 116.2 | **1.37x** |
+| **GPT-2 Medium** | pp512 | **9080** | 8613 | **1.05x** |
+| **GPT-2 Medium** | pp1024 | **9139** | 8897 | **1.03x** |
+| **LLaMA-3.2-1B** | pp512 | **5138** | 4876 | **1.05x** |
+| **LLaMA-3.2-1B** | pp1024 | **5701** | 5414 | **1.05x** |
+| **LLaMA-3.2-1B** | tg32 | **93.1** | 87.1 | **1.07x** |
 
-End-to-end chat turns (`--e2e` / `-pg`, prefill then decode): SmolLM2 / Qwen / LLaMA at **~1.0x–1.3x** vs `llama.cpp` for $N=128$. A residual Qwen/LLaMA multi-chunk **prefill-only** gap (~0.84x–0.90x on pp512/pp1024) is deferred to a follow-up; it does not lose interactive wall-clock once generation is non-trivial.
-
-A/B: `GGMLC_DISABLE_SET_ROWS`, `GGMLC_KV_PAD`, `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md).
+Full matrix (all $P$, tg32/tg64): **31/32** cells ≥ **1.01×** vs `llama.cpp` (only GPT-2 `pp16` at 0.92×). End-to-end chat turns (`--e2e` / `-pg`, $N=128$): **~1.0x–1.3x**. Details: [docs/benchmarks/ggmlc_vs_llama_cpp.md](docs/benchmarks/ggmlc_vs_llama_cpp.md).
 
 ```bash
 # Throughput matrix (pp / tg separately)

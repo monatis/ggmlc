@@ -84,6 +84,7 @@ static void print_help(const char* prog_name) {
               << "  --unplanned                           Disable planned arena reuse (debug mode)\n"
               << "  --profile                             Print per-phase host/device timings\n"
               << "  --dump-graph                          Print serialized + runtime op histograms\n"
+              << "  --full-logits                         Disable last-token lm_head gather (llama n_outputs=1)\n"
               << "  --diag-mode <normal|replay|host-only|no-pos-update>\n"
               << "                                        Isolate decode bottlenecks (tg tests only)\n"
               << "                                          normal: full prepare+KV mutate+run (default)\n"
@@ -129,6 +130,7 @@ int main(int argc, char** argv) {
     bool unplanned = false;
     bool enable_profile = false;
     bool dump_graph = false;
+    bool full_logits = false; // default: last-token gather (match llama-bench)
     std::string diag_mode = "normal";
 
     for (int i = 1; i < argc; ++i) {
@@ -171,6 +173,8 @@ int main(int argc, char** argv) {
             enable_profile = true;
         } else if (arg == "--dump-graph") {
             dump_graph = true;
+        } else if (arg == "--full-logits") {
+            full_logits = true;
         } else if (arg == "--diag-mode" && i + 1 < argc) {
             diag_mode = argv[++i];
         } else if (model_path.empty() && arg.rfind("-", 0) != 0) {
@@ -241,6 +245,8 @@ int main(int argc, char** argv) {
         if (enable_profile) {
             executor.set_enable_profile(true);
         }
+        // Match llama-bench: only last-token logits unless --full-logits.
+        executor.set_logits_last_only(!full_logits);
         if (use_kv_cache) {
             executor.init_kv_cache(max_ctx);
         }
@@ -317,11 +323,6 @@ int main(int argc, char** argv) {
                     if (use_kv_cache) symbol_env["pos"] = pos;
 
                     executor.prepare(symbol_env, !unplanned);
-                    if (dump_graph && chunk_idx == 0) {
-                        std::cerr << "[ggmlc-bench] runtime prefill graph P=" << P
-                                  << " chunk=" << c_len << ": "
-                                  << executor.runtime_graph_summary() << "\n";
-                    }
                     executor.set_input(in_tid, tokens.data() + c_start, c_len * sizeof(int32_t));
                     if (pos_tid >= 0) {
                         executor.set_input(pos_tid, pos_vec.data() + c_start, c_len * sizeof(int32_t));
@@ -329,6 +330,24 @@ int main(int argc, char** argv) {
                     executor.run(n_threads);
                 }
                 executor.synchronize();
+            }
+
+            // Graph dump once per prompt length (independent of warmup).
+            if (dump_graph) {
+                if (use_kv_cache) executor.reset_kv_cache();
+                int c_len = std::min(effective_chunk_size, P);
+                std::unordered_map<std::string, int64_t> symbol_env;
+                symbol_env["s"] = c_len;
+                for (const auto& sym : model_graph.symbol_table) {
+                    symbol_env[sym] = c_len;
+                }
+                if (use_kv_cache) symbol_env["pos"] = 0;
+                executor.prepare(symbol_env, !unplanned);
+                std::cerr << "[ggmlc-bench] runtime prefill graph P=" << P
+                          << " chunk=" << c_len << ": "
+                          << executor.runtime_graph_summary() << "\n";
+                std::cerr << "[ggmlc-bench] mul_mat/fa shapes: "
+                          << executor.runtime_mul_mat_shape_summary() << "\n";
             }
 
             std::vector<double> samples_ns;

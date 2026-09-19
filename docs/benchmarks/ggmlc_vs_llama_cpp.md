@@ -1,37 +1,19 @@
 # `ggmlc` vs. `llama.cpp`: Architecture and Performance
 
-Comparing compiler-generated GGML execution graphs (`ggmlc`) against hand-written C++ implementations (`llama.cpp`).
+Comparison of compiler-generated GGML graphs (`ggmlc`) against hand-written `llama.cpp` model implementations on the same hardware and quantization.
 
-## Summary
-
-- **Approach**: `ggmlc` compiles models directly from PyTorch (`torch.export`) and JAX (`jaxpr`) traces into GGML graphs with automated optimization passes (horizontal fusion, view folding). `llama.cpp` implements models as hand-written C++ classes.
-- **Graph structure**: `ggmlc` has ~1.5x–2x more graph nodes because tensor views, slices, and reshapes are explicit `GGML_OP_VIEW` nodes. In GGML, views cost 0 FLOPs and dispatch 0 GPU kernels (host pointer math only).
-- **Kernel launches**: Horizontal fusion merges parallel projections ($W_q, W_k, W_v$ and $W_{\text{gate}}, W_{\text{up}}$), cutting GEMV dispatches by 40%–43% (4 vs 7 GEMVs per layer, saving 90 kernel launches per token on 30 layers).
-- **Performance parity (RTX 4050 Laptop, CUDA 12.8, Q8_0)** — llama-style `(s, n_kv)` graph buckets (`scratch/compare_ggmlc_vs_llama_graph_buckets_summary.md`):
-  - **Short prefill ($P \le 128$)**: `ggmlc` is **~0.97x–1.12x** vs `llama.cpp` (fusion / launch-bound).
-  - **Single chunk ($P = 512$)**: **~0.84x–0.99x** (SmolLM2 / GPT-2 **~parity**).
-  - **Multi-chunk ($P = 1024$, ubatch 512)**: **~0.88x–1.00x** after pad-bucket stash/activate (was 0.71x–0.85x); SmolLM2 / GPT-2 at **1.00x**.
-  - **Decode ($S = 1$)**: **~0.95x–1.11x** — SmolLM2 / Qwen / LLaMA at or above llama.cpp.
-- **Extensibility**: Non-standard attention patterns (GQA, QK-norm, sliding window, MLA) compile directly from reference Python code without new C++ runtime kernels.
-
----
-
-## 1. Architectural Comparison
+## 1. Architecture
 
 | Dimension | `ggmlc` | `llama.cpp` |
 | :--- | :--- | :--- |
-| **Model Ingestion** | Compiles PyTorch (`torch.export`) and JAX (`jaxpr`) traces. | Custom Python conversion scripts (`convert_hf_to_gguf.py`). |
-| **Model Implementation** | Zero model C++. Generic runtime executes any valid GGUF graph. | Hand-written C++ class per architecture (`src/models/*.cpp`). |
-| **Operator Fusion** | Automated compiler passes (horizontal GEMV, affine view folding, SwiGLU). | Manual weight packing during conversion or bespoke multi-weight tensors. |
-| **KV Cache** | Graph-bound tensors: decode + chunked prefill use `ggml_set_rows` into a padded `n_kv` view; one prepared compute graph per `(s_q, n_kv)` pad bucket is stashed/activated (llama `can_reuse` analogue) instead of mutating FA shapes. | External C++ ring buffer (`struct llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256; full graph rebuild when `can_reuse` fails. |
-| **CUDA Execution** | GGML built-in CUDA graphs keyed per cgraph (stable inside a pad bucket); multi-batch `CUDAGraphManager` for serve buckets. | GGML CUDA graph (CC $\ge 7.0$) or sequential stream dispatches. |
-| **Scope** | Unified compiler for LLMs, SLMs, BERT, Whisper, and vision backbones. | Specialized C++ implementations for LLMs, audio, and multimodal. |
+| Model ingestion | Compiles PyTorch (`torch.export`) and JAX (`jaxpr`) traces. | HF → GGUF conversion scripts (`convert_hf_to_gguf.py`). |
+| Model code | No per-architecture C++. Generic runtime executes the serialized graph. | Hand-written C++ per architecture (`src/models/*.cpp`). |
+| Fusion | Compiler passes: horizontal GEMV (QKV, Gate+Up), affine view folding, fused SwiGLU. | Weight packing at conversion and/or bespoke multi-weight tensors. |
+| KV cache | Graph-bound tensors; decode and chunked prefill write with `ggml_set_rows` into a padded `n_kv` view. One prepared compute graph per `(s_q, n_kv)` pad bucket is stashed/activated (same role as llama `can_reuse`). | External ring buffer (`llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256; rebuild when `can_reuse` fails. |
+| CUDA | GGML CUDA graphs keyed per cgraph inside a pad bucket; `CUDAGraphManager` for multi-batch serve buckets. | GGML CUDA graphs (CC ≥ 7.0) or sequential launches. |
+| Output logits (prefill / sampling) | `ModelExecutor::set_logits_last_only`: last activation column only for the graph-output `MUL_MAT` (`lm_head` / tied embed). Default on in `ggmlc-bench`, `ggmlc-run`, and `ContinuousBatchScheduler`. Off on a bare `ModelExecutor` (full-seq logits for numerical tests). Disable in bench with `--full-logits`. | `llama_batch_get_one` leaves `logits == nullptr` → only the last token is an output (`n_outputs=1`); `ggml_get_rows` before the last layer and `lm_head`. |
 
----
-
-## 2. Graph Topologies: Single Decoder Layer
-
-Structural comparison of a single Transformer decoder layer (LLaMA / SmolLM2):
+### Decoder layer (LLaMA / SmolLM2 family)
 
 ```mermaid
 graph TB
@@ -55,7 +37,7 @@ graph TB
         L_WDOWN & L_ADD1 --> L_OUT["Output"]
     end
 
-    subgraph GGMLC ["ggmlc: 4 GEMVs (Fused)"]
+    subgraph GGMLC ["ggmlc: 4 GEMVs (fused)"]
         direction TB
         G_IN["x"] --> G_NORM1["RMSNorm"]
         G_NORM1 --> G_QKV["MUL_MAT [Wq; Wk; Wv]"]
@@ -71,215 +53,145 @@ graph TB
         G_NORM2 --> G_GATEUP["MUL_MAT [Wgate; Wup]"]
         G_GATEUP --> G_VGATE["VIEW (Gate)"]
         G_GATEUP --> G_VUP["VIEW (Up)"]
-        G_VGATE & G_VUP --> G_SWIGLU["SWIGLU (Fused)"]
+        G_VGATE & G_VUP --> G_SWIGLU["SWIGLU"]
         G_SWIGLU --> G_WDOWN["MUL_MAT (w_down)"]
         G_WDOWN & G_ADD1 --> G_OUT["Output"]
     end
 ```
 
-### Operator Mapping
-
-| Block | `llama.cpp` | `ggmlc` | Note |
-| :--- | :--- | :--- | :--- |
-| **Q/K/V Projections** | 3 `MUL_MAT` | 1 fused `MUL_MAT` + 3 `VIEW` | Horizontal fusion merges parallel weights on dim 0. |
-| **RoPE** | `ggml_rope_ext` | `ggml_rope_ext` on Q, K views | Identical kernel. |
-| **Self-Attention** | `ggml_flash_attn_ext` | `ggml_flash_attn_ext` | Identical kernel. |
-| **Output Projection** | 1 `MUL_MAT` | 1 `MUL_MAT` | Identical. |
-| **FFN Gate / Up** | 2 `MUL_MAT` | 1 fused `MUL_MAT` + 2 `VIEW` | Horizontal fusion merges Gate and Up. |
-| **Activation** | `SILU` + elementwise `MUL` | Fused `SWIGLU` | Single-pass activation. |
-| **FFN Down** | 1 `MUL_MAT` | 1 `MUL_MAT` | Identical. |
-
-### Node Count vs. Kernel Launches
-
-- **Views are zero-cost**: Slicing $[W_q; W_k; W_v]$ creates 3 `GGML_OP_VIEW` nodes. In GGML, views do not launch GPU kernels; they compute host-side pointer offsets in ~10 ns.
-- **Fewer GPU dispatches**: `ggmlc` dispatches 4 GEMVs per layer vs. 7 in `llama.cpp`.
-- **WDDM queue latency**: On Windows, each kernel launch incurs ~15–20 $\mu$s driver queue latency. Saving 90 launches per token on a 30-layer model saves ~1.5 ms CPU stall time.
-
----
-
-## 3. Frontend Canonicalization
-
-```
-PyTorch export (ATen) \
-                       --> Canonical IR --> Optimization passes --> GGML graph
-JAX jaxpr (XLA)       /
-```
-
-PyTorch and JAX traces normalize into a common Canonical IR (`OpCode.MATMUL`, `OpCode.SDPA`). Bitwise and differential tests verify numerical parity across both frontends on equivalent blocks (MLP, ResNet Residual, LayerNorm).
-
----
-
-## 4. Attention Variants
-
-| Variant | Models | `llama.cpp` | `ggmlc` |
-| :--- | :--- | :--- | :--- |
-| **GQA / MQA** | LLaMA 3.2, Qwen 2.5, SmolLM2 | Manual head broadcast logic in C++. | Canonicalized to `OpCode.SDPA(enable_gqa=True)` $\to$ `GGML_OP_FLASH_ATTN_EXT`. |
-| **QK Normalization** | Qwen 2.5, Gemma 3 | Custom C++ inserting RMSNorm before RoPE. | Traced automatically; lowered as standard RMSNorm nodes. |
-| **Sliding Window (SWA)** | Mistral, Gemma 3 | Custom C++ ring-buffer offset math. | Banded causal mask or FlashAttention window attribute. |
-| **Logit Softcapping** | Gemma 2 / 3 | C++ conditional passing `logit_softcap` float. | Extracted from attention attributes to `ggml_flash_attn_ext`. |
-| **MLA** | DeepSeek V2 / V3 | Custom C++ (`models/deepseek.cpp`). | Decomposes into standard matrix multiplies and split view projections. |
-
-Non-standard attention variants compile directly from Python reference code without custom C++ runtime logic.
-
----
-
-## 5. Multi-Backend Support
-
-- **CPU**: Standard `ggml-cpu` microkernels (AVX2, FMA, AVX-512).
-- **CUDA**: `CUDAGraphManager` (stream capture across CC $\ge 6.0$) + Driver-VMM virtual page mapping (`cuMemMap`).
-- **Other Backends**: Emits standard GGUF files with valid GGML graphs, executable on Metal or Vulkan via the GGML backend API.
-
----
-
-## 6. Benchmarks (RTX 4050 Laptop, CUDA 12.8)
-
-- **Hardware**: NVIDIA GeForce RTX 4050 Laptop (6 GB GDDR6, 96-bit bus, ~192 GB/s peak).
-- **Setup**: Windows 11, CUDA 12.8. Standalone C++ harnesses (`ggmlc-bench.exe` vs. `llama-bench.exe`) via `examples/benchmarks/compare_ggmlc_vs_llama_cpp.py`, 4 threads, `ubatch = 512`, `Q8_0`, 5 reps.
-- **Latest run**: `scratch/compare_ggmlc_vs_llama_graph_buckets.{md,json}` + `scratch/compare_ggmlc_vs_llama_graph_buckets_summary.md` (llama-style `(s, n_kv)` graph buckets). Absolute tok/s vary with thermal/power; **ratios within a run** are the fair metric.
-
-### Prefill Throughput ($P$ Tokens, `ubatch = 512`) — latest
-
-| Model | $P$ | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Ratio | Regime |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **smollm2_360m** | 16 | **1,877.4** | 1,681.3 | **1.12x** | Launch-bound (fusion win) |
-| | 64 | **5,053.0** | 4,756.1 | **1.06x** | Launch-bound |
-| | 128 | **6,738.2** | 6,539.7 | **1.03x** | Parity |
-| | 256 | **8,252.3** | 8,237.2 | **1.00x** | Parity |
-| | 512 | **9,025.2** | 9,157.5 | **0.99x** | Single full chunk (parity) |
-| | 1024 | **8,840.9** | 8,812.3 | **1.00x** | Multi-chunk (bucket reuse) |
-| **qwen2.5_0.5b** | 16 | **1,741.5** | 1,644.3 | **1.06x** | Launch-bound |
-| | 64 | **4,576.4** | 4,503.5 | **1.02x** | Parity |
-| | 128 | 6,155.6 | 6,374.2 | **0.97x** | Parity |
-| | 256 | 7,365.5 | 7,898.5 | **0.93x** | Compute-bound |
-| | 512 | 7,766.2 | 9,139.8 | **0.85x** | Compute-bound |
-| | 1024 | 8,086.7 | 9,145.0 | **0.88x** | Multi-chunk |
-| **gpt2_medium** | 16 | **1,943.9** | 1,909.5 | **1.02x** | Parity |
-| | 64 | 5,121.9 | 5,223.3 | **0.98x** | Parity |
-| | 128 | 6,828.2 | 6,995.3 | **0.98x** | Parity |
-| | 256 | 8,322.9 | 8,572.8 | **0.97x** | Parity |
-| | 512 | **8,933.7** | 9,039.4 | **0.99x** | Parity |
-| | 1024 | **9,054.4** | 9,021.5 | **1.00x** | Multi-chunk (bucket reuse) |
-| **llama3.2_1b** | 16 | 1,040.5 | 1,068.4 | **0.97x** | Parity |
-| | 64 | 2,918.8 | 3,050.9 | **0.96x** | Parity |
-| | 128 | 3,716.1 | 4,068.9 | **0.91x** | Near parity |
-| | 256 | 4,242.2 | 4,733.6 | **0.90x** | Compute-bound |
-| | 512 | 4,530.5 | 5,375.3 | **0.84x** | Compute-bound |
-| | 1024 | 5,145.7 | 5,721.9 | **0.90x** | Multi-chunk |
-
-### Decode Throughput ($S = 1$, Memory Bandwidth Bound) — latest
-
-Single-token decode has arithmetic intensity $\approx 1.0\text{ FLOP/Byte}$. After SET_ROWS + padded `n_kv` + decode buckets, CUDA graphs stay warm inside a pad stride.
-
-| Model | Tokens ($N$) | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Ratio | Active Bandwidth |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **SmolLM2-360M** | 128 | **212.8** | 196.6 | **1.08x** | 82.2 GB/s |
-| | 32 | **208.5** | 188.9 | **1.10x** | 80.6 GB/s |
-| **Qwen2.5-0.5B** | 128 | **201.3** | 183.9 | **1.09x** | 106.8 GB/s |
-| | 32 | **199.1** | 179.0 | **1.11x** | 105.6 GB/s |
-| **GPT-2 Medium** | 128 | **191.2** | 171.7 | **1.11x** | 72.6 GB/s |
-| | 32 | 175.4 | 183.9 | **0.95x** | 66.6 GB/s |
-| **LLaMA-3.2-1B** | 128 | **110.3** | 107.9 | **1.02x** | 145.7 GB/s |
-| | 32 | **107.8** | 104.8 | **1.03x** | 142.4 GB/s |
-
-### Observations
-
-1. **Short prefill ($P \le 128$)**: still ahead or at parity vs `llama.cpp` from horizontal fusion (fewer WDDM launches).
-2. **Single full chunk ($P = 512$)**: SmolLM2 / GPT-2 at parity (**~0.99x**); Qwen/LLaMA still pay a compute/layout gap unrelated to bucket switching.
-3. **Multi-chunk prefill ($P = 1024$)**: llama-style `(s, n_kv)` graph buckets close the prior 0.71x–0.85x deficit — SmolLM2 / GPT-2 at **1.00x**; Qwen **0.88x** / LLaMA **0.90x** (was 0.71x / 0.79x).
-4. **Decode ($S = 1$)**: SET_ROWS + pad + buckets keep graphs warm — SmolLM2 / Qwen / LLaMA **beat** llama.cpp.
-
-### End-to-end wall clock (`--e2e` / `-pg`)
-
-User-shaped turns time **prefill then decode in one shot** (`ggmlc-bench -pg` vs `llama-bench -pg`). See `scratch/compare_ggmlc_vs_llama_e2e_summary.md`.
-
-| Chat-like ($N=128$) | vs llama.cpp wall ms |
-| :--- | :--- |
-| SmolLM2-360M ($P=64…1024$) | **1.20x–1.29x** (ahead) |
-| Qwen2.5-0.5B / LLaMA-3.2-1B | **~1.0x–1.1x** on $P\ge256$ (ahead/parity after remeasure) |
-| Prefill-heavy ($P=1024$, $N=16/32$) | Still ~0.90x–0.96x (prefill gap visible when decode is short) |
-
-**Go/no-go:** **EMBRACE** current stack for interactive chat — residual multi-chunk pp gap does not lose end-to-end latency once generation is non-trivial. Further multi-chunk pp investigation is **deferred to a follow-up PR**.
-
-### Fusion A/B (prefill gap hypotheses, 2026-09-19)
-
-Harness: `--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv` + `--gguf-suffix` (never overwrites baseline `*_q8_0.gguf`). Full matrix vs `graph_buckets` baseline; details in `scratch/compare_ggmlc_vs_llama_fusion_ab_summary.md`.
-
-| Variant | Qwen Δ pp512/1024 | LLaMA Δ pp512/1024 | SmolLM/GPT-2 | Adopt? |
-| :--- | :---: | :---: | :--- | :--- |
-| `no_hmlp` (MLP off, QKV on) | +0.019 | +0.044 | 8 regressions | **No** |
-| `no_hqkv` (QKV off, MLP on) | −0.004 | +0.037 | 15 regressions | **No** |
-| Qwen bias-split | — | — | — | **Skipped** (HQKV-off did not help Qwen) |
-
-**Keep default fusion ON.** Residual Qwen/LLaMA prefill gap is not fixed by unfusing Gate+Up or QKV (incl. Qwen bias-concat).
-
----
-
-## 7. Bottleneck Isolation (Decode CUDA Graphs)
-
-Factors were tested one at a time with `ggmlc-bench --diag-mode`, `GGMLC_DISABLE_SET_ROWS`, and `GGMLC_KV_PAD` (`scratch/diag_isolate_bottleneck.py`).
-
-| Hypothesis | Isolation | Verdict |
+| Block | `llama.cpp` | `ggmlc` |
 | :--- | :--- | :--- |
-| Host KV / mask copies | `--diag-mode host-only` | **Falsified** (~0.03 ms/tok) |
-| Arena extra copies | `--unplanned` | **Falsified** (slower) |
-| Missing GGML CUDA graphs | frozen `--diag-mode replay` after `GGML_CUDA_GRAPHS=ON` | **Necessary but not sufficient**: replay hit ~196 tok/s on 360M while live stayed ~140 |
-| Per-token KV metadata mutation | live vs replay; `GGMLC_DISABLE_SET_ROWS=1` | **Verified**. `k_slot->view_offs` and `k_active->ne[1]` changed every token, resetting CUDA-graph warmup |
-| Inefficient PyTorch→GGML lowering / layout | serialized opcode histogram vs runtime graph; CONT attribution | **Verified for prefill**. Pattern `VIEW(QKV)→RESHAPE→ROPE→PERMUTE→FA` forced **90 CONT** (reshape-of-noncontig-view). Decode was already graph-bound after SET_ROWS. |
+| Q/K/V | 3× `MUL_MAT` | 1× fused `MUL_MAT` + 3× `VIEW` |
+| RoPE / FA / O / FFN down | Same GGML ops | Same GGML ops |
+| Gate / Up | 2× `MUL_MAT` | 1× fused `MUL_MAT` + 2× `VIEW` |
+| Activation | `SILU` + `MUL` | `SWIGLU` |
 
-### Fix (decode + multi-chunk)
+`GGML_OP_VIEW` does not launch device kernels. ggmlc therefore issues 4 weight GEMVs per layer versus 7 in the unfused llama layout. Official HF/llama GGUFs keep separate `gate_proj`/`up_proj` (and Q/K/V); fusion in ggmlc is compile-time only.
 
-Decode writes K/V with `ggml_set_rows` into the full cache and attends a padded view (`n_kv = max(256, pad(pos+1, 256))`), updating only index/mask *contents*. Chunked prefill uses the same SET_ROWS path. When padded `n_kv` crosses a bucket (e.g. 512→1024), the executor **stashes** the live prepared graph and **activates/rebuilds** a graph for the new `(s_q, n_kv)` — the llama.cpp `can_reuse` / `build_graph` pattern — instead of mutating FA `ne[]` in place. `reset_kv_cache` only zeroes KV buffers; prepared buckets survive across bench reps.
+### Layout (runtime)
 
-### Fix (prefill layout)
+- Fused-QKV `VIEW → RESHAPE` uses a strided view so RoPE / FlashAttention do not insert `CONT` on that path.
+- `PERMUTE` stays metadata when every consumer is `FLASH_ATTN_EXT`; other consumers may still require `CONT`.
+- CUDA unary kernels require contiguous `src0`; unary ops materialize `CONT` at the consumer when needed.
+- Prefill graphs used in the matrix below report `n_cont_or_dup = 0` and `n_cpy = 0`.
 
-Runtime layout canonicalization:
-- `PERMUTE` stays a metadata view **only when every consumer is `FLASH_ATTN_EXT`** (RoPE→FA path). Other consumers (vision CONV/LINEAR) still get CONT.
-- Fused-QKV `VIEW([E,S])→RESHAPE([D,H,S])` becomes a **strided view** that preserves the packed QKV outer stride (`try_reshape_strided_view`), so RoPE/FA never pay a CONT copy.
-- CUDA unary kernels (`unary.cu`) still require contiguous `src0`: `UNARY` / `SIN` / `COS` / `LOG` / `SQRT` / `SQR` materialize CONT at the consumer (e.g. Gemma3 attention soft-cap `tanh`) without forcing every QKV `VIEW` to CONT.
-- A/B: `GGMLC_RESHAPE_FORCE_CONT`, `GGMLC_PERMUTE_FORCE_CONT`, `GGMLC_VIEW_FORCE_CONT`.
+### Attention variants
 
-### Re-measured decode (`p=0`, `tg32`, 3 reps, RTX 4050)
-
-| Setup | tok/s |
-| :--- | ---: |
-| SmolLM2-360M SET_ROWS + pad256 (live) | **192.47** |
-| SmolLM2-360M frozen replay | **196.45** |
-| SmolLM2-360M legacy view+cpy | 140.06 |
-| SmolLM2-135M ggmlc | **~302** |
-| SmolLM2-135M llama.cpp | 278.98 (**ggmlc ≥1.03x**) |
-
-### Re-measured prefill (`pp512`, `ubatch=512`)
-
-| Setup | CONT | tok/s |
-| :--- | ---: | ---: |
-| SmolLM2-135M strided reshape | **0** | **16098** |
-| SmolLM2-135M legacy FORCE_*_CONT | 240 | 13566.66 |
-| SmolLM2-135M llama.cpp | — | 15659.74 (**ggmlc 1.03x**) |
-| SmolLM2-360M strided reshape | **0** | **8595** |
-
-Greedy token identity vs the legacy KV path holds (cosine ≥ 0.9988 on 8 decode steps).
-
-### Numerical parity gate (layout change)
-
-`python examples/benchmarks/benchmark_suite.py --backend cuda` across PyTorch / JAX / Flax / Keras / KerasHub families (`scratch/benchmark_cuda_layout_parity*.{md,json}`):
-
-| Family | Result |
-| :--- | :--- |
-| Vision-CNN / Detection / ViT | PASS (incl. `convnext_tiny`, `ssdlite320_mobilenet_v3`) |
-| Text (BERT, MiniLM, BGE, GPT-2, SmolLM2, Qwen2.5) | PASS |
-| Audio (Whisper enc/dec) | PASS |
-| Multimodal CLIP | PASS |
-| Flax ViT + Keras Applications | PASS |
-| KerasHub (BERT, DistilBERT, GPT-2, Gemma3) | PASS (Gemma3 required unary CONT for soft-cap) |
+| Variant | `llama.cpp` | `ggmlc` |
+| :--- | :--- | :--- |
+| GQA / MQA | Hand-written head broadcast in C++ | `OpCode.SDPA(enable_gqa=True)` → `FLASH_ATTN_EXT` |
+| QK-Norm | Inserted in model C++ | Traced RMSNorm nodes |
+| Sliding window | Ring-buffer offsets in C++ | Mask / FA window attribute |
+| Logit softcap | Parameter on FA call | Attribute → `ggml_flash_attn_ext` |
 
 ---
 
-## 8. Current Gaps
+## 2. Benchmark setup
 
-1. **Compiler-level RoPE layout pass**: Runtime strided reshape closes the CONT tax; a Canonical-IR pass that emits `[D,H,S]` views directly (and fuses `ROPE+VIEW+SET_ROWS` like llama.cpp CUDA) would shrink the IR further.
-2. **Residual prefill gap on Qwen / LLaMA** *(deferred follow-up)*: multi-chunk bucket reuse is largely closed (SmolLM2/GPT-2 at 1.00x on pp1024); remaining 0.84x–0.90x on Qwen/LLaMA is **not** graph-switch tax and **not** horizontal MLP/QKV fusion (both A/Bs falsified — see §6 Fusion A/B). Likely deeper Q8 GEMM tile/layout efficiency on wide FFNs (`I≈4864` / `≈8192`). **Shipped decision:** e2e wall clock (`-pg`) **embraces** for chat-like $N=128$ turns (§6); further multi-chunk pp investigation is intentionally **out of this PR**.
-3. **Faster first-time rebuild**: bucket hits are cheap; the first `prepare()` per `(s, n_kv)` still walks Canonical IR. A lighter native rebuild (closer to llama `build_graph` cost) remains optional.
-4. **Quantization Formats**: Supports `Q8_0`, `Q4_0`, and `F16`. Non-linear k-quants (`Q4_K_M`, `IQ*`) are not yet implemented.
-5. **Driver-VMM KV Integration**: Virtual memory paging is implemented in `--serve`, but not yet enabled by default in batch prefill/decode.
-6. **CPU Microkernels**: Relies on upstream `ggml-cpu` without custom assembly GEMV kernels.
+| Item | Value |
+| :--- | :--- |
+| GPU | NVIDIA GeForce RTX 4050 Laptop (6 GB, ~192 GB/s peak) |
+| Host | Windows 11, CUDA 12.8 |
+| Harness | `ggmlc-bench` vs `llama-bench` via `examples/benchmarks/compare_ggmlc_vs_llama_cpp.py` |
+| Quant | Q8_0 |
+| Threads | 4 |
+| Prefill chunk | `ubatch = 512` |
+| Reps | 5 |
+| ggmlc logits | Last-token only (default; matches `llama-bench` `n_outputs=1`) |
+| llama CUDA graphs | Disabled on WDDM (`GGML_CUDA_DISABLE_GRAPHS=1`) unless overridden |
 
+Absolute tok/s move with thermal/power state. Ratios within a paired run are the comparison metric.
+
+Reproduce:
+
+```bash
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --ubatch 512 --runs 5 --skip-numerical-check
+```
+
+---
+
+## 3. Prefill ($P$ tokens)
+
+| Model | $P$ | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Ratio |
+| :--- | :---: | :---: | :---: | :---: |
+| **smollm2_360m** | 16 | 1581.7 | 970.8 | 1.63× |
+| | 64 | 4561.4 | 3981.1 | 1.15× |
+| | 128 | 6581.4 | 5377.2 | 1.22× |
+| | 256 | 8661.9 | 7934.2 | 1.09× |
+| | 512 | 9900.0 | 9233.1 | 1.07× |
+| | 1024 | 9939.9 | 9292.8 | 1.07× |
+| **qwen2.5_0.5b** | 16 | 1599.5 | 1334.8 | 1.20× |
+| | 64 | 4851.9 | 3967.8 | 1.22× |
+| | 128 | 6954.0 | 5941.1 | 1.17× |
+| | 256 | 8859.4 | 8049.6 | 1.10× |
+| | 512 | 9689.2 | 8953.4 | 1.08× |
+| | 1024 | 9772.3 | 8416.7 | 1.16× |
+| **gpt2_medium** | 16 | 1306.8 | 1426.5 | 0.92× |
+| | 64 | 4364.4 | 4301.0 | 1.01× |
+| | 128 | 6225.4 | 6064.2 | 1.03× |
+| | 256 | 7781.5 | 7588.9 | 1.03× |
+| | 512 | 9080.3 | 8612.7 | 1.05× |
+| | 1024 | 9139.1 | 8896.8 | 1.03× |
+| **llama3.2_1b** | 16 | 980.4 | 874.1 | 1.12× |
+| | 64 | 2804.2 | 2689.2 | 1.04× |
+| | 128 | 3858.7 | 3690.1 | 1.05× |
+| | 256 | 4575.1 | 4282.5 | 1.07× |
+| | 512 | 5138.4 | 4876.0 | 1.05× |
+| | 1024 | 5700.6 | 5413.9 | 1.05× |
+
+---
+
+## 4. Decode ($S = 1$)
+
+Arithmetic intensity ≈ 1.0 FLOP/byte (weight streaming). Bandwidth below is `model_bytes × tok/s`.
+
+| Model | $N$ | `ggmlc` (tok/s) | `llama.cpp` (tok/s) | Ratio | Bandwidth |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **smollm2_360m** | 32 | 160.6 | 134.6 | 1.19× | 62.1 GB/s |
+| | 64 | 157.2 | 129.1 | 1.22× | 60.8 GB/s |
+| **qwen2.5_0.5b** | 32 | 159.8 | 116.2 | 1.37× | 84.8 GB/s |
+| | 64 | 145.5 | 118.5 | 1.23× | 77.2 GB/s |
+| **gpt2_medium** | 32 | 132.7 | 128.0 | 1.04× | 50.4 GB/s |
+| | 64 | 132.1 | 126.9 | 1.04× | 50.2 GB/s |
+| **llama3.2_1b** | 32 | 93.1 | 87.1 | 1.07× | 122.9 GB/s |
+| | 64 | 90.3 | 89.1 | 1.01× | 119.3 GB/s |
+
+---
+
+## 5. End-to-end wall clock (`-pg`)
+
+One timed shot: prefill $P$ then decode $N$ (`ggmlc-bench -pg` / `llama-bench -pg`).
+
+```bash
+python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-graph --e2e --skip-numerical-check
+```
+
+| Shape | ggmlc / llama (wall time ratio) |
+| :--- | :--- |
+| SmolLM2-360M, $N=128$, $P \in [64,1024]$ | ~1.20×–1.29× (ggmlc lower wall time) |
+| Qwen2.5-0.5B / LLaMA-3.2-1B, $N=128$, $P \ge 256$ | ~1.0×–1.1× |
+
+---
+
+## 6. Logits contract (apples-to-apples)
+
+Both benches sample from a single final token’s logits after prefill:
+
+- **llama**: `n_outputs = 1`; gather before last layer + `lm_head`.
+- **ggmlc**: gather at graph-output `MUL_MAT` only (`set_logits_last_only`). Full-sequence `lm_head` (`V × P` F32 write) is not used in the default bench path.
+
+With `--full-logits` on `ggmlc-bench`, pp512 on the same machine drops relative to the default (larger drop on high-vocab models: Qwen V≈152k, LLaMA V≈128k, SmolLM V≈49k). That mode is for A/B only; it is not the fair `llama-bench` comparison.
+
+Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv`) does not close a fair-compare gap against llama when logits already match; default fusion remains on.
+
+---
+
+## 7. Gaps and limitations
+
+1. **gpt2_medium pp16 (0.92×)**: only matrix cell below 1.0×. Short-prompt / WDDM launch dominated; not reproduced at $P \ge 64$.
+2. **Last-layer gather**: llama can shrink the last transformer layer to `n_outputs` tokens; ggmlc still runs the last layer at full $P$ and only slices into `lm_head`.
+3. **Multi-request outputs**: `set_logits_last_only` is a single last-column view. Concurrent prefill / batch decode that needs logits for every slot needs per-request output indices (llama `out_ids`), not only this flag.
+4. **First `(s_q, n_kv)` prepare**: bucket reuse is cheap after the first build; the initial `prepare()` still walks the full IR for that shape.
+5. **Quantization**: Q8_0, Q4_0, F16. No k-quants / IQ* yet.
+6. **Paged KV**: Driver-VMM paging is available under `--serve`; not the default for the pp/tg matrix above.
+7. **CPU**: upstream `ggml-cpu` only; no custom assembly GEMV path beyond what GGML provides.

@@ -417,6 +417,7 @@ int main(int argc, char** argv) {
                       << "  CUDA Graphs:  " << (use_cuda_graph ? "Multi-Bucket (B in {1, 2, 4, 8, 16})" : "Disabled") << "\n"
                       << "================================================================================\n";
             ggmlc::ModelExecutor executor(model_graph, device_name);
+            executor.set_logits_last_only(true);
             executor.init_paged_kv_cache(max_batch, 2048);
             size_t prealloc = 0;
             if (gpu_utilization > 0.0f) {
@@ -530,6 +531,8 @@ int main(int argc, char** argv) {
             if (use_cuda_graph) {
                 executor.set_enable_cuda_graph(true);
             }
+            // Match llama.cpp: only last-token logits for sampling.
+            executor.set_logits_last_only(true);
             bool flush_per_token = is_stdout_tty();
             auto t_start = std::chrono::high_resolution_clock::now();
             auto t_prefill_end = t_start;
@@ -629,12 +632,20 @@ int main(int argc, char** argv) {
                     if (max_tokens > 0) {
                         const float* logits_data = static_cast<const float*>(executor.get_output_data(out_tid));
                         size_t total_elements = executor.get_tensor_size_bytes(out_tid) / sizeof(float);
-                        int64_t vocab_size = total_elements / c_len;
-                        if (vocab_size <= 0) {
-                            vocab_size = static_cast<int64_t>(tokenizer.vocab_size());
+                        auto out_shape = executor.get_tensor_shape(out_tid);
+                        int64_t vocab_size = 0;
+                        const float* last_logits = nullptr;
+                        if (out_shape.size() >= 2 && out_shape[1] == 1) {
+                            vocab_size = out_shape[0];
+                            last_logits = logits_data;
+                        } else {
+                            vocab_size = static_cast<int64_t>(total_elements / static_cast<size_t>((c_len > 0) ? c_len : 1));
+                            if (vocab_size <= 0) {
+                                vocab_size = static_cast<int64_t>(tokenizer.vocab_size());
+                            }
+                            last_logits = logits_data + (c_len - 1) * vocab_size;
                         }
 
-                        const float* last_logits = logits_data + (c_len - 1) * vocab_size;
                         int32_t next_token = sample_token(last_logits, vocab_size, temperature, top_p);
 
                         last_token = next_token;
@@ -712,12 +723,19 @@ int main(int argc, char** argv) {
 
                 const float* logits_data = static_cast<const float*>(executor.get_output_data(out_tid));
                 size_t total_elements = executor.get_tensor_size_bytes(out_tid) / sizeof(float);
-                int64_t vocab_size = total_elements / S;
-                if (vocab_size <= 0) {
-                    vocab_size = static_cast<int64_t>(tokenizer.vocab_size());
+                auto out_shape = executor.get_tensor_shape(out_tid);
+                int64_t vocab_size = 0;
+                const float* last_logits = nullptr;
+                if (out_shape.size() >= 2 && out_shape[1] == 1) {
+                    vocab_size = out_shape[0];
+                    last_logits = logits_data;
+                } else {
+                    vocab_size = static_cast<int64_t>(total_elements / static_cast<size_t>((S > 0) ? S : 1));
+                    if (vocab_size <= 0) {
+                        vocab_size = static_cast<int64_t>(tokenizer.vocab_size());
+                    }
+                    last_logits = logits_data + (S - 1) * vocab_size;
                 }
-
-                const float* last_logits = logits_data + (S - 1) * vocab_size;
                 int32_t next_token = sample_token(last_logits, vocab_size, temperature, top_p);
 
                 last_token = next_token;
@@ -772,6 +790,7 @@ int main(int argc, char** argv) {
         if (use_cuda_graph) {
             executor.set_enable_cuda_graph(true);
         }
+        executor.set_logits_last_only(true);
         executor.prepare(symbol_env, !unplanned);
 
         // Load initial state data if provided
