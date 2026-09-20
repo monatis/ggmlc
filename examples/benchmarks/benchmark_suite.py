@@ -225,12 +225,18 @@ class BenchmarkSuite:
     """Orchestrates end-to-end benchmarking across model families."""
 
     def __init__(
-        self, backend: str = "cpu", warmup: int = 3, runs: int = 10, verbose: bool = False
+        self,
+        backend: str = "cpu",
+        warmup: int = 3,
+        runs: int = 10,
+        verbose: bool = False,
+        fusion_options: Any = None,
     ):
         self.backend = backend.lower()
         self.warmup = warmup
         self.runs = runs
         self.verbose = verbose
+        self.fusion_options = fusion_options
         self.records: list[BenchmarkRecord] = []
         self.hardware_metadata = get_hardware_metadata(self.backend)
 
@@ -266,7 +272,7 @@ class BenchmarkSuite:
                     export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
 
                     t_low_0 = time.perf_counter()
-                    ggml_graph = lower_to_ggml(exported_graph)
+                    ggml_graph = lower_to_ggml(exported_graph, fusion_options=self.fusion_options)
                     ser_bytes = serialize_ggml_graph(ggml_graph)
                     lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
                     payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
@@ -279,11 +285,18 @@ class BenchmarkSuite:
                         ref_out = model(*example_inputs)
 
                     t_exp_0 = time.perf_counter()
-                    exported = export_torch_model(model, example_inputs, model_name=name)
+                    exported = export_torch_model(
+                        model,
+                        example_inputs,
+                        model_name=name,
+                        fusion_options=self.fusion_options,
+                    )
                     export_time_ms = (time.perf_counter() - t_exp_0) * 1000.0
 
                     t_low_0 = time.perf_counter()
-                    ggml_graph = lower_to_ggml(exported.main_graph)
+                    ggml_graph = lower_to_ggml(
+                        exported.main_graph, fusion_options=self.fusion_options
+                    )
                     ser_bytes = serialize_ggml_graph(ggml_graph)
                     lowering_time_ms = (time.perf_counter() - t_low_0) * 1000.0
                     payload_size_mb = len(ser_bytes) / (1024.0 * 1024.0)
@@ -681,10 +694,33 @@ def main():
     parser.add_argument(
         "--output-json", type=str, default="benchmark_report.json", help="JSON output path"
     )
+    parser.add_argument(
+        "--fusion-no-bake-affine",
+        action="store_true",
+        help="Disable compile-time const-affine / LayerNorm bake into Linear/Conv",
+    )
+    parser.add_argument(
+        "--fusion-no-bake-rms",
+        action="store_true",
+        help="Disable compile-time RMSNorm gamma bake into Linear",
+    )
     args = parser.parse_args()
 
+    fusion_options = None
+    if args.fusion_no_bake_affine or args.fusion_no_bake_rms:
+        from ggmlc.transforms.fusion import FusionOptions
+
+        fusion_options = FusionOptions(
+            enable_bake_affine=not args.fusion_no_bake_affine,
+            enable_bake_rms_into_linear=not args.fusion_no_bake_rms,
+        )
+
     suite = BenchmarkSuite(
-        backend=args.backend, warmup=args.warmup, runs=args.runs, verbose=args.verbose
+        backend=args.backend,
+        warmup=args.warmup,
+        runs=args.runs,
+        verbose=args.verbose,
+        fusion_options=fusion_options,
     )
     suite.run_all(selected_models=args.models)
 

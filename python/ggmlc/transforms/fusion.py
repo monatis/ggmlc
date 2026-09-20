@@ -35,6 +35,11 @@ class FusionOptions:
     # without new CUDA kernels. Must run after horizontal fusion; quantize sees
     # already-scaled W. Default ON after SmolLM/Qwen/LLaMA A/B (stable, often faster).
     enable_bake_rms_into_linear: bool = True
+    # Generic const-affine (MUL/DIV/ADD/SUB) and LayerNorm γ/β folding into
+    # Linear / MatMul / Conv2D weights. Same family as RMS bake; default ON.
+    # Skips QK-Norm (norm→RoPE) and peri-norm residual (norm→residual ADD) so
+    # stock CUDA fused kernels stay intact.
+    enable_bake_affine: bool = True
 
 
 class OperatorFusionPass(Pass):
@@ -121,11 +126,23 @@ def fuse_operations(graph: Graph, options: FusionOptions | None = None) -> Graph
     if options.enable_bake_rms_into_linear:
         _bake_rms_weights_into_linears(graph)
 
+    if options.enable_bake_affine:
+        from ggmlc.transforms.affine_bake import (
+            bake_const_affine_into_gemms,
+            bake_norm_affine_into_gemms,
+        )
+
+        bake_norm_affine_into_gemms(graph, OpCode.LAYER_NORM)
+        bake_const_affine_into_gemms(graph)
+        # Conv+BN fold can expose a direct Conv→ReLU that the earlier pass missed.
+        if options.enable_conv2d_relu:
+            _fuse_conv2d_relu_patterns(graph)
+
     return graph
 
 
 def _bake_rms_weights_into_linears(graph: Graph) -> int:
-    """Absorb RMSNorm gamma into consumer Linear weights; leave weightless RMS_NORM.
+    """Absorb RMSNorm gamma into consumer Linear/MatMul weights; leave weightless RMS_NORM.
 
     Math (PyTorch Linear ``W[out, in]``, ``y = x_scaled @ W.T``):
       ``x_scaled[..., k] = rms(x)[..., k] * gamma[k]``
@@ -133,93 +150,12 @@ def _bake_rms_weights_into_linears(graph: Graph) -> int:
 
     For HF Conv1D / ``aten.addmm`` weights stored as ``W[in, out]``, scale rows instead.
 
-    Only rewrites when every consumer of the RMS output is a LINEAR whose activation
-    input is that tensor (no residual / view fanout). Returns number of RMS ops baked.
+    Only rewrites when every consumer of the RMS output is a GEMM whose activation
+    input is that tensor (no residual / view / RoPE fanout). Returns number baked.
     """
-    consumers: dict[int, list[Operation]] = {}
-    for op in graph.nodes:
-        for in_id in op.inputs:
-            consumers.setdefault(in_id, []).append(op)
+    from ggmlc.transforms.affine_bake import bake_norm_affine_into_gemms
 
-    baked = 0
-    for op in graph.nodes:
-        if op.opcode != OpCode.RMS_NORM or len(op.inputs) < 2:
-            continue
-
-        x_id, gamma_id = op.inputs[0], op.inputs[1]
-        gamma_t = graph.get_tensor(gamma_id)
-        if (
-            gamma_t is None
-            or gamma_t.data is None
-            or gamma_t.storage not in (StorageClass.PARAMETER, StorageClass.CONSTANT)
-        ):
-            continue
-
-        gamma = np.asarray(gamma_t.data, dtype=np.float32).reshape(-1)
-        if gamma.size == 0:
-            continue
-
-        rms_out = op.outputs[0]
-        outs = consumers.get(rms_out, [])
-        if not outs:
-            continue
-        if any(c.opcode != OpCode.LINEAR or not c.inputs or c.inputs[0] != rms_out for c in outs):
-            continue
-
-        # Validate every Linear can absorb gamma before mutating any weight.
-        # Skip when a Linear weight is shared with non-consumer ops (e.g. tied
-        # embed_tokens.weight used by both EMBEDDING and lm_head) — in-place
-        # bake would corrupt the other use.
-        allowed_op_ids = {c.id for c in outs}
-        planned: list[tuple[int, np.ndarray]] = []  # weight_id → scaled data
-        seen_w: set[int] = set()
-        ok = True
-        for lin in outs:
-            w_id = lin.inputs[1]
-            w_t = graph.get_tensor(w_id)
-            if (
-                w_t is None
-                or w_t.data is None
-                or not hasattr(w_t.data, "ndim")
-                or w_t.data.ndim != 2
-                or w_t.storage != StorageClass.PARAMETER
-            ):
-                ok = False
-                break
-            for other in graph.nodes:
-                if w_id in other.inputs and other.id not in allowed_op_ids:
-                    ok = False
-                    break
-            if not ok:
-                break
-            if w_id in seen_w:
-                continue
-            seen_w.add(w_id)
-            W = np.asarray(w_t.data, dtype=np.float32)
-            is_addmm = lin.attributes.get("is_addmm", 0) != 0
-            # addmm / Conv1D: (in, out); standard Linear: (out, in)
-            if is_addmm or (W.shape[0] == gamma.size and W.shape[1] != gamma.size):
-                if W.shape[0] != gamma.size:
-                    ok = False
-                    break
-                W_new = W * gamma[:, np.newaxis]
-            else:
-                if W.shape[1] != gamma.size:
-                    ok = False
-                    break
-                W_new = W * gamma[np.newaxis, :]
-            planned.append((w_id, W_new))
-
-        if not ok or not planned:
-            continue
-
-        for w_id, W_new in planned:
-            graph.get_tensor(w_id).data = np.ascontiguousarray(W_new)
-
-        op.inputs = [x_id]
-        baked += 1
-
-    return baked
+    return bake_norm_affine_into_gemms(graph, OpCode.RMS_NORM)
 
 
 def _fuse_rope_patterns(graph: Graph) -> None:

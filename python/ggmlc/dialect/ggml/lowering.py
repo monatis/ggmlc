@@ -464,6 +464,8 @@ def _lower_op(
             attrs["transpose_in0"] = int(op.attributes["transpose_in0"])
 
         mapped_inputs = [in_ids[1], in_ids[0]]
+        if len(in_ids) > 2:
+            mapped_inputs.append(in_ids[2])
         return GGMLOpDef(op.id, GGMLOpCode.GGML_OP_MUL_MAT, mapped_inputs, out_ids, attrs, op.name)
     elif opcode == OpCode.CONV2D:
         # PyTorch conv2d: in_ids = [x, weight, bias (optional)]

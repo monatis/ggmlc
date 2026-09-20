@@ -207,7 +207,8 @@ def compile_ggmlc_model(
         fusion_note = (
             f" fusion(mlp={fusion_options.enable_horizontal_mlp},"
             f" qkv={fusion_options.enable_horizontal_qkv},"
-            f" bake_rms={fusion_options.enable_bake_rms_into_linear})"
+            f" bake_rms={fusion_options.enable_bake_rms_into_linear},"
+            f" bake_affine={fusion_options.enable_bake_affine})"
         )
     print(
         f"⚙️ Compiling {model_name} (quantize={quantize}{fusion_note}) into ggmlc GGUF container...",
@@ -934,6 +935,11 @@ def main() -> int:
         help="Disable compile-time RMSNorm gamma bake into Linear weights",
     )
     parser.add_argument(
+        "--fusion-no-bake-affine",
+        action="store_true",
+        help="Disable compile-time const-affine / LayerNorm bake into Linear/MatMul/Conv",
+    )
+    parser.add_argument(
         "--gguf-suffix",
         default="",
         help="Suffix for compiled GGUF (e.g. no_hmlp → scratch/{model}_q8_0_no_hmlp.gguf)",
@@ -967,14 +973,16 @@ def main() -> int:
         or args.fusion_no_horizontal_qkv
         or args.fusion_no_bake_rms
         or args.fusion_bake_rms
+        or args.fusion_no_bake_affine
     ):
         from ggmlc.transforms.fusion import FusionOptions
 
-        # Bake is default ON; --fusion-no-bake-rms disables. Legacy --fusion-bake-rms is a no-op.
+        # Bake is default ON; --fusion-no-bake-rms / --fusion-no-bake-affine disable.
         fusion_options = FusionOptions(
             enable_horizontal_mlp=not args.fusion_no_horizontal_mlp,
             enable_horizontal_qkv=not args.fusion_no_horizontal_qkv,
             enable_bake_rms_into_linear=not args.fusion_no_bake_rms,
+            enable_bake_affine=not args.fusion_no_bake_affine,
         )
         if not gguf_suffix:
             parts: list[str] = []
@@ -984,6 +992,8 @@ def main() -> int:
                 parts.append("no_hqkv")
             if args.fusion_no_bake_rms:
                 parts.append("no_bake_rms")
+            if args.fusion_no_bake_affine:
+                parts.append("no_bake_affine")
             gguf_suffix = "_".join(parts)
 
     # 1. Locate binaries
