@@ -168,9 +168,8 @@ int DecisionEngine::clamp_seq(int n) const {
 
 int DecisionEngine::batch_cap_for_seq(int seq_len) const {
     if (!dynamic_ || seq_len <= 0) return 1;
-    // Arena reuse is off for this graph, so peak VRAM is roughly the sum of
-    // activations. Keep B*S in a 6 GB laptop budget; CPU can go wider.
-    const int budget = (device_ == "cpu") ? 1024 : 512;
+    // gallocr reuses activations; keep a laptop VRAM ceiling with OOM-halve fallback.
+    const int budget = (device_ == "cpu") ? 2048 : 1024;
     int cap = std::max(1, budget / seq_len);
     return std::min(cap, max_batch_);
 }
@@ -213,7 +212,7 @@ bool DecisionEngine::prepare_shape(int batch, int seq_len) {
     std::unordered_map<std::string, int64_t> env;
     if (dynamic_) fill_symbol_env(batch, seq_len, env);
     try {
-        executor_->prepare(env, false);
+        executor_->prepare(env, true);
         if (cuda_graph_) executor_->set_enable_cuda_graph(true);
         return true;
     } catch (const std::exception& e) {

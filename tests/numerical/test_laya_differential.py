@@ -71,11 +71,15 @@ def _padded_email(agent, pad_batch, seq_len=None):
     return batch, padded, len(markers)
 
 
-def _gguf_option_logits(gguf, arrays, k):
+def _gguf_option_logits(gguf, arrays, k, enable_arena_reuse=True):
     from ggmlc.runtime.runner import ModelRunner
 
     runner = ModelRunner(str(gguf), device="cpu", n_threads=4)
-    ggml = runner(*[t.detach().cpu().numpy() if hasattr(t, "detach") else t for t in arrays], n_threads=4, enable_arena_reuse=False)
+    ggml = runner(
+        *[t.detach().cpu().numpy() if hasattr(t, "detach") else t for t in arrays],
+        n_threads=4,
+        enable_arena_reuse=enable_arena_reuse,
+    )
     if isinstance(ggml, dict):
         outs = []
         seen = set()
@@ -239,6 +243,30 @@ def test_laya_gguf_length_bucket_128(laya_models):
     max_diff = float(np.max(np.abs(tl_np - gl)))
     assert cos > 0.99, f"S=128 GGUF cosine {cos} max_diff={max_diff}"
     assert max_diff < 0.15, f"S=128 GGUF max_diff={max_diff}"
+
+
+def test_laya_gguf_arena_reuse_parity(laya_models):
+    """gallocr must not NaN or diverge from the unplanned allocation path."""
+    _, _, pad_batch = laya_models
+    gguf = ROOT / "scratch" / "laya_english_f16.gguf"
+    if not gguf.exists():
+        pytest.skip("scratch/laya_english_f16.gguf not found")
+    _, padded, k = _padded_email(laya_models[0], pad_batch, seq_len=128)
+    try:
+        off, runner = _gguf_option_logits(gguf, padded, k, enable_arena_reuse=False)
+        on, _ = _gguf_option_logits(gguf, padded, k, enable_arena_reuse=True)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"GGUF arena compare failed ({exc})")
+    if not getattr(runner, "symbol_table", None):
+        pytest.skip("GGUF is static [1,512]; recompile with dynamic b/s")
+    off = np.asarray(off, dtype=np.float32).reshape(-1)[:k]
+    on = np.asarray(on, dtype=np.float32).reshape(-1)[:k]
+    assert np.isfinite(off).all(), "arena-off logits are not finite"
+    assert np.isfinite(on).all(), "arena-on logits are not finite (gallocr reuse)"
+    cos = float(np.dot(off, on) / (np.linalg.norm(off) * np.linalg.norm(on) + 1e-12))
+    max_diff = float(np.max(np.abs(off - on)))
+    assert cos > 0.99, f"arena on vs off cosine {cos} max_diff={max_diff}"
+    assert max_diff < 0.15, f"arena on vs off max_diff={max_diff}"
 
 
 def test_laya_system_one_email_routing(laya_models):
