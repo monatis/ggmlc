@@ -23,6 +23,23 @@ from ggmlc.ir.shape import (
 from ggmlc.ir.tensor import StorageClass, Tensor
 
 
+def _static_index(x: Any, default: int = 0, *, cap_unbounded: bool = False) -> int:
+    """Slice bound as a Python int. Symbolic ends are resolved via the output shape."""
+    if x is None:
+        return default
+    if isinstance(x, Node):
+        return default
+    if isinstance(x, torch.SymInt):
+        return default
+    try:
+        v = int(x)
+    except (TypeError, ValueError):
+        return default
+    if cap_unbounded and v >= 9223372036854775800:
+        return default
+    return v
+
+
 def _symint_to_dim(sym: Any) -> Dim:
     """Convert torch.SymInt or int/expression to Dim."""
     if isinstance(sym, int):
@@ -693,15 +710,11 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
                 attributes["is_select"] = 1
             else:
                 dim = int(node.args[1]) if len(node.args) > 1 else 0
-                start = int(node.args[2]) if len(node.args) > 2 and node.args[2] is not None else 0
-                end = (
-                    int(node.args[3])
-                    if len(node.args) > 3
-                    and node.args[3] is not None
-                    and node.args[3] < 9223372036854775800
-                    else -1
+                start = _static_index(node.args[2] if len(node.args) > 2 else 0, 0)
+                end = _static_index(
+                    node.args[3] if len(node.args) > 3 else None, -1, cap_unbounded=True
                 )
-                step = int(node.args[4]) if len(node.args) > 4 and node.args[4] is not None else 1
+                step = _static_index(node.args[4] if len(node.args) > 4 else 1, 1)
                 attributes["dim"] = dim
                 attributes["start"] = start
                 attributes["end"] = end
@@ -711,6 +724,14 @@ def import_exported_program(ep: ExportedProgram, graph_name: str = "main") -> Gr
             dim = node.args[1] if len(node.args) > 1 else -1
             attributes["dim"] = int(dim[0]) if isinstance(dim, (list, tuple)) else int(dim)
             attributes["keepdim"] = 1 if len(node.args) > 2 and node.args[2] else 0
+        elif opcode in (OpCode.SUM, OpCode.AMAX, OpCode.AMIN):
+            input_tensor_ids.append(node_to_tensor[node.args[0]].id)
+            dim = node.kwargs.get("dim", node.args[1] if len(node.args) > 1 else -1)
+            if isinstance(dim, (list, tuple)):
+                dim = dim[0] if len(dim) > 0 else -1
+            attributes["dim"] = int(dim) if dim is not None else -1
+            keepdim = node.kwargs.get("keepdim", node.args[2] if len(node.args) > 2 else False)
+            attributes["keepdim"] = 1 if keepdim else 0
         elif opcode == OpCode.CONCAT:
             # aten.cat.default(tensors, dim=0)
             tensors_arg = node.args[0]

@@ -78,7 +78,13 @@ NB_MODULE(_runtime, m) {
         })
         .def_prop_ro("type", [](const ggmlc::SerializedTensor& t) {
             return static_cast<int32_t>(t.type);
-        });
+        })
+        .def("symbol_index", [](const ggmlc::SerializedTensor& t, int axis) -> int64_t {
+            if (axis < 0 || axis > 3 || !t.ne[axis] || t.ne[axis]->type != ggmlc::DimType::SYMBOL) {
+                return -1;
+            }
+            return t.ne[axis]->val;
+        }, "axis"_a);
 
     nb::class_<ggmlc::SerializedOp>(m, "SerializedOp")
         .def_ro("id", &ggmlc::SerializedOp::id)

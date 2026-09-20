@@ -138,6 +138,20 @@ class ModelRunner:
                                     if sym not in symbol_env:
                                         symbol_env[sym] = int(dim_val)
 
+        # GGUF-loaded graphs have no py_graph; bind GGML ne[i] -> numpy axis -1-i.
+        if args and self.symbol_table and hasattr(args[0], "shape"):
+            tid0 = self.inputs[0] if self.inputs else None
+            t0 = self.tensor_info.get(tid0) if tid0 is not None else None
+            if t0 is not None and hasattr(t0, "symbol_index"):
+                arr_shape = args[0].shape
+                for i in range(min(4, len(arr_shape))):
+                    sidx = int(t0.symbol_index(i))
+                    if 0 <= sidx < len(self.symbol_table):
+                        np_axis = len(arr_shape) - 1 - i
+                        name = self.symbol_table[sidx]
+                        if name not in symbol_env:
+                            symbol_env[name] = int(arr_shape[np_axis])
+
         # Fallback if symbols passed and count matches symbol_table
         if symbols and len(self.symbol_table) == len(symbols):
             for reg_sym, val in zip(self.symbol_table, symbols.values()):

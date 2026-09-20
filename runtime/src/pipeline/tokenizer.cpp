@@ -100,6 +100,9 @@ void BPETokenizer::init(
         const std::string& s = pair.first;
         if (s.size() >= 3 && s.front() == '<' && s.back() == '>') {
             special_tokens_.push_back(s);
+        } else if (s.size() >= 3 && s.front() == '[' && s.back() == ']') {
+            // BERT / ModernBERT specials: [CLS] [SEP] [PAD] [MASK] [UNK]
+            special_tokens_.push_back(s);
         } else if (s == "<s>" || s == "</s>") {
             special_tokens_.push_back(s);
         }

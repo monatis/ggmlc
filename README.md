@@ -525,6 +525,11 @@ pytest -v
    - Standalone zero-dependency C++ engine for Google TimesFM 3.0 foundation time-series forecasting.
    - 20-layer mixing transformer with Pax-style normalization, RoPE, and dynamic sequence dimensions.
    - Statistical domain suite: RevIN normalization, linear detrending ($R^2 \ge 0.5$), quantile monotonicity sorting, rolling backtesting engine with calibration scoring (`coverage_80`, `coverage_40`, `naive_mae_ratio`), multi-band SVG visualizer, and single-binary embedded Web Studio & REST API (`--serve`).
+3. **[Laya System 1 Decision Engine (`examples/laya`)](examples/laya/README.md)**:
+   - Local open-weight reproduction of Jev-style **System 1** decisions: typed `choice` / `score` / `noul` questions scored in one parallel pass (ModernBERT-large 421M, no autoregressive tokens).
+   - Domain pipeline in C++: Laya `build_sequence` + `[MASK]` option markers, per-qtype temperature, Shannon confidence, stdin JSON-RPC (`--daemon`), and an embedded Decision Studio + `POST /api/decide` (`--serve`).
+   - Realistic presets from the Laya model card and TypeSafe/LangChain Jev evals (email triage, jailbreak guard, expense, SOC, invoice, agent harness).
+   - RTX 4050 Laptop: **~26 ms** / decision (`laya.exe` CUDA, S=128 bucket) and **~253 ms** for a 7-question email preset (two `B=4` forwards). Official PyTorch Agent is 57 ms / 143 ms. No autoregressive tokens.
 
 ---
 

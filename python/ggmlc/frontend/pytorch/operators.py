@@ -38,6 +38,7 @@ ATEN_OP_MAP: dict[str, OpCode] = {
     "aten.amin.default": OpCode.AMIN,
     "aten.amax.dim_IntList": OpCode.AMAX,
     "aten.amin.dim_IntList": OpCode.AMIN,
+    "aten.amax.dim": OpCode.AMAX,
     "aten.argmax.default": OpCode.ARGMAX,
     "aten.argmax.dim": OpCode.ARGMAX,
     "aten.argmax": OpCode.ARGMAX,
