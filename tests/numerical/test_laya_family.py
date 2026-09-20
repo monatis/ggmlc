@@ -83,7 +83,9 @@ def _gguf_cosine(gguf: Path, repo: str, min_cos: float) -> None:
     agent.model.cpu().float().eval()
     trunk = LayaCleanTrunk(agent, max_len=int(agent.cfg.get("max_len", 512))).eval()
     q = agent._to_internal(EMAIL_Q)
-    seq, markers = build_sequence(agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"])
+    seq, markers = build_sequence(
+        agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"]
+    )
     items = [{"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]]}]
     batch = collate_items([items], agent.tok.pad_token_id)
     padded = pad_batch(
@@ -110,7 +112,11 @@ FAMILY_GGUFS = [
     (ROOT / "scratch" / "laya_english_ud_q4_k_m.gguf", "convaiinnovations/laya", 0.94),
     (ROOT / "scratch" / "laya_multilingual_f16.gguf", "convaiinnovations/laya-multilingual", 0.99),
     (ROOT / "scratch" / "laya_multilingual_q8_0.gguf", "convaiinnovations/laya-multilingual", 0.97),
-    (ROOT / "scratch" / "laya_typed_decisions_f16.gguf", "convaiinnovations/laya-typed-decisions", 0.99),
+    (
+        ROOT / "scratch" / "laya_typed_decisions_f16.gguf",
+        "convaiinnovations/laya-typed-decisions",
+        0.99,
+    ),
 ]
 
 

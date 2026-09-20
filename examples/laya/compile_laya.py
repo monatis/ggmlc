@@ -94,7 +94,9 @@ def _example_batch(agent, seq_len: int = 128) -> tuple[torch.Tensor, ...]:
     items = []
     for qdef in qdefs:
         q = agent._to_internal(qdef)
-        seq, markers = build_sequence(agent.tok, state, q, agent.cfg["max_len"], agent.cfg["head_max_len"])
+        seq, markers = build_sequence(
+            agent.tok, state, q, agent.cfg["max_len"], agent.cfg["head_max_len"]
+        )
         items.append({"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]]})
     batch = collate_items([items], agent.tok.pad_token_id)
     return pad_batch(
@@ -139,7 +141,9 @@ def _pipeline_tokenizer(agent, pre_tokenizer: str, max_len: int) -> BPETokenizer
     return tok
 
 
-def compile_one(family: str, quantize: str, output: Path | None, max_batch: int, min_seq: int) -> Path:
+def compile_one(
+    family: str, quantize: str, output: Path | None, max_batch: int, min_seq: int
+) -> Path:
     spec = CHECKPOINTS[family]
     print(f"loading {spec['repo']} …")
     agent = laya.load(spec["repo"], device="cpu")
@@ -191,7 +195,9 @@ def compile_one(family: str, quantize: str, output: Path | None, max_batch: int,
         {0: dim_b},
         {0: dim_b},
     )
-    print(f"compiling -> {output} family={family} quantize={quantize} b=1..{max_batch} s={min_seq}..{max_len}")
+    print(
+        f"compiling -> {output} family={family} quantize={quantize} b=1..{max_batch} s={min_seq}..{max_len}"
+    )
     ggmlc.compile(
         trunk,
         example,
@@ -213,8 +219,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compile Laya checkpoints to GGUF (English, multilingual, typed-decisions)."
     )
-    parser.add_argument("--family", default="english", help="english | multilingual | typed-decisions | all")
-    parser.add_argument("--checkpoint", default=None, help="Alias for --family (HF repo or short name)")
+    parser.add_argument(
+        "--family", default="english", help="english | multilingual | typed-decisions | all"
+    )
+    parser.add_argument(
+        "--checkpoint", default=None, help="Alias for --family (HF repo or short name)"
+    )
     parser.add_argument("--output", default=None, help="Output GGUF path (single family only)")
     parser.add_argument("--quantize", default="f16", choices=QUANT_CHOICES)
     parser.add_argument("--device", default="cpu")
@@ -223,12 +233,20 @@ def main() -> None:
     args = parser.parse_args()
 
     fam_arg = args.checkpoint or args.family
-    families = list(CHECKPOINTS) if fam_arg.strip().lower() == "all" else [_normalize_family(fam_arg)]
+    families = (
+        list(CHECKPOINTS) if fam_arg.strip().lower() == "all" else [_normalize_family(fam_arg)]
+    )
     if args.output and len(families) > 1:
         raise SystemExit("--output can only be used with a single --family")
 
     for fam in families:
-        compile_one(fam, args.quantize, Path(args.output) if args.output else None, args.max_batch, args.min_seq)
+        compile_one(
+            fam,
+            args.quantize,
+            Path(args.output) if args.output else None,
+            args.max_batch,
+            args.min_seq,
+        )
 
 
 if __name__ == "__main__":

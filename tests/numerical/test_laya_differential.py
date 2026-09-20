@@ -56,7 +56,9 @@ def laya_models():
 
 def _padded_email(agent, pad_batch, seq_len=None):
     q = agent._to_internal(EMAIL_Q)
-    seq, markers = build_sequence(agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"])
+    seq, markers = build_sequence(
+        agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"]
+    )
     items = [{"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]]}]
     batch = collate_items([items], agent.tok.pad_token_id)
     padded = pad_batch(
@@ -125,7 +127,6 @@ def test_laya_gguf_f16_parity(laya_models):
     if not gguf.exists():
         pytest.skip("scratch/laya_english_f16.gguf not found")
 
-    from ggmlc.runtime.runner import ModelRunner
 
     _, padded, k = _padded_email(agent, pad_batch)
     with torch.no_grad():
@@ -157,11 +158,15 @@ def test_laya_length_bucket_128(laya_models):
 def test_laya_batched_markers(laya_models):
     agent, trunk, pad_batch = laya_models
     q1 = agent._to_internal(EMAIL_Q)
-    q2 = agent._to_internal({"type": "noul", "instructions": "Does the customer ask for money back?"})
+    q2 = agent._to_internal(
+        {"type": "noul", "instructions": "Does the customer ask for money back?"}
+    )
     items = []
     ks = []
     for q in (q1, q2):
-        seq, markers = build_sequence(agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"])
+        seq, markers = build_sequence(
+            agent.tok, EMAIL_STATE, q, agent.cfg["max_len"], agent.cfg["head_max_len"]
+        )
         items.append({"ids": seq, "markers": markers, "qtype": QTYPES[q["t"]]})
         ks.append(len(markers))
     batch = collate_items([items], agent.tok.pad_token_id)

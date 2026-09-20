@@ -6,9 +6,8 @@ import math
 from typing import Any
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-
+from torch import nn
 
 MAX_LEN = 512
 MAX_OPTS = 16
@@ -22,7 +21,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def apply_rope(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     # q,k: [B, H, S, D]; cos/sin: [1, S, D] -> unsqueeze heads
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
@@ -226,7 +227,9 @@ class LayaCleanTrunk(nn.Module):
         if cos is not None and sin is not None:
             q, k = apply_rope(q, k, cos, sin)
         scale = 1.0 / math.sqrt(self.head_dim)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout_p=0.0, is_causal=False, scale=scale)
+        y = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_bias, dropout_p=0.0, is_causal=False, scale=scale
+        )
         # transpose+reshape (not permute+contiguous+view): the importer treats
         # aten.contiguous as identity, and fuse_sdpa_transpose matches TRANSPOSE(1,2).
         y = y.transpose(1, 2).reshape(b, s, self.hidden)
@@ -257,11 +260,21 @@ class LayaCleanTrunk(nn.Module):
             x = h if self.attn_norm_is_id[i] else self._ln_weight_only(h, self.attn_norm_w[i])
             if self.layer_types[i] == "full_attention":
                 attn = self._sdpa(
-                    x, self.qkv[i], self.wo[i], full_bias, self.cos_full[:, :s], self.sin_full[:, :s]
+                    x,
+                    self.qkv[i],
+                    self.wo[i],
+                    full_bias,
+                    self.cos_full[:, :s],
+                    self.sin_full[:, :s],
                 )
             else:
                 attn = self._sdpa(
-                    x, self.qkv[i], self.wo[i], slide_bias, self.cos_slide[:, :s], self.sin_slide[:, :s]
+                    x,
+                    self.qkv[i],
+                    self.wo[i],
+                    slide_bias,
+                    self.cos_slide[:, :s],
+                    self.sin_slide[:, :s],
                 )
             h = h + attn
             m = self._ln_weight_only(h, self.mlp_norm_w[i])
@@ -314,7 +327,9 @@ def flatten_marker_index(marker_pos: torch.Tensor, seq_len: int) -> torch.Tensor
     b = int(marker_pos.shape[0])
     if b <= 1:
         return marker_pos
-    off = torch.arange(b, dtype=marker_pos.dtype, device=marker_pos.device).unsqueeze(1) * int(seq_len)
+    off = torch.arange(b, dtype=marker_pos.dtype, device=marker_pos.device).unsqueeze(1) * int(
+        seq_len
+    )
     return marker_pos + off
 
 
