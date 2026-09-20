@@ -86,6 +86,21 @@ This document reports the continuous performance benchmarking and differential n
 
 ---
 
+### C. Const-affine bake A/B (NVIDIA RTX 4050 Laptop)
+
+Compile-time `FusionOptions.enable_bake_affine` (default ON) folds static `MUL`/`ADD` around Linear/MatMul/Conv2D and bakes LayerNorm $\gamma/\beta$ into consumer GEMMs. Same hardware, `benchmark_suite.py --backend cuda --runs 3`. Opt out: `--fusion-no-bake-affine`.
+
+| Model | Nodes off → on | P50 off → on (ms) | Max Diff (on) |
+| :--- | :---: | :---: | :---: |
+| `resnet18` | 89 → **40** | 5.00 → 4.92 | `5.13e-03` |
+| `convnext_tiny` | 184 → **166** | 35.36 → **33.32** | `1.34e-02` |
+| `gpt2` | 245 → 245 (24/25 LN weightless) | 8.26 → **7.31** | `1.33e-01` |
+| `minilm_l6` | 131 → 131 (post-norm residual fanout, correctly skipped) | 1.28 → 1.27 | `7.15e-03` |
+
+ResNet-18 `MUL+ADD` count 48 → 8 (Conv+BatchNorm). GPT-2 node count is unchanged because LayerNorm ops remain; runtime `ggml_mul`/`ggml_add` after `ggml_norm` are dropped. MiniLM/BERT-style post-norm LN output is the residual stream, so bake refuses. All four models passed numerical parity.
+
+---
+
 ## 2. JAX Frontend Operator Fusion & Graph Pruning
 
 When enabling graph-level optimization passes (`enable_fusion=True`), decomposed mathematical reduction subgraphs (e.g. LayerNorm, RMSNorm, Softmax, BiasGELU, SwiGLU, Conv2D+ReLU) emitted by JAX/XLA are pattern-matched and collapsed into fused execution kernels:

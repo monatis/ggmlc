@@ -8,7 +8,7 @@ Comparison of compiler-generated GGML graphs (`ggmlc`) against hand-written `lla
 | :--- | :--- | :--- |
 | Model ingestion | Compiles PyTorch (`torch.export`) and JAX (`jaxpr`) traces. | HF → GGUF conversion scripts (`convert_hf_to_gguf.py`). |
 | Model code | No per-architecture C++. Generic runtime executes the serialized graph. | Hand-written C++ per architecture (`src/models/*.cpp`). |
-| Fusion | Compiler passes: horizontal GEMV (QKV, Gate+Up), affine view folding, fused SwiGLU. | Weight packing at conversion and/or bespoke multi-weight tensors. |
+| Fusion | Compiler passes: horizontal GEMV (QKV, Gate+Up), affine view folding, fused SwiGLU, RMS/LayerNorm γ bake, const-affine→Linear/Conv. | Weight packing at conversion and/or bespoke multi-weight tensors. |
 | KV cache | Graph-bound tensors; decode and chunked prefill write with `ggml_set_rows` into a padded `n_kv` view. One prepared compute graph per `(s_q, n_kv)` pad bucket is stashed/activated (same role as llama `can_reuse`). | External ring buffer (`llama_kv_cache`) with `ggml_set_rows` and `n_kv` padded to 256; rebuild when `can_reuse` fails. |
 | CUDA | GGML CUDA graphs keyed per cgraph inside a pad bucket; `CUDAGraphManager` for multi-batch serve buckets. | GGML CUDA graphs (CC ≥ 7.0) or sequential launches. |
 | Output logits (prefill / sampling) | `ModelExecutor::set_logits_last_only`: last activation column only for the graph-output `MUL_MAT` (`lm_head` / tied embed). Default on in `ggmlc-bench`, `ggmlc-run`, and `ContinuousBatchScheduler`. Off on a bare `ModelExecutor` (full-seq logits for numerical tests). Disable in bench with `--full-logits`. | `llama_batch_get_one` leaves `logits == nullptr` → only the last token is an output (`n_outputs=1`); `ggml_get_rows` before the last layer and `lm_head`. |
@@ -182,7 +182,7 @@ Both benches sample from a single final token’s logits after prefill:
 
 With `--full-logits` on `ggmlc-bench`, pp512 on the same machine drops relative to the default (larger drop on high-vocab models: Qwen V≈152k, LLaMA V≈128k, SmolLM V≈49k). That mode is for A/B only; it is not the fair `llama-bench` comparison.
 
-Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv`) does not close a fair-compare gap against llama when logits already match; default fusion remains on. Compile-time RMS→Linear weight bake is **default ON** (opt out: `--fusion-no-bake-rms`); it removes post-norm `MUL` nodes without new CUDA kernels.
+Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal-qkv`) does not close a fair-compare gap against llama when logits already match; default fusion remains on. Compile-time RMS→Linear weight bake is **default ON** (opt out: `--fusion-no-bake-rms`); it removes post-norm `MUL` nodes without new CUDA kernels. Generic const-affine / LayerNorm→Linear/Conv bake is also **default ON** (opt out: `--fusion-no-bake-affine`); it skips QK-Norm and peri-norm residual so stock CUDA `RMS_NORM+MUL+ROPE/ADD` fusion stays intact.
 
 ---
 

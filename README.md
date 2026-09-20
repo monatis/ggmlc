@@ -57,7 +57,7 @@ graph TD
     subgraph Passes["3. Compile-Time Optimization Passes"]
         CF["Constant Folding"]
         DCE["Dead Code Elimination"]
-        FUS["Pattern-Based Operator Fusion<br/><i>(Conv+ReLU, SwiGLU, LayerNorm, RMSNorm)</i>"]
+        FUS["Pattern-Based Operator Fusion<br/><i>(Conv+ReLU, SwiGLU, RMS/LN bake, const-affine→Linear/Conv)</i>"]
         PRN["Redundant Cast & Permute Pruning"]
     end
 

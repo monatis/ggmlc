@@ -45,6 +45,12 @@ graph LR
      - `Conv2D + ReLU` $\to$ fused Conv2D activation.
      - `Linear + Bias` $\to$ fused `MATMUL` with bias input.
      - `SwiGLU`: Detects $x \cdot \text{silu}(g)$ and emits a single composite `SILU` / `MUL` sequence.
+   - **Const-affine bake** (`python/ggmlc/transforms/affine_bake.py`, `FusionOptions.enable_bake_affine`, default ON):
+     - Folds static `MUL`/`DIV`/`ADD`/`SUB` around `LINEAR`, `MATMUL`, and `CONV2D` into weights and bias (Conv+BatchNorm, LayerScale, pre/post channel scales).
+     - Bakes fused `LAYER_NORM` $\gamma/\beta$ into consumer GEMM columns/bias and leaves weightless `LAYER_NORM` (same family as RMS $\gamma$ bake).
+     - Skips affine nodes between `RMS_NORM`/`LAYER_NORM` and `ROPE` or residual `ADD` so GGML CUDA `RMS_NORM+MUL+ROPE` / `RMS_NORM+MUL+ADD` fusion remains valid.
+     - Skips tied embedding/lm_head weights.
+     - A/B opt-out: `--fusion-no-bake-affine`.
 
 6. **`RedundantCastPruner` (`python/ggmlc/transforms/redundant.py`)**:
    - Detects and removes identity permutations (`dims == [0, 1, 2, ...]`).
