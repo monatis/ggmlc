@@ -92,6 +92,14 @@ graph TD
 
 ---
 
+## 📰 News
+
+**Sep 20, 2026 — ggmlc can Laya.** Compile [Laya](https://huggingface.co/convaiinnovations/laya), the open-source alternative to TypeSafe Jev, into a standalone C++ System 1 engine: typed `choice` / `score` / `noul` questions scored in one encoder pass — no generated tokens. English ModernBERT-large, mmBERT multilingual, and the typed-decisions specialist ship as F16 / Q8_0 / UD_Q4_K_M GGUFs. On an RTX 4050 Laptop, **~25 ms** per decision and **~143 ms** for a 7-question email preset. Details, CLI, and downloads: [`examples/laya`](examples/laya/README.md).
+
+**Sep 19, 2026 — Prefill and decode at llama.cpp parity.** A full `ggmlc-bench` vs `llama-bench` matrix (Q8_0, ubatch 512, CUDA graph, RTX 4050 Laptop) lands **31/32** cells at ≥ **1.01×** vs official `llama.cpp` — Qwen2.5-0.5B pp1024 **1.16×**, SmolLM2-360M tg32 **1.19×**, LLaMA-3.2-1B decode **1.07×**. Compiler-generated graphs, not hand-written model C++. Write-up and tables: [`docs/benchmarks/ggmlc_vs_llama_cpp.md`](docs/benchmarks/ggmlc_vs_llama_cpp.md).
+
+---
+
 ## ⚡ 3-Line Quickstarts
 
 ### 1. Compile and Run on CPU or GPU (CUDA)
@@ -517,19 +525,19 @@ pytest -v
 
 `ggmlc` includes production-grade standalone C++ applications under [`examples/`](examples/), demonstrating end-to-end neural compilation, domain math, and multi-backend acceleration:
 
-1. **[Tab Completion Engine (`examples/tab_completion`)](examples/tab_completion/README.md)**:
-   - 100% offline continuous latent diffusion code autocompletion engine powered by **PlaidQ**.
-   - Pure mathematical Fill-In-The-Middle (FIM) without prompt tagging hacks.
-   - Non-causal bidirectional transformer trunk, static 256-canvas CUDA Graph capture, OpenMP parallel hole-selective sampler, and persistent JSON-RPC IDE daemon (`daemon`).
-2. **[Google TimesFM 3.0 Foundation Forecaster (`examples/timesfm`)](examples/timesfm/README.md)**:
-   - Standalone zero-dependency C++ engine for Google TimesFM 3.0 foundation time-series forecasting.
-   - 20-layer mixing transformer with Pax-style normalization, RoPE, and dynamic sequence dimensions.
-   - Statistical domain suite: RevIN normalization, linear detrending ($R^2 \ge 0.5$), quantile monotonicity sorting, rolling backtesting engine with calibration scoring (`coverage_80`, `coverage_40`, `naive_mae_ratio`), multi-band SVG visualizer, and single-binary embedded Web Studio & REST API (`serve`).
-3. **[Laya System 1 Decision Engine (`examples/laya`)](examples/laya/README.md)**:
+1. **[Laya System 1 Decision Engine (`examples/laya`)](examples/laya/README.md)**:
    - Local open-weight reproduction of Jev-style **System 1** decisions: typed `choice` / `score` / `noul` questions scored in one parallel pass. English ModernBERT-large 421M, plus mmBERT multilingual and the typed-decisions specialist.
    - Domain pipeline in C++: Laya `build_sequence`, temperatures, Shannon confidence, `--device auto`, language routing (`--models-dir`), stdin JSON-RPC (`daemon`), and an embedded Decision Studio with a question-builder form + `POST /api/decide` (`serve`).
    - GGUFs: [mys/laya-GGUF](https://huggingface.co/mys/laya-GGUF) · [mys/laya-multilingual-GGUF](https://huggingface.co/mys/laya-multilingual-GGUF) · [mys/laya-typed-decisions-GGUF](https://huggingface.co/mys/laya-typed-decisions-GGUF). Binaries: [GitHub `latest` release](https://github.com/monatis/ggmlc/releases/latest) (macOS Metal, Linux/Windows CUDA sm80/sm86/sm89).
    - RTX 4050 Laptop: **~25 ms** / decision (`laya.exe` CUDA, pad-to-live S=84) and **~143 ms** for a 7-question email preset (one `B=7, S=124` forward). Official PyTorch Agent is 57 ms / 143 ms. No autoregressive tokens.
+2. **[Tab Completion Engine (`examples/tab_completion`)](examples/tab_completion/README.md)**:
+   - 100% offline continuous latent diffusion code autocompletion engine powered by **PlaidQ**.
+   - Pure mathematical Fill-In-The-Middle (FIM) without prompt tagging hacks.
+   - Non-causal bidirectional transformer trunk, static 256-canvas CUDA Graph capture, OpenMP parallel hole-selective sampler, and persistent JSON-RPC IDE daemon (`daemon`).
+3. **[Google TimesFM 3.0 Foundation Forecaster (`examples/timesfm`)](examples/timesfm/README.md)**:
+   - Standalone zero-dependency C++ engine for Google TimesFM 3.0 foundation time-series forecasting.
+   - 20-layer mixing transformer with Pax-style normalization, RoPE, and dynamic sequence dimensions.
+   - Statistical domain suite: RevIN normalization, linear detrending ($R^2 \ge 0.5$), quantile monotonicity sorting, rolling backtesting engine with calibration scoring (`coverage_80`, `coverage_40`, `naive_mae_ratio`), multi-band SVG visualizer, and single-binary embedded Web Studio & REST API (`serve`).
 
 ---
 
