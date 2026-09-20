@@ -86,6 +86,7 @@ dev = [
     "sphinx-autodoc-typehints>=2.0.0",
     "sphinx-copybutton>=0.5.0",
     "mermaidx>=0.9.0",
+    "laya>=0.3.4",
 ]
 
 [project.scripts]

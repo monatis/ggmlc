@@ -604,6 +604,7 @@ dev = [
     { name = "jaxlib", version = "0.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "keras" },
     { name = "keras-hub" },
+    { name = "laya" },
     { name = "mermaidx" },
     { name = "myst-parser" },
     { name = "nanobind" },
@@ -667,6 +668,7 @@ requires-dist = [
     { name = "keras-hub", marker = "extra == 'all'", specifier = ">=0.15.0" },
     { name = "keras-hub", marker = "extra == 'dev'", specifier = ">=0.15.0" },
     { name = "keras-hub", marker = "extra == 'jax'", specifier = ">=0.15.0" },
+    { name = "laya", marker = "extra == 'dev'", specifier = ">=0.3.4" },
     { name = "mermaidx", marker = "extra == 'all'", specifier = ">=0.9.0" },
     { name = "mermaidx", marker = "extra == 'dev'", specifier = ">=0.9.0" },
     { name = "mermaidx", marker = "extra == 'jax'", specifier = ">=0.9.0" },
@@ -1136,6 +1138,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e7/2f/47a2767dc7bb29ac3396d5037cec7e162e6d0ece7ac0fd6a5da63dab77c6/keras_hub-0.31.1.tar.gz", hash = "sha256:a7ffd82ad1214723ea76c523ed4285d9f83be9227d196b497ecbbc66cfc40c20", size = 1212641, upload-time = "2026-08-22T00:31:41.273Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/76/c5/dcebfa6e68f52d62efe5238e502168b83ec5da3e5cf111b348486976238e/keras_hub-0.31.1-py3-none-any.whl", hash = "sha256:dc19f3de34fd5746d479dab2e85767f3be9b9ba956f841bad0dcc9281eb2fea4", size = 1663271, upload-time = "2026-08-22T00:31:39.38Z" },
+]
+
+[[package]]
+name = "laya"
+version = "0.3.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/a0/2e9f82f537ae409a176d19406ba1ae64c4e51f171359e60acb8ba0bd6440/laya-0.3.4.tar.gz", hash = "sha256:e0da594d77d2c491aedd3381757052b251a953fc27f03733dcb1c8e761246f3e", size = 49792, upload-time = "2026-09-20T01:34:41.683Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/b4/0f22ac636d2545e6f4a7fcaf3a65bc2715ff1db3a667bc5b930e4f40c057/laya-0.3.4-py3-none-any.whl", hash = "sha256:8bf1c5cc5cbf6abebf63a6346b4babedd5692f88a75aa9e0cc01ed4145a9a14b", size = 34180, upload-time = "2026-09-20T01:34:40.409Z" },
 ]
 
 [[package]]
