@@ -1,4 +1,6 @@
 #include "ggmlc/executor.h"
+#include <unordered_map>
+#include <unordered_set>
 #include <iostream>
 #include <cstring>
 #include <cmath>
@@ -128,6 +130,39 @@ void fill_f16_causal_mask(struct ggml_tensor* mask, int64_t pos, int64_t s_q, in
         }
     }
     ggml_backend_tensor_set(mask, mask_data.data(), 0, mask_data.size() * sizeof(ggml_fp16_t));
+}
+
+bool is_view_like_op(enum ggml_op op) {
+    switch (op) {
+        case GGML_OP_NONE:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_CONT:
+        case GGML_OP_DUP:
+        case GGML_OP_CPY:
+        case GGML_OP_CLAMP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool tensor_derived_from_roots(
+    struct ggml_tensor* t,
+    const std::unordered_set<const struct ggml_tensor*>& roots,
+    std::unordered_set<const struct ggml_tensor*>& seen
+) {
+    if (!t) return false;
+    if (roots.count(t)) return true;
+    if (!seen.insert(t).second) return false;
+    if (t->view_src && tensor_derived_from_roots(t->view_src, roots, seen)) return true;
+    if (is_view_like_op(t->op) && t->src[0] &&
+        tensor_derived_from_roots(t->src[0], roots, seen)) {
+        return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -1289,6 +1324,59 @@ void ModelExecutor::set_chunk_pos(int64_t pos, int64_t s_q) {
 
     if (enable_cuda_graph_ && cuda_graph_mgr_ && cuda_graph_mgr_->is_captured()) {
         cuda_graph_needs_update_ = true;
+    }
+}
+
+void ModelExecutor::pin_live_graph_tensors() {
+    if (!cgraph_) return;
+
+    std::unordered_set<const struct ggml_tensor*> roots;
+    for (const auto& kv : weight_tensors_) {
+        if (kv.second) roots.insert(kv.second);
+    }
+    for (const auto& kv : state_tensors_) {
+        if (kv.second) roots.insert(kv.second);
+    }
+
+    for (uint32_t inp_id : model_graph_.inputs) {
+        auto pin_input = [&](struct ggml_tensor* t) {
+            if (!t) return;
+            ggml_set_input(t);
+            ggml_set_output(t);
+            roots.insert(t);
+        };
+        auto it = ggml_tensors_.find(inp_id);
+        if (it != ggml_tensors_.end()) pin_input(it->second);
+        auto cit = compute_tensors_.find(inp_id);
+        if (cit != compute_tensors_.end()) pin_input(cit->second);
+    }
+
+    for (int i = 0; i < cgraph_->n_leafs; ++i) {
+        if (cgraph_->leafs[i]) ggml_set_output(cgraph_->leafs[i]);
+    }
+
+    auto consider = [&](struct ggml_tensor* t) {
+        if (!t) return;
+        std::unordered_set<const struct ggml_tensor*> seen;
+        if (tensor_derived_from_roots(t, roots, seen) &&
+            (is_view_like_op(t->op) || t->view_src != nullptr)) {
+            ggml_set_output(t);
+        }
+    };
+
+    for (int i = 0; i < cgraph_->n_nodes; ++i) {
+        struct ggml_tensor* node = cgraph_->nodes[i];
+        if (!node) continue;
+        consider(node);
+        for (int j = 0; j < GGML_MAX_SRC; ++j) {
+            consider(node->src[j]);
+        }
+        if (node->op == GGML_OP_GET_ROWS && node->src[0]) {
+            ggml_set_output(node->src[0]);
+        }
+        if (node->op == GGML_OP_FLASH_ATTN_EXT && node->src[3]) {
+            ggml_set_output(node->src[3]);
+        }
     }
 }
 
@@ -2565,6 +2653,11 @@ void ModelExecutor::prepare(const std::unordered_map<std::string, int64_t>& symb
                     ggml_build_forward_expand(cgraph_, anchor);
                 }
             }
+
+    // Lowering creates VIEW/CONT/CAST copies of inputs and constants that do not
+    // inherit INPUT/OUTPUT flags from the IR placeholders. gallocr would reuse
+    // those buffers while GET_ROWS / FA / later layers still need them.
+    pin_live_graph_tensors();
 
     // 4. Allocate tensor storage for compute activations on backend (CPU or CUDA)
     if (enable_arena_reuse) {

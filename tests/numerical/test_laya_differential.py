@@ -193,6 +193,32 @@ def test_laya_batched_markers(laya_models):
     assert d1 < 5e-4, f"row1 batch vs single max_diff={d1}"
 
 
+def test_laya_gguf_unpadded_max_in_batch(laya_models):
+    """Pad to live collate length (Python collate_items), not a 64/128/256/512 bucket."""
+    agent, trunk, pad_batch = laya_models
+    gguf = ROOT / "scratch" / "laya_english_f16.gguf"
+    if not gguf.exists():
+        pytest.skip("scratch/laya_english_f16.gguf not found")
+    batch, _, k = _padded_email(agent, pad_batch)
+    live_s = int(batch["attention_mask"][0].sum().item())
+    assert live_s >= 64, f"email sequence {live_s} is below export min_seq=64"
+    _, padded, _ = _padded_email(agent, pad_batch, seq_len=live_s)
+    with torch.no_grad():
+        tl, _ = trunk(*padded)
+    try:
+        gl, runner = _gguf_option_logits(gguf, padded, k)
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"GGUF rejected S={live_s} ({exc})")
+    if not getattr(runner, "symbol_table", None):
+        pytest.skip("GGUF is static [1,512]; recompile with dynamic b/s")
+    gl = np.asarray(gl, dtype=np.float32).reshape(-1)[:k]
+    tl_np = tl[0, :k].float().numpy()
+    cos = float(np.dot(tl_np, gl) / (np.linalg.norm(tl_np) * np.linalg.norm(gl) + 1e-12))
+    max_diff = float(np.max(np.abs(tl_np - gl)))
+    assert cos > 0.99, f"S={live_s} GGUF cosine {cos} max_diff={max_diff}"
+    assert max_diff < 0.15, f"S={live_s} GGUF max_diff={max_diff}"
+
+
 def test_laya_gguf_length_bucket_128(laya_models):
     agent, trunk, pad_batch = laya_models
     gguf = ROOT / "scratch" / "laya_english_f16.gguf"

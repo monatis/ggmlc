@@ -51,7 +51,7 @@ static void print_help(const char* prog) {
         << "HARDWARE:\n"
         << "  --device <cpu|cuda>    Execution device (default: cpu)\n"
         << "  --threads <N>          CPU worker threads (default: 4)\n"
-        << "  --cuda-graph           Capture a static CUDA graph for the active (B,S) bucket\n"
+        << "  --cuda-graph           Capture a CUDA graph for the active (B,S) shape\n"
         << "  --max-batch <N>        Cap question batch (default: GGUF laya.max_batch, 8)\n"
         << "  --model <path>         GGUF path (alternative to the positional argument)\n\n"
         << "EXAMPLES:\n"

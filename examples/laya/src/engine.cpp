@@ -75,6 +75,9 @@ bool DecisionEngine::load_model(const std::string& gguf_path, const EngineOption
     max_batch_ = static_cast<int>(meta_int(graph_, "laya.max_batch", 8));
     if (opt.max_batch > 0) max_batch_ = opt.max_batch;
     if (max_batch_ < 1) max_batch_ = 1;
+    min_seq_ = static_cast<int>(meta_int(graph_, "laya.min_seq", 64));
+    if (min_seq_ < 1) min_seq_ = 1;
+    if (min_seq_ > seq_.max_len) min_seq_ = seq_.max_len;
 
     dynamic_ = !graph_.symbol_table.empty();
     std::string bj = meta_str(graph_, "laya.length_buckets");
@@ -93,6 +96,7 @@ bool DecisionEngine::load_model(const std::string& gguf_path, const EngineOption
     if (length_buckets_.empty()) length_buckets_ = {64, 128, 256, 512};
     if (!dynamic_) {
         length_buckets_ = {seq_.max_len};
+        min_seq_ = seq_.max_len;
         max_batch_ = 1;
     }
 
@@ -156,16 +160,19 @@ int DecisionEngine::length_bucket(int n) const {
     return chosen;
 }
 
+int DecisionEngine::clamp_seq(int n) const {
+    int s = std::max(n, min_seq_);
+    if (s > seq_.max_len) s = seq_.max_len;
+    return s;
+}
+
 int DecisionEngine::batch_cap_for_seq(int seq_len) const {
     if (!dynamic_ || seq_len <= 0) return 1;
     // Arena reuse is off for this graph, so peak VRAM is roughly the sum of
     // activations. Keep B*S in a 6 GB laptop budget; CPU can go wider.
     const int budget = (device_ == "cpu") ? 1024 : 512;
     int cap = std::max(1, budget / seq_len);
-    cap = std::min(cap, max_batch_);
-    int b = 1;
-    while ((b << 1) <= cap) b <<= 1;
-    return std::max(1, b);
+    return std::min(cap, max_batch_);
 }
 
 static void bind_dim_value(
@@ -331,6 +338,10 @@ DecideResult DecisionEngine::decide(const JsonValue& state, const std::vector<Qu
         encs.push_back(std::move(enc));
     }
 
+    // Group by coarse length so a 400-token question does not pad 80-token
+    // neighbours. Within a group, pad like Python collate_items: S = max(len_i),
+    // attention_mask zeros the pads. That is not concat packing — FlashAttention
+    // stays rectangular B×S, not one S=sum sequence with a block-diagonal mask.
     std::unordered_map<int, std::vector<int>> groups;
     for (int i = 0; i < static_cast<int>(encs.size()); ++i) {
         groups[length_bucket(static_cast<int>(encs[i].ids.size()))].push_back(i);
@@ -338,33 +349,43 @@ DecideResult DecisionEngine::decide(const JsonValue& state, const std::vector<Qu
 
     result.answers.assign(questions.size(), Answer{});
     result.input_tokens = tokens;
-    result.seq_bucket = max_live > 0 ? length_bucket(max_live) : 0;
+    result.seq_bucket = max_live > 0 ? clamp_seq(max_live) : 0;
 
     for (auto& g : groups) {
-        const int S = g.first;
         auto& idxs = g.second;
-        int cap = batch_cap_for_seq(S);
+        int S = min_seq_;
+        for (int qi : idxs) {
+            S = std::max(S, clamp_seq(static_cast<int>(encs[qi].ids.size())));
+        }
+        const int cap = batch_cap_for_seq(S);
+        int graph_B = 0;
         size_t cursor = 0;
         while (cursor < idxs.size()) {
-            int remaining = static_cast<int>(idxs.size() - cursor);
-            int want = std::min(cap, remaining);
-            int B = 1;
-            while (B < want) B <<= 1;
-            B = std::min(B, cap);
+            const int remaining = static_cast<int>(idxs.size() - cursor);
+            int live = std::min(remaining, cap);
+            int batch = live;
+            // Hold one (B,S) for the group. Dummy-pad later chunks so prepare
+            // and CUDA graphs stay warm across the preset's forwards.
+            if (graph_B < 1) graph_B = live;
+            batch = graph_B;
+            live = std::min(live, remaining);
+            if (live < 1) live = 1;
+            if (batch < live) batch = live;
+
             bool ok = false;
-            for (int batch = B; batch >= 1; batch >>= 1) {
-                const int live = std::min(batch, remaining);
+            for (int try_b = batch; try_b >= 1; try_b = (try_b > 1) ? (try_b / 2) : 0) {
+                const int take = std::min(try_b, remaining);
                 std::vector<EncodedQuestion> slice;
-                slice.reserve(static_cast<size_t>(live));
-                for (int j = 0; j < live; ++j) slice.push_back(encs[idxs[cursor + j]]);
+                slice.reserve(static_cast<size_t>(take));
+                for (int j = 0; j < take; ++j) slice.push_back(encs[idxs[cursor + j]]);
                 std::vector<int32_t> ids, mpos, qt;
                 std::vector<float> att, mmask;
-                pad_encoded_batch(slice, seq_, batch, S, ids, att, mpos, mmask, qt);
+                pad_encoded_batch(slice, seq_, try_b, S, ids, att, mpos, mmask, qt);
                 try {
                     std::vector<float> logits, act;
-                    bind_and_run_batch(batch, S, ids, att, mpos, mmask, qt, logits, act);
+                    bind_and_run_batch(try_b, S, ids, att, mpos, mmask, qt, logits, act);
                     const int opts = seq_.max_opts;
-                    for (int j = 0; j < live; ++j) {
+                    for (int j = 0; j < take; ++j) {
                         const int qi = idxs[cursor + j];
                         const int k = static_cast<int>(encs[qi].markers.size());
                         const float* lp = logits.data() + static_cast<size_t>(j) * opts;
@@ -374,12 +395,14 @@ DecideResult DecisionEngine::decide(const JsonValue& state, const std::vector<Qu
                         result.answers[qi] = decode_answer(questions[qi], lp, k, ap);
                     }
                     result.n_forwards += 1;
-                    result.batch_bucket = std::max(result.batch_bucket, batch);
-                    cursor += static_cast<size_t>(live);
+                    result.seq_bucket = std::max(result.seq_bucket, S);
+                    result.batch_bucket = std::max(result.batch_bucket, try_b);
+                    cursor += static_cast<size_t>(take);
+                    graph_B = try_b;
                     ok = true;
                     break;
                 } catch (const std::exception& e) {
-                    std::cerr << "[laya] forward failed B=" << batch << " S=" << S
+                    std::cerr << "[laya] forward failed B=" << try_b << " S=" << S
                               << " : " << e.what() << std::endl;
                 }
             }
@@ -396,9 +419,11 @@ void DecisionEngine::print_info() const {
     std::cout << "model: " << meta_str(graph_, "general.name", graph_.name) << "\n"
               << "checkpoint: " << meta_str(graph_, "laya.checkpoint", "") << "\n"
               << "device: " << device_ << "\n"
-              << "max_len: " << seq_.max_len << "  head_max_len: " << seq_.head_max_len
+              << "max_len: " << seq_.max_len << "  min_seq: " << min_seq_
+              << "  head_max_len: " << seq_.head_max_len
               << "  max_opts: " << seq_.max_opts << "  max_batch: " << max_batch_ << "\n"
-              << "dynamic: " << (dynamic_ ? "b,s" : "static") << "  buckets: [";
+              << "dynamic: " << (dynamic_ ? "b,s" : "static")
+              << "  pad: max-in-batch  groups: [";
     for (size_t i = 0; i < length_buckets_.size(); ++i) {
         if (i) std::cout << ", ";
         std::cout << length_buckets_[i];

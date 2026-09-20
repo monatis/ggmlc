@@ -94,6 +94,7 @@ def main() -> None:
         "laya.max_opts": MAX_OPTS,
         "laya.max_batch": int(args.max_batch),
         "laya.min_seq": int(args.min_seq),
+        # Grouping bands only. Runtime pads to max(len_i) in the chunk (Python collate_items).
         "laya.length_buckets": json.dumps([64, 128, 256, 512]),
         "laya.mask_token_id": int(agent.tok.mask_token_id),
         "laya.cls_token_id": int(agent.tok.cls_token_id),

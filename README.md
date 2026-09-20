@@ -529,7 +529,7 @@ pytest -v
    - Local open-weight reproduction of Jev-style **System 1** decisions: typed `choice` / `score` / `noul` questions scored in one parallel pass (ModernBERT-large 421M, no autoregressive tokens).
    - Domain pipeline in C++: Laya `build_sequence` + `[MASK]` option markers, per-qtype temperature, Shannon confidence, stdin JSON-RPC (`--daemon`), and an embedded Decision Studio + `POST /api/decide` (`--serve`).
    - Realistic presets from the Laya model card and TypeSafe/LangChain Jev evals (email triage, jailbreak guard, expense, SOC, invoice, agent harness).
-   - RTX 4050 Laptop: **~26 ms** / decision (`laya.exe` CUDA, S=128 bucket) and **~253 ms** for a 7-question email preset (two `B=4` forwards). Official PyTorch Agent is 57 ms / 143 ms. No autoregressive tokens.
+   - RTX 4050 Laptop: **~22 ms** / decision (`laya.exe` CUDA, pad-to-live S=84) and **~167 ms** for a 7-question email preset (two `B=4, S=124` forwards). Official PyTorch Agent is 57 ms / 143 ms. No autoregressive tokens.
 
 ---
 

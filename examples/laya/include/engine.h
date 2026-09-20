@@ -46,6 +46,7 @@ private:
 
     SequenceConfig seq_;
     std::vector<int> length_buckets_ = {64, 128, 256, 512};
+    int min_seq_ = 64;
     int max_batch_ = 8;
     bool dynamic_ = false;
     std::vector<float> temperature_ = {1.6369f, 1.25143f, 1.9834f};
@@ -59,6 +60,7 @@ private:
     uint32_t out_logits_ = 0, out_act_ = 0;
 
     int length_bucket(int n) const;
+    int clamp_seq(int n) const;
     int batch_cap_for_seq(int seq_len) const;
     void fill_symbol_env(int batch, int seq_len, std::unordered_map<std::string, int64_t>& env) const;
     bool prepare_shape(int batch, int seq_len);

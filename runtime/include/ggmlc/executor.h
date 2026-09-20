@@ -250,6 +250,7 @@ private:
     bool activate_decode_bucket(int64_t n_kv);
     bool activate_chunk_bucket(int64_t s, int64_t n_kv);
     void relink_ggml_tensors_from_compute();
+    void pin_live_graph_tensors();
 
     std::unordered_map<std::string, int64_t> last_symbol_env_;
     bool last_enable_arena_reuse_ = true;
