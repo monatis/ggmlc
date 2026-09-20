@@ -180,13 +180,13 @@ pytest tests/unit/test_pipeline_image.py tests/unit/test_pipeline_tokenizer.py -
 ### Testing Standalone Runner (`ggmlc-run`)
 ```powershell
 # Model capabilities & metadata inspection
-.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --info
+.\build-win-cuda\runtime\ggmlc-run.exe info model.gguf
 
 # Instruction chat generation (clean assistant-only stream)
-.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --chat "What is the capital of France?" --threads 4
+.\build-win-cuda\runtime\ggmlc-run.exe chat model.gguf "What is the capital of France?" --threads 4
 
 # Chat generation on NVIDIA CUDA GPU
-.\build-win-cuda\runtime\ggmlc-run.exe model.gguf --chat "Explain gravity" --device cuda
+.\build-win-cuda\runtime\ggmlc-run.exe chat model.gguf "Explain gravity" --device cuda
 ```
 
 ### Multi-Framework Ingestion with Keras 3

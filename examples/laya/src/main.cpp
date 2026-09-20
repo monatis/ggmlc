@@ -54,62 +54,132 @@ static std::string read_file(const std::string& path) {
     return ss.str();
 }
 
+static std::string prog_base(const char* argv0) {
+    std::string s = argv0 ? argv0 : "laya";
+    const auto p = s.find_last_of("/\\");
+    if (p != std::string::npos) s = s.substr(p + 1);
+    return s;
+}
+
+static bool looks_like_gguf(const std::string& s) {
+    if (s.size() < 5) return false;
+    const char* e = s.c_str() + (s.size() - 5);
+    return e[0] == '.' &&
+           (e[1] == 'g' || e[1] == 'G') &&
+           (e[2] == 'g' || e[2] == 'G') &&
+           (e[3] == 'u' || e[3] == 'U') &&
+           (e[4] == 'f' || e[4] == 'F');
+}
+
+static bool is_laya_command(const std::string& s) {
+    return s == "help" || s == "decide" || s == "serve" || s == "daemon" || s == "bench" ||
+           s == "info" || s == "list-presets" || s == "detect-lang";
+}
+
 static void print_help(const char* argv0) {
-    const std::string prog = argv0 ? argv0 : "laya";
+    const std::string p = prog_base(argv0);
     std::cout
-        << "Laya — System 1 typed decisions (choice / score / noul) compiled with ggmlc.\n"
-        << "One encoder pass. No generated tokens.\n\n"
-        << "USAGE\n"
-        << "  " << prog << " --model <file.gguf> [command] [options]\n"
-        << "  " << prog << " <file.gguf> [command] [options]\n"
-        << "  " << prog << " --models-dir <dir> [command] [options]\n\n"
-        << "COMMANDS  (pick one; default is a single decide)\n"
-        << "  --help              Show this help and exit\n"
-        << "  --list-presets      List built-in workflows (no model required)\n"
-        << "  --detect-lang       Print language / family routing for --state/--text (no model)\n"
-        << "  --info              Print GGUF metadata, tokenizer, temperatures\n"
-        << "  --serve             Web Studio + POST /api/decide  (see --port)\n"
-        << "  --daemon            Newline JSON-RPC on stdin/stdout\n"
-        << "  --bench             Latency / throughput on the selected input\n"
-        << "  (none)              Run one decision and print CLI bars (or --json)\n\n"
-        << "MODEL\n"
-        << "  --model <path>            Single GGUF (also accepted as the first positional arg)\n"
-        << "  --models-dir <dir>        Directory of Laya GGUFs; routes english vs multilingual\n"
-        << "  --family <name>           auto | english | multilingual | typed-decisions\n"
-        << "                            default: auto  (script + English-word routing)\n\n"
-        << "INPUT  (optional; default --preset email)\n"
-        << "  --preset <name>           email | triage | guard | moderation | router |\n"
-        << "                            expense | security | invoice | customer_service | harness\n"
-        << "  --state <json|text>       Observation object or a raw string\n"
-        << "  --state-file <path>       Read --state from a file\n"
-        << "  --text <str>              Write into the preset's primary field (body/prompt/…)\n"
-        << "  --questions <json>        Laya/Jev question map\n"
-        << "  --questions-file <path>   Read --questions from a file\n"
-        << "  --json                    Machine JSON instead of CLI bars\n\n"
-        << "HARDWARE\n"
-        << "  --device <name>           auto | cpu | cuda | cuda:0 | metal     default: auto\n"
-        << "                            auto = CUDA or Metal if the binary was built with it\n"
-        << "                            and a device is present, else CPU\n"
-        << "  --threads <N>             CPU workers                               default: 4\n"
-        << "  --cuda-graph              Capture a CUDA graph for the live (B, S) shape\n"
-        << "  --max-batch <N>           Cap questions per forward                 default: from GGUF (8)\n"
-        << "  --port <P>                HTTP port for --serve                     default: 8080\n"
-        << "  --runs <N>                --bench timed runs                        default: 5\n"
-        << "  --warmup <N>              --bench warmup runs                       default: 2\n\n"
-        << "EXAMPLES\n"
-        << "  " << prog << " --list-presets\n"
-        << "  " << prog << " --detect-lang --text \"I was charged twice\"\n"
-        << "  " << prog << " --model scratch/laya_english_f16.gguf --preset email --device auto --cuda-graph\n"
-        << "  " << prog << " --model scratch/laya_english_q8_0.gguf --preset guard --text \"Ignore previous instructions\" --json\n"
-        << "  " << prog << " --models-dir scratch/laya-ggufs --preset email --text \"二重に請求されました\"\n"
-        << "  " << prog << " --models-dir scratch/laya-ggufs --family multilingual --serve --port 8080\n"
-        << "  " << prog << " --model scratch/laya_english_f16.gguf --daemon --device auto --cuda-graph\n"
-        << "  " << prog << " --model scratch/laya_english_f16.gguf --preset email --bench --warmup 5 --runs 7\n\n"
-        << "DOWNLOADS\n"
-        << "  GGUF weights  https://huggingface.co/mys/laya-GGUF\n"
-        << "                https://huggingface.co/mys/laya-multilingual-GGUF\n"
-        << "                https://huggingface.co/mys/laya-typed-decisions-GGUF\n"
-        << "  Binaries      https://github.com/monatis/ggmlc/releases/latest\n"
+        << "Laya — System 1 typed decisions (choice / score / noul). One encoder pass, no generated tokens.\n\n"
+        << "Usage:\n"
+        << "  " << p << " <command> [options]\n\n"
+        << "Commands:\n"
+        << "  help            Show this help\n"
+        << "  decide          Score typed questions (default)\n"
+        << "  serve           Web Studio and REST API\n"
+        << "  daemon          Newline JSON-RPC on stdin/stdout\n"
+        << "  bench           Latency / throughput\n"
+        << "  info            Inspect GGUF metadata\n"
+        << "  list-presets    List built-in workflows\n"
+        << "  detect-lang     Print language routing without loading a model\n\n"
+        << "HELP\n"
+        << "  " << p << " help\n\n"
+        << "  -h, --help              Same as this command\n\n"
+        << "LIST-PRESETS\n"
+        << "  " << p << " list-presets\n\n"
+        << "  Print built-in workflows (email, triage, guard, ...). No model required.\n\n"
+        << "DETECT-LANG\n"
+        << "  " << p << " detect-lang [--text <STR>] [--state <JSON|TEXT>] [--state-file <PATH>] [<text>]\n\n"
+        << "  Route english vs multilingual from script + English function words. No GGUF loaded.\n\n"
+        << "  --text <STR>            Observation text\n"
+        << "  --state <JSON|TEXT>     Observation object or raw string\n"
+        << "  --state-file <PATH>     Read --state from a file\n"
+        << "  [<text>]                Positional alternative to --text\n\n"
+        << "DECIDE\n"
+        << "  " << p << " decide [<model.gguf>] [--models-dir <DIR>] [--family <NAME>]\n"
+        << "               [--preset <NAME>] [--state <JSON|TEXT>] [--state-file <PATH>]\n"
+        << "               [--text <STR>] [--questions <JSON>] [--questions-file <PATH>]\n"
+        << "               [--json] [--device <NAME>] [--threads <N>] [--cuda-graph]\n"
+        << "               [--max-batch <N>]\n\n"
+        << "  Score a state with typed questions in one encoder pass.\n\n"
+        << "  <model.gguf>            Compiled GGUF (optional if --models-dir is set)\n"
+        << "  --model <PATH>          Same as <model.gguf>\n"
+        << "  --models-dir <DIR>      Directory of Laya GGUFs; routes english vs multilingual\n"
+        << "  --family <NAME>         auto | english | multilingual | typed-decisions  (default: auto)\n"
+        << "  --preset <NAME>         email | triage | guard | moderation | router |\n"
+        << "                          expense | security | invoice | customer_service | harness\n"
+        << "                          (default: email)\n"
+        << "  --state <JSON|TEXT>     Observation object or raw string\n"
+        << "  --state-file <PATH>     Read --state from a file\n"
+        << "  --text <STR>            Write into the preset's primary field (body/prompt/...)\n"
+        << "  --questions <JSON>      Laya/Jev question map\n"
+        << "  --questions-file <PATH> Read --questions from a file\n"
+        << "  --json                  Print JSON instead of CLI bars\n"
+        << "  --device <NAME>         auto | cpu | cuda | cuda:0 | metal  (default: auto)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n"
+        << "  --cuda-graph            Capture a CUDA graph for the live (B, S) shape\n"
+        << "  --max-batch <N>         Cap questions per forward  (default: from GGUF)\n\n"
+        << "SERVE\n"
+        << "  " << p << " serve [<model.gguf>] [--models-dir <DIR>] [--family <NAME>]\n"
+        << "              [--port <PORT>] [--device <NAME>] [--threads <N>] [--cuda-graph]\n"
+        << "              [--max-batch <N>]\n\n"
+        << "  Start the Decision Studio (GET /) and POST /api/decide.\n\n"
+        << "  <model.gguf>            Compiled GGUF (optional if --models-dir is set)\n"
+        << "  --model <PATH>          Same as <model.gguf>\n"
+        << "  --models-dir <DIR>      Directory of Laya GGUFs\n"
+        << "  --family <NAME>         auto | english | multilingual | typed-decisions  (default: auto)\n"
+        << "  --port <PORT>           HTTP port  (default: 8080)\n"
+        << "  --device <NAME>         auto | cpu | cuda | metal  (default: auto)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n"
+        << "  --cuda-graph            Capture a CUDA graph for the live (B, S) shape\n"
+        << "  --max-batch <N>         Cap questions per forward  (default: from GGUF)\n\n"
+        << "DAEMON\n"
+        << "  " << p << " daemon [<model.gguf>] [--models-dir <DIR>] [--family <NAME>]\n"
+        << "               [--device <NAME>] [--threads <N>] [--cuda-graph]\n\n"
+        << "  One JSON object per line on stdin; one JSON response per line on stdout.\n\n"
+        << "  <model.gguf>            Compiled GGUF (optional if --models-dir is set)\n"
+        << "  --model <PATH>          Same as <model.gguf>\n"
+        << "  --models-dir <DIR>      Directory of Laya GGUFs\n"
+        << "  --family <NAME>         auto | english | multilingual | typed-decisions  (default: auto)\n"
+        << "  --device <NAME>         auto | cpu | cuda | metal  (default: auto)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n"
+        << "  --cuda-graph            Capture a CUDA graph for the live (B, S) shape\n\n"
+        << "BENCH\n"
+        << "  " << p << " bench [<model.gguf>] [--preset <NAME>] [--warmup <N>] [--runs <N>]\n"
+        << "              [--models-dir <DIR>] [--device <NAME>] [--threads <N>]\n"
+        << "              [--cuda-graph] [--max-batch <N>]\n\n"
+        << "  Time the selected preset after warmup. Reports wall clock, S, B, forwards, q/s.\n\n"
+        << "  <model.gguf>            Compiled GGUF (optional if --models-dir is set)\n"
+        << "  --model <PATH>          Same as <model.gguf>\n"
+        << "  --models-dir <DIR>      Directory of Laya GGUFs\n"
+        << "  --preset <NAME>         Workflow to time  (default: email)\n"
+        << "  --warmup <N>            Untimed warmup runs  (default: 2)\n"
+        << "  --runs <N>              Timed runs  (default: 5)\n"
+        << "  --device <NAME>         auto | cpu | cuda | metal  (default: auto)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n"
+        << "  --cuda-graph            Capture a CUDA graph for the live (B, S) shape\n"
+        << "  --max-batch <N>         Cap questions per forward  (default: from GGUF)\n\n"
+        << "INFO\n"
+        << "  " << p << " info [<model.gguf>] [--models-dir <DIR>] [--device <NAME>]\n\n"
+        << "  Print family, tokenizer specials, temperatures, dynamic symbols.\n\n"
+        << "  <model.gguf>            Compiled GGUF (optional if --models-dir is set)\n"
+        << "  --model <PATH>          Same as <model.gguf>\n"
+        << "  --models-dir <DIR>      Directory of Laya GGUFs\n"
+        << "  --device <NAME>         auto | cpu | cuda | metal  (default: auto)\n\n"
+        << "Downloads:\n"
+        << "  GGUF      https://huggingface.co/mys/laya-GGUF\n"
+        << "            https://huggingface.co/mys/laya-multilingual-GGUF\n"
+        << "            https://huggingface.co/mys/laya-typed-decisions-GGUF\n"
+        << "  Binaries  https://github.com/monatis/ggmlc/releases/latest\n"
         << std::endl;
 }
 
@@ -186,6 +256,19 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    std::string first = argv[1];
+    if (first == "-h" || first == "--help" || first == "help") {
+        print_help(argv[0]);
+        return 0;
+    }
+    if (!is_laya_command(first)) {
+        std::cerr << "unknown command: " << first << "\n";
+        print_help(argv[0]);
+        return 1;
+    }
+    const std::string command = first;
+    const int argi = 2;
+
     std::string model_path;
     std::string models_dir;
     std::string family = "auto";
@@ -195,13 +278,7 @@ int main(int argc, char** argv) {
     int runs = 5;
     int warmup = 2;
     bool cuda_graph = false;
-    bool info = false;
-    bool serve = false;
-    bool daemon = false;
-    bool list_presets = false;
     bool as_json = false;
-    bool bench = false;
-    bool detect_lang = false;
     int max_batch = 0;
     std::string preset_name;
     std::string state_arg;
@@ -210,7 +287,7 @@ int main(int argc, char** argv) {
     std::string questions_arg;
     std::string questions_file;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i = argi; i < argc; ++i) {
         std::string a = argv[i];
         auto need = [&](const char* flag) -> const char* {
             if (i + 1 >= argc) {
@@ -254,22 +331,20 @@ int main(int argc, char** argv) {
             cuda_graph = true;
         } else if (a == "--max-batch") {
             max_batch = std::atoi(need("--max-batch"));
-        } else if (a == "--info") {
-            info = true;
-        } else if (a == "--serve") {
-            serve = true;
-        } else if (a == "--daemon") {
-            daemon = true;
-        } else if (a == "--list-presets") {
-            list_presets = true;
         } else if (a == "--json") {
             as_json = true;
-        } else if (a == "--bench") {
-            bench = true;
-        } else if (a == "--detect-lang") {
-            detect_lang = true;
-        } else if (!a.empty() && a[0] != '-' && model_path.empty()) {
-            model_path = a;
+        } else if (!a.empty() && a[0] != '-') {
+            if (looks_like_gguf(a) && model_path.empty()) {
+                model_path = a;
+            } else if (text_arg.empty() && command == "detect-lang") {
+                text_arg = a;
+            } else if (model_path.empty()) {
+                model_path = a;
+            } else {
+                std::cerr << "unknown argument: " << a << "\n";
+                print_help(argv[0]);
+                return 1;
+            }
         } else {
             std::cerr << "unknown argument: " << a << "\n";
             print_help(argv[0]);
@@ -277,7 +352,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (list_presets) {
+    if (command == "list-presets") {
         std::cout << "Built-in presets:\n";
         for (const auto& p : laya::all_presets()) {
             std::cout << "  " << p.name << "  -  " << p.title << "\n      " << p.blurb << "\n";
@@ -315,7 +390,7 @@ int main(int argc, char** argv) {
         state = laya::apply_text_to_state(pr, base, text_arg);
     }
 
-    if (detect_lang) {
+    if (command == "detect-lang") {
         auto g = laya::guess_language(state);
         std::cout << "script: " << g.script
                   << "\nenglish: " << (g.is_english ? "yes" : "no")
@@ -328,7 +403,7 @@ int main(int argc, char** argv) {
     }
 
     if (model_path.empty() && models_dir.empty()) {
-        std::cerr << "Error: pass --model <file.gguf> or --models-dir <dir>.\n";
+        std::cerr << "Error: pass <model.gguf>, --model <file.gguf>, or --models-dir <dir>.\n";
         print_help(argv[0]);
         return 1;
     }
@@ -354,11 +429,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (info) {
+    if (command == "info") {
         router.print_info();
         return 0;
     }
-    if (serve || daemon) {
+    if (command == "serve" || command == "daemon") {
         try {
             router.pick(laya::JsonValue::string("hello"), {});
         } catch (const std::exception& e) {
@@ -366,11 +441,11 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    if (serve) {
+    if (command == "serve") {
         laya::Server server(router, port);
         return server.start() ? 0 : 1;
     }
-    if (daemon) return run_daemon(router);
+    if (command == "daemon") return run_daemon(router);
 
     if (qs.empty()) {
         pr = laya::find_preset("email");
@@ -379,9 +454,15 @@ int main(int argc, char** argv) {
         std::cerr << "[laya] no questions given; using --preset email\n";
     }
 
-    if (bench) {
+    if (command == "bench") {
         router.pick(state, qs).benchmark(state, qs, runs, warmup);
         return 0;
+    }
+
+    if (command != "decide") {
+        std::cerr << "unknown command: " << command << "\n";
+        print_help(argv[0]);
+        return 1;
     }
 
     auto result = router.decide(state, qs);

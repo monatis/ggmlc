@@ -77,14 +77,18 @@ Main runtime orchestrator:
 `ggmlc-run` is a standalone, dependency-free C++ executable capable of running arbitrary GGUF compiled models, autoregressive chat generation, multimodal preprocessing, and task-aware inference.
 
 ```bash
-ggmlc-run <model.gguf> [options]
+ggmlc-run <command> <model.gguf> [options]
 ```
 
-### Supported CLI Options
-- `-h, --help`: Displays comprehensive categorized help and copy-pasteable usage examples.
-- `--info`: Inspects GGUF metadata, declared tasks array (`ggmlc.tasks`), dynamic symbols, tensor graph, and model capabilities.
-- `--chat <message>`: Instruction chat generation with automatic template application. Streams **only** the assistant response cleanly.
-- `--prompt <string>`: Autoregressive text completion from a raw prompt string.
+### Commands
+- `help`: Displays this help.
+- `info <model.gguf>`: Inspects GGUF metadata, declared tasks array (`ggmlc.tasks`), dynamic symbols, tensor graph, and model capabilities.
+- `chat <model.gguf> <message>`: Instruction chat generation with automatic template application. Streams **only** the assistant response cleanly.
+- `prompt <model.gguf> <string>`: Autoregressive text completion from a raw prompt string.
+- `serve <model.gguf>`: Starts a continuous batching interactive server session with iteration-level request scheduling.
+- `run <model.gguf>`: One-shot graph execution (vision / raw tensors).
+
+### Flags
 - `--system <message>`: System prompt instructions for chat template.
 - `--generate`: Enables autoregressive token generation.
 - `--max-tokens <N>`: Maximum new tokens to generate (default: `32`).
@@ -187,8 +191,9 @@ graph TD
 
 ### Serving CLI Flags
 
+`ggmlc-run serve <model.gguf> [--paged-kv] [--max-batch <N>] [--gpu-utilization <R>] [--warm-blocks <N>] [--no-prefix-cache]`
+
 - `--paged-kv`: Enables Driver-VMM virtual page mapping for dynamic on-demand KV cache allocation.
-- `--serve`: Starts continuous batching interactive server session with iteration-level request scheduling.
 - `--max-batch <N>`: Sets maximum concurrent requests in continuous batching (default: `8`).
 - `--gpu-utilization <ratio>`: Eagerly pre-allocates physical VRAM blocks upfront up to memory ratio (e.g. `0.9`).
 - `--warm-blocks <N>`: Recycles freed physical 2 MB pages in memory pool up to ceiling `N` (default: `0`).

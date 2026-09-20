@@ -12,71 +12,127 @@
 #include "doctor.h"
 #include "server.h"
 
+static std::string prog_base(const char* argv0) {
+    std::string s = argv0 ? argv0 : "timesfm";
+    const auto p = s.find_last_of("/\\");
+    if (p != std::string::npos) s = s.substr(p + 1);
+    return s;
+}
+
+static bool is_timesfm_command(const std::string& s) {
+    return s == "help" || s == "forecast" || s == "serve" || s == "doctor" ||
+           s == "info" || s == "backtest" || s == "list-presets";
+}
+
 static void print_help(const char* prog) {
-    std::cout << "====================================================================\n"
-              << " Google TimesFM 3.0 — High-Performance Foundation Forecasting Engine\n"
-              << " Standalone Zero-Dependency C++ Implementation powered by ggmlc\n"
-              << "====================================================================\n\n"
-              << "USAGE:\n"
-              << "  " << prog << " [model.gguf] [options]\n\n"
-              << "INSPECTION, HEALTH & SERVING:\n"
-              << "  -h, --help             Show this help menu and exit\n"
-              << "  --info                 Inspect GGUF metadata, shapes, and capabilities\n"
-              << "  --doctor               Run automated diagnostic health, speed & accuracy checks\n"
-              << "  --serve                Start embedded Web Dashboard & REST API server\n"
-              << "  --port <P>             HTTP server port (default: 8080)\n\n"
-              << "DATA INGESTION & PRESETS:\n"
-              << "  --input <file.csv>     Input time series CSV dataset\n"
-              << "  --text \"<v1,v2...>\"   Direct freeform sequence of pasted numbers\n"
-              << "  --preset <name>        Load built-in synthetic or benchmark dataset\n"
-              << "  --list-presets         List all available built-in preset scenarios\n"
-              << "  --column <name>        Target value column name (default: auto-detect)\n"
-              << "  --horizon <H>          Forecast horizon length (default: 128)\n"
-              << "  --no-norm              Disable RevIN normalization & CPM refinement\n"
-              << "  --no-detrend           Disable linear detrending\n"
-              << "  --no-sort              Disable quantile monotonicity sorting\n"
-              << "  --non-negative         Enforce non-negativity constraint (clamp >= 0)\n"
-              << "  --sym-avg              Enable symmetric flip-invariance averaging\n\n"
-              << "BACKTESTING ENGINE:\n"
-              << "  --backtest             Run rolling-window backtest on input series\n"
-              << "  --context <C>          Backtest context window length (default: 128)\n"
-              << "  --stride <S>           Stride between rolling windows (default: 64)\n"
-              << "  --max-windows <N>      Maximum rolling evaluation windows (default: 32)\n"
-              << "  --output-backtest <f>  Save backtest metrics and window forecasts to JSON\n\n"
-              << "EXPORT & VISUALIZATION:\n"
-              << "  --output-csv <file>    Export forecast quantiles to CSV format\n"
-              << "  --output-json <file>   Export forecast quantiles & metrics to JSON\n"
-              << "  --svg <file.svg>       Generate standalone dark vector SVG line chart\n"
-              << "  --html <file.html>     Generate standalone interactive Chart.js HTML\n\n"
-              << "HARDWARE EXECUTION:\n"
-              << "  --device <cpu|cuda>    Execution target device (default: cpu)\n"
-              << "  --threads <N>          Worker threads for CPU execution (default: 4)\n\n"
-              << "EXAMPLES:\n"
-              << "  1. Run automated system doctor diagnostics:\n"
-              << "     " << prog << " timesfm3_f16.gguf --doctor\n\n"
-              << "  2. Run 128-step forecast on freeform numbers and export SVG:\n"
-              << "     " << prog << " timesfm3_f16.gguf --text \"12.1, 14.5, 18.2, 22.0, 25.1, 28.4, 31.0, 35.2\" --horizon 16 --svg forecast.svg\n\n"
-              << "  3. Run forecast on built-in 'weekly_retail' preset:\n"
-              << "     " << prog << " timesfm3_f16.gguf --preset weekly_retail --horizon 28 --svg retail.svg\n\n"
-              << "  4. Run rolling backtest on classic 'airline_passengers' benchmark:\n"
-              << "     " << prog << " timesfm3_f16.gguf --preset airline_passengers --backtest --stride 12 --horizon 12 --svg airline_bt.svg\n\n"
-              << "  5. Launch Web Dashboard & REST API:\n"
-              << "     " << prog << " timesfm3_f16.gguf --serve --port 8080\n"
-              << std::endl;
+    const std::string p = prog_base(prog);
+    std::cout
+        << "TimesFM 3.0 — foundation time-series forecasting compiled with ggmlc.\n\n"
+        << "Usage:\n"
+        << "  " << p << " <command> <model.gguf> [options]\n\n"
+        << "Commands:\n"
+        << "  help            Show this help\n"
+        << "  forecast        Quantile forecast  (default)\n"
+        << "  backtest        Rolling-window evaluation\n"
+        << "  serve           Web Studio and REST API\n"
+        << "  doctor          Health, speed, and accuracy checks\n"
+        << "  info            Inspect GGUF metadata\n"
+        << "  list-presets    List built-in series  (no model required)\n\n"
+        << "HELP\n"
+        << "  " << p << " help\n\n"
+        << "  -h, --help                  Same as this command\n\n"
+        << "LIST-PRESETS\n"
+        << "  " << p << " list-presets\n\n"
+        << "  Print synthetic and classic preset names. No GGUF required.\n\n"
+        << "INFO\n"
+        << "  " << p << " info <model.gguf> [--device <cpu|cuda>] [--threads <N>]\n\n"
+        << "  Print tensor counts, dynamic symbols, and parameter count.\n\n"
+        << "  <model.gguf>                Compiled TimesFM GGUF\n"
+        << "  --device <cpu|cuda>         Execution device  (default: cpu)\n"
+        << "  --threads <N>               CPU workers  (default: 4)\n\n"
+        << "DOCTOR\n"
+        << "  " << p << " doctor <model.gguf> [--device <cpu|cuda>] [--threads <N>]\n\n"
+        << "  Automated diagnostic health, speed, and accuracy checks.\n\n"
+        << "  <model.gguf>                Compiled TimesFM GGUF\n"
+        << "  --device <cpu|cuda>         Execution device  (default: cpu)\n"
+        << "  --threads <N>               CPU workers  (default: 4)\n\n"
+        << "SERVE\n"
+        << "  " << p << " serve <model.gguf> [--port <PORT>] [--device <cpu|cuda>] [--threads <N>]\n\n"
+        << "  Start the Web Studio (GET /) and JSON REST API.\n\n"
+        << "  <model.gguf>                Compiled TimesFM GGUF\n"
+        << "  --port <PORT>               HTTP port  (default: 8080)\n"
+        << "  --device <cpu|cuda>         Execution device  (default: cpu)\n"
+        << "  --threads <N>               CPU workers  (default: 4)\n\n"
+        << "FORECAST\n"
+        << "  " << p << " forecast <model.gguf> [--preset <NAME>] [--input <CSV>] [--text <SERIES>]\n"
+        << "                  [--column <NAME>] [--horizon <H>] [--no-norm] [--no-detrend]\n"
+        << "                  [--no-sort] [--non-negative] [--sym-avg]\n"
+        << "                  [--output-csv <FILE>] [--output-json <FILE>] [--svg <FILE>]\n"
+        << "                  [--html <FILE>] [--device <cpu|cuda>] [--threads <N>]\n\n"
+        << "  9-quantile forecast. Default series is the built-in trend_seasonal preset.\n\n"
+        << "  <model.gguf>                Compiled TimesFM GGUF\n"
+        << "  --preset <NAME>             Built-in series (weekly_retail, airline_passengers, ...)\n"
+        << "  --input <file.csv>          CSV dataset\n"
+        << "  --text <SERIES>             Comma/space-separated numbers\n"
+        << "  --column <NAME>             CSV value column  (default: auto-detect)\n"
+        << "  --horizon <H>               Forecast length  (default: 128)\n"
+        << "  --no-norm                   Disable RevIN / CPM\n"
+        << "  --no-detrend                Disable linear detrending\n"
+        << "  --no-sort                   Disable quantile monotonicity sort\n"
+        << "  --non-negative              Clamp forecasts to >= 0\n"
+        << "  --sym-avg                   Symmetric flip-invariance averaging\n"
+        << "  --output-csv <FILE>         Write quantile table\n"
+        << "  --output-json <FILE>        Write forecast JSON\n"
+        << "  --svg <FILE>                Dark SVG chart\n"
+        << "  --html <FILE>               Interactive Chart.js HTML\n"
+        << "  --device <cpu|cuda>         Execution device  (default: cpu)\n"
+        << "  --threads <N>               CPU workers  (default: 4)\n\n"
+        << "BACKTEST\n"
+        << "  " << p << " backtest <model.gguf> [--preset <NAME>] [--input <CSV>] [--text <SERIES>]\n"
+        << "                  [--column <NAME>] [--horizon <H>] [--context <C>] [--stride <S>]\n"
+        << "                  [--max-windows <N>] [--output-backtest <FILE>] [--svg <FILE>]\n"
+        << "                  [--no-norm] [--no-detrend] [--non-negative]\n"
+        << "                  [--device <cpu|cuda>] [--threads <N>]\n\n"
+        << "  Rolling-window MAE / RMSE / sMAPE / CRPS / coverage vs naive persistence.\n\n"
+        << "  <model.gguf>                Compiled TimesFM GGUF\n"
+        << "  --preset <NAME>             Built-in series\n"
+        << "  --input <file.csv>          CSV dataset\n"
+        << "  --text <SERIES>             Comma/space-separated numbers\n"
+        << "  --column <NAME>             CSV value column  (default: auto-detect)\n"
+        << "  --horizon <H>               Forecast length  (default: 128)\n"
+        << "  --context <C>               Context window  (default: 128)\n"
+        << "  --stride <S>                Step between windows  (default: 64)\n"
+        << "  --max-windows <N>           Cap evaluated windows  (default: 32)\n"
+        << "  --output-backtest <FILE>    Write metrics JSON\n"
+        << "  --svg <FILE>                Multi-window SVG chart\n"
+        << "  --no-norm                   Disable RevIN / CPM\n"
+        << "  --no-detrend                Disable linear detrending\n"
+        << "  --non-negative              Clamp forecasts to >= 0\n"
+        << "  --device <cpu|cuda>         Execution device  (default: cpu)\n"
+        << "  --threads <N>               CPU workers  (default: 4)\n"
+        << std::endl;
 }
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        print_help("timesfm.exe");
+        print_help(argv[0]);
         return 1;
     }
 
-    std::string model_path = argv[1];
-    if (model_path == "-h" || model_path == "--help") {
+    std::string first = argv[1];
+    if (first == "-h" || first == "--help" || first == "help") {
         print_help(argv[0]);
         return 0;
     }
-    if (model_path == "--list-presets") {
+    if (!is_timesfm_command(first)) {
+        std::cerr << "unknown command: " << first << "\n";
+        print_help(argv[0]);
+        return 1;
+    }
+    const std::string command = first;
+    const int argi = 2;
+
+    if (command == "list-presets") {
         std::cout << "Available Built-in Presets:\n";
         for (const auto& p : timesfm::DataLoader::get_preset_names()) {
             std::cout << "  - " << p << "\n";
@@ -84,6 +140,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    std::string model_path;
     std::string input_csv;
     std::string input_text;
     std::string preset_name;
@@ -102,23 +159,11 @@ int main(int argc, char** argv) {
     bool doctor_mode = false;
     int port = 8080;
 
-    for (int i = 2; i < argc; ++i) {
+    for (int i = argi; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             print_help(argv[0]);
             return 0;
-        } else if (arg == "--list-presets") {
-            std::cout << "Available Built-in Presets:\n";
-            for (const auto& p : timesfm::DataLoader::get_preset_names()) {
-                std::cout << "  - " << p << "\n";
-            }
-            return 0;
-        } else if (arg == "--info") {
-            info_mode = true;
-        } else if (arg == "--doctor") {
-            doctor_mode = true;
-        } else if (arg == "--serve" || arg == "--server") {
-            serve_mode = true;
         } else if (arg == "--port" && i + 1 < argc) {
             port = std::atoi(argv[++i]);
         } else if (arg == "--input" && i + 1 < argc) {
@@ -133,8 +178,6 @@ int main(int argc, char** argv) {
             int64_t h = std::atoll(argv[++i]);
             config.horizon = h;
             bt_config.horizon = h;
-        } else if (arg == "--backtest") {
-            backtest_mode = true;
         } else if ((arg == "--context" || arg == "--context-len") && i + 1 < argc) {
             bt_config.context_len = std::atoll(argv[++i]);
         } else if (arg == "--stride" && i + 1 < argc) {
@@ -171,7 +214,32 @@ int main(int argc, char** argv) {
         } else if (arg == "--threads" && i + 1 < argc) {
             config.n_threads = std::atoi(argv[++i]);
             bt_config.n_threads = config.n_threads;
+        } else if (arg == "--model" && i + 1 < argc) {
+            model_path = argv[++i];
+        } else if (!arg.empty() && arg[0] != '-') {
+            if (model_path.empty()) {
+                model_path = arg;
+            } else {
+                std::cerr << "unknown argument: " << arg << "\n";
+                print_help(argv[0]);
+                return 1;
+            }
+        } else {
+            std::cerr << "unknown argument: " << arg << "\n";
+            print_help(argv[0]);
+            return 1;
         }
+    }
+
+    if (command == "info") info_mode = true;
+    if (command == "doctor") doctor_mode = true;
+    if (command == "serve") serve_mode = true;
+    if (command == "backtest") backtest_mode = true;
+
+    if (model_path.empty()) {
+        std::cerr << "Error: pass <model.gguf>.\n";
+        print_help(argv[0]);
+        return 1;
     }
 
     timesfm::TimesFMForecaster forecaster;

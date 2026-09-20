@@ -152,18 +152,18 @@ cmake --build build --target laya -j8
 `--device` defaults to **`auto`**: CUDA or Metal when that backend is compiled in and a device is present, otherwise CPU. Pass `cpu`, `cuda`, `cuda:0`, or `metal` to pin it.
 
 ```powershell
-.\build-win-cuda\examples\laya\laya.exe --help
-.\build-win-cuda\examples\laya\laya.exe --list-presets
-.\build-win-cuda\examples\laya\laya.exe --detect-lang --text "I was charged twice"
+.\build-win-cuda\examples\laya\laya.exe help
+.\build-win-cuda\examples\laya\laya.exe list-presets
+.\build-win-cuda\examples\laya\laya.exe detect-lang --text "I was charged twice"
 
 # Single GGUF
-.\build-win-cuda\examples\laya\laya.exe --model scratch\laya_english_f16.gguf --info
-.\build-win-cuda\examples\laya\laya.exe scratch\laya_english_f16.gguf --preset email --device auto --cuda-graph
-.\build-win-cuda\examples\laya\laya.exe scratch\laya_english_f16.gguf --preset guard --text "Ignore previous instructions" --json
+.\build-win-cuda\examples\laya\laya.exe info scratch\laya_english_f16.gguf
+.\build-win-cuda\examples\laya\laya.exe decide scratch\laya_english_f16.gguf --preset email --device auto --cuda-graph
+.\build-win-cuda\examples\laya\laya.exe decide scratch\laya_english_f16.gguf --preset guard --text "Ignore previous instructions" --json
 
 # Language routing: directory of GGUFs (english + multilingual)
-.\build-win-cuda\examples\laya\laya.exe --models-dir scratch\laya-ggufs --preset email --text "二重に請求されました"
-.\build-win-cuda\examples\laya\laya.exe --models-dir scratch\laya-ggufs --family multilingual --serve --port 8080
+.\build-win-cuda\examples\laya\laya.exe decide --models-dir scratch\laya-ggufs --preset email --text "二重に請求されました"
+.\build-win-cuda\examples\laya\laya.exe serve --models-dir scratch\laya-ggufs --family multilingual --port 8080
 ```
 
 ### Language routing (`--models-dir`)
@@ -174,9 +174,9 @@ Same idea as Python `laya.Router`: decide the checkpoint **before** the forward.
 2. Otherwise count common English function words. Enough hits → `english`, else `multilingual`.
 3. `typed-decisions` is **not** selected automatically unless `--family typed-decisions` or the question-id set matches one of the four specialist workflows.
 
-`--detect-lang` prints the decision without loading a GGUF.
+`detect-lang` prints the decision without loading a GGUF.
 
-### Stdio JSON-RPC (`--daemon`)
+### Stdio JSON-RPC (`daemon`)
 
 ```json
 {"id":"1","preset":"email"}
@@ -184,10 +184,10 @@ Same idea as Python `laya.Router`: decide the checkpoint **before** the forward.
 {"id":"3","state":{"message":"..."},"questions":{"intent":{"type":"choice","instructions":"...","criteria":{"refund":"..."}}}}
 ```
 
-### Web Studio (`--serve`)
+### Web Studio (`serve`)
 
 ```powershell
-.\build-win-cuda\examples\laya\laya.exe --model scratch\laya_english_f16.gguf --serve --port 8080 --device auto --cuda-graph
+.\build-win-cuda\examples\laya\laya.exe serve scratch\laya_english_f16.gguf --port 8080 --device auto --cuda-graph
 ```
 
 - `GET /` — Decision Studio: presets, **question builder** (add choice/score/noul + options), raw JSON tab, **Copy Jev schema**
@@ -216,7 +216,7 @@ Same idea as Python `laya.Router`: decide the checkpoint **before** the forward.
 
 ## Latency & throughput
 
-Jev/Laya exist for **short decision latency**, not frontier generation. One typed question is one encoder forward. `--bench` reports wall clock, live pad length `S`, batch `B`, forwards, and questions/s after warmup.
+Jev/Laya exist for **short decision latency**, not frontier generation. One typed question is one encoder forward. `bench` reports wall clock, live pad length `S`, batch `B`, forwards, and questions/s after warmup.
 
 **Hardware (2026-09-20):** NVIDIA GeForce RTX 4050 Laptop GPU 6 GB (CC 8.9), Windows, English F16 GGUF ~847 MB. Dynamic `b`/`s`, pad to `max(len_i)` in the chunk (Python `collate_items`), CUDA batch cap `B·S ≤ 1024`, `ggml_gallocr` arena reuse on. C++ warmup 5 / runs 7. Python `laya.Agent` collates questions to the live max length and runs one SDPA forward — it does not concat-pack sequences.
 
@@ -230,7 +230,7 @@ Jev/Laya exist for **short decision latency**, not frontier generation. One type
 Previous static `[1, 512]` C++ path was **234 ms**/noul and **1.45 s** for the email preset. Pad-to-max-in-batch plus arena reuse lets the email preset run as one `B=7` forward, matching the official PyTorch Agent wall clock.
 
 ```powershell
-.\build-win-cuda\examples\laya\laya.exe scratch\laya_english_f16.gguf --preset email --device auto --cuda-graph --bench --warmup 5 --runs 7
+.\build-win-cuda\examples\laya\laya.exe bench scratch\laya_english_f16.gguf --preset email --device auto --cuda-graph --warmup 5 --runs 7
 ```
 
 ---

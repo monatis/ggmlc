@@ -193,5 +193,5 @@ Horizontal fusion on/off (`--fusion-no-horizontal-mlp` / `--fusion-no-horizontal
 3. **Multi-request outputs**: `set_logits_last_only` is a single last-column view. Concurrent prefill / batch decode that needs logits for every slot needs per-request output indices (llama `out_ids`), not only this flag.
 4. **First `(s_q, n_kv)` prepare**: bucket reuse is cheap after the first build; the initial `prepare()` still walks the full IR for that shape.
 5. **Quantization**: Q8_0, Q4_0, F16. No k-quants / IQ* yet.
-6. **Paged KV**: Driver-VMM paging is available under `--serve`; not the default for the pp/tg matrix above.
+6. **Paged KV**: Driver-VMM paging is available under `serve`; not the default for the pp/tg matrix above.
 7. **CPU**: upstream `ggml-cpu` only; no custom assembly GEMV path beyond what GGML provides.

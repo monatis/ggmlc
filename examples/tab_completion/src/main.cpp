@@ -5,27 +5,76 @@
 #include <vector>
 #include <cstdlib>
 
+static std::string prog_base(const char* argv0) {
+    std::string s = argv0 ? argv0 : "tab_completion";
+    const auto p = s.find_last_of("/\\");
+    if (p != std::string::npos) s = s.substr(p + 1);
+    return s;
+}
+
+static bool is_tab_command(const std::string& s) {
+    return s == "help" || s == "complete" || s == "daemon" || s == "bench";
+}
+
 static void print_usage(const char* bin_name) {
-    std::cout << "PlaidQ Offline Instant Code Tab Completion Engine\n"
-              << "Usage: " << bin_name << " [options]\n\n"
-              << "Options:\n"
-              << "  --model <path>       Path to compiled PlaidQ GGUF model (required)\n"
-              << "  --prefix <str>       Code preceding cursor\n"
-              << "  --suffix <str>       Code following cursor (default: \"\")\n"
-              << "  --max-tokens <N>     Maximum tokens to complete (default: 32)\n"
-              << "  --steps <N>          Diffusion sampling steps (default: 1)\n"
-              << "  --device <dev>       Hardware backend: 'cpu', 'cuda', 'metal' (default: cpu)\n"
-              << "  --threads <N>        Worker threads for CPU backend (default: 4)\n"
-              << "  --temp <T>           Sampling temperature (0.0 = greedy, default: 0.0)\n"
-              << "  --score-temp <T>     DDIM score temperature (default: 0.99)\n"
-              << "  --canvas-len <N>     Total canvas sequence length (default: 256)\n"
-              << "  --bench              Run continuous performance benchmark\n"
-              << "  --daemon             Run JSON-RPC newline server on stdin/stdout for IDEs\n"
-              << "  -h, --help           Show this help message\n\n"
-              << "Examples:\n"
-              << "  " << bin_name << " --model plaidq.gguf --prefix \"def quicksort(arr):\\n    \"\n"
-              << "  " << bin_name << " --model plaidq.gguf --daemon --device cuda\n"
-              << "  " << bin_name << " --model plaidq.gguf --bench --device cpu --threads 4\n";
+    const std::string p = prog_base(bin_name);
+    std::cout
+        << "tab_completion — PlaidQ fill-in-the-middle code completion compiled with ggmlc.\n\n"
+        << "Usage:\n"
+        << "  " << p << " <command> <model.gguf> [options]\n\n"
+        << "Commands:\n"
+        << "  help        Show this help\n"
+        << "  complete    One infill at the cursor  (default)\n"
+        << "  daemon      Newline JSON-RPC on stdin/stdout for IDEs\n"
+        << "  bench       Continuous performance loop\n\n"
+        << "HELP\n"
+        << "  " << p << " help\n\n"
+        << "  -h, --help              Same as this command\n\n"
+        << "COMPLETE\n"
+        << "  " << p << " complete <model.gguf> [--prefix <STR>] [--suffix <STR>]\n"
+        << "                  [--max-tokens <N>] [--steps <N>] [--temp <T>]\n"
+        << "                  [--score-temp <T>] [--canvas-len <N>]\n"
+        << "                  [--device <cpu|cuda|metal>] [--threads <N>]\n\n"
+        << "  Fill the hole between prefix and suffix on a fixed canvas.\n\n"
+        << "  <model.gguf>            Compiled PlaidQ GGUF (also --model <PATH>)\n"
+        << "  --prefix <STR>          Code before the cursor\n"
+        << "  --suffix <STR>          Code after the cursor  (default: empty)\n"
+        << "  --max-tokens <N>        Tokens to generate in the hole  (default: 32)\n"
+        << "  --steps <N>             Diffusion sampling steps  (default: 1)\n"
+        << "  --temp <T>              Sampling temperature; 0 = greedy  (default: 0)\n"
+        << "  --score-temp <T>        DDIM score temperature  (default: from --steps)\n"
+        << "  --canvas-len <N>        Total canvas length  (default: 256)\n"
+        << "  --device <cpu|cuda|metal>\n"
+        << "                          Execution device  (default: cpu)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n\n"
+        << "DAEMON\n"
+        << "  " << p << " daemon <model.gguf> [--steps <N>] [--max-tokens <N>] [--temp <T>]\n"
+        << "                [--score-temp <T>] [--canvas-len <N>]\n"
+        << "                [--device <cpu|cuda|metal>] [--threads <N>]\n\n"
+        << "  One JSON object per line on stdin; one JSON completion per line on stdout.\n\n"
+        << "  <model.gguf>            Compiled PlaidQ GGUF (also --model <PATH>)\n"
+        << "  --steps <N>             Diffusion sampling steps  (default: 1)\n"
+        << "  --max-tokens <N>        Default hole length  (default: 32)\n"
+        << "  --temp <T>              Sampling temperature; 0 = greedy  (default: 0)\n"
+        << "  --score-temp <T>        DDIM score temperature  (default: from --steps)\n"
+        << "  --canvas-len <N>        Total canvas length  (default: 256)\n"
+        << "  --device <cpu|cuda|metal>\n"
+        << "                          Execution device  (default: cpu)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n\n"
+        << "BENCH\n"
+        << "  " << p << " bench <model.gguf> [--prefix <STR>] [--suffix <STR>]\n"
+        << "               [--max-tokens <N>] [--steps <N>] [--canvas-len <N>]\n"
+        << "               [--device <cpu|cuda|metal>] [--threads <N>]\n\n"
+        << "  Time repeated infills after warmup.\n\n"
+        << "  <model.gguf>            Compiled PlaidQ GGUF (also --model <PATH>)\n"
+        << "  --prefix <STR>          Code before the cursor\n"
+        << "  --suffix <STR>          Code after the cursor  (default: empty)\n"
+        << "  --max-tokens <N>        Tokens to generate in the hole  (default: 32)\n"
+        << "  --steps <N>             Diffusion sampling steps  (default: 1)\n"
+        << "  --canvas-len <N>        Total canvas length  (default: 256)\n"
+        << "  --device <cpu|cuda|metal>\n"
+        << "                          Execution device  (default: cpu)\n"
+        << "  --threads <N>           CPU workers  (default: 4)\n";
 }
 
 // Simple JSON string unescaper helper
@@ -63,6 +112,24 @@ static std::string json_escape(const std::string& s) {
 }
 
 int main(int argc, char** argv) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    std::string first = argv[1];
+    if (first == "-h" || first == "--help" || first == "help") {
+        print_usage(argv[0]);
+        return 0;
+    }
+    if (!is_tab_command(first)) {
+        std::cerr << "unknown command: " << first << "\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+    const std::string command = first;
+    const int argi = 2;
+
     std::string model_path = "";
     std::string prefix = "def quicksort(arr):\n    ";
     std::string suffix = "";
@@ -76,7 +143,7 @@ int main(int argc, char** argv) {
     bool run_bench = false;
     bool daemon_mode = false;
 
-    for (int i = 1; i < argc; ++i) {
+    for (int i = argi; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
@@ -101,15 +168,26 @@ int main(int argc, char** argv) {
             score_temp = static_cast<float>(std::atof(argv[++i]));
         } else if (arg == "--canvas-len" && i + 1 < argc) {
             canvas_len = std::atoi(argv[++i]);
-        } else if (arg == "--bench") {
-            run_bench = true;
-        } else if (arg == "--daemon") {
-            daemon_mode = true;
+        } else if (!arg.empty() && arg[0] != '-') {
+            if (model_path.empty()) {
+                model_path = arg;
+            } else {
+                std::cerr << "unknown argument: " << arg << "\n";
+                print_usage(argv[0]);
+                return 1;
+            }
+        } else {
+            std::cerr << "unknown argument: " << arg << "\n";
+            print_usage(argv[0]);
+            return 1;
         }
     }
 
+    if (command == "bench") run_bench = true;
+    if (command == "daemon") daemon_mode = true;
+
     if (model_path.empty()) {
-        std::cerr << "Error: --model <path.gguf> is required.\n";
+        std::cerr << "Error: pass <model.gguf> or --model <path.gguf>.\n";
         print_usage(argv[0]);
         return 1;
     }

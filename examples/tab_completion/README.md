@@ -23,7 +23,7 @@ Developed as part of the `ggmlc` compiler project to dogfood C++ code generation
 4. **Hole-Selective & Parallel Sampler**:
    - Computes Softmax and codebook projections $\hat{x}_0 = \text{Softmax}(S) @ E$ selectively only over active hole tokens $[P, P+H)$, skipping 224 invariant prefix/suffix tokens ($8\times$ reduction in host FLOPs).
    - Fully parallelized across CPU cores with `#pragma omp parallel for`.
-5. **IDE Daemon Mode (`--daemon`)**:
+5. **IDE Daemon Mode (`daemon`)**:
    - High-throughput newline-delimited JSON-RPC interface over `stdin`/`stdout` for zero-overhead integration with VS Code, Cursor, Neovim, and Antigravity IDE extensions.
 6. **Multiple Quantization Schemes**:
    - **FP16**: Full floating-point precision for reference parity and high-accuracy code infilling.
@@ -80,7 +80,7 @@ cmake --build build-metal --target tab_completion -j8
 
 ### 1. Standalone Code Autocompletion (8-Step High Quality)
 ```bash
-tab_completion \
+tab_completion complete \
   --model scratch/plaidq_0.7b_16step_q4_0.gguf \
   --steps 8 \
   --score-temp 0.5 \
@@ -92,7 +92,7 @@ tab_completion \
 
 ### 2. Full 16-Step Maximum Convergence
 ```bash
-tab_completion \
+tab_completion complete \
   --model scratch/plaidq_0.7b_16step_q4_0.gguf \
   --steps 16 \
   --score-temp 0.5 \
@@ -101,10 +101,10 @@ tab_completion \
   --device cuda
 ```
 
-### 3. IDE Daemon Server (`--daemon`)
+### 3. IDE Daemon Server (`daemon`)
 Run the persistent background process in your IDE extension:
 ```bash
-tab_completion --model scratch/plaidq_0.7b_16step_q4_0.gguf --steps 8 --daemon --device cuda
+tab_completion daemon scratch/plaidq_0.7b_16step_q4_0.gguf --steps 8 --device cuda
 ```
 
 #### JSON-RPC Interface Protocol:

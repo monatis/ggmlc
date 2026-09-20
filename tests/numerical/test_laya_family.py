@@ -40,7 +40,7 @@ def test_detect_lang_cli(text, family):
     if exe is None:
         pytest.skip("laya.exe not built")
     proc = subprocess.run(
-        [str(exe), "--detect-lang", "--text", text],
+        [str(exe), "detect-lang", "--text", text],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -56,7 +56,7 @@ def test_detect_lang_short_latin_defaults_english():
     if exe is None:
         pytest.skip("laya.exe not built")
     proc = subprocess.run(
-        [str(exe), "--detect-lang", "--text", "INV-4411"],
+        [str(exe), "detect-lang", "--text", "INV-4411"],
         capture_output=True,
         text=True,
         encoding="utf-8",

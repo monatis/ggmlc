@@ -101,7 +101,7 @@ for node in g.nodes:
 When executing via WSL or local binary:
 1. Run `ggmlc-run` with verbose logging:
    ```bash
-   ./build/runtime/ggmlc-run model.gguf --input x:input.bin --output 13:output.bin
+   ./build/runtime/ggmlc-run run model.gguf --input x:input.bin --output 13:output.bin
    ```
 2. Check the tensor dimensions reported by `ggmlc-run`:
    ```

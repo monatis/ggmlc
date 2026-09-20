@@ -30,7 +30,7 @@ A zero-dependency, high-performance C++ implementation of **Google TimesFM 3.0**
   - Multi-format exporter: CSV and structured JSON.
   - **Multi-Band Vector Visualizer**: Generates high-DPI SVG line charts with dark theme aesthetics and layered 80%, 60%, and 40% quantile confidence fans.
   - **Interactive Chart.js HTML Visualizer**: Standalone web report with pan/zoom and dataset toggles.
-  - **Single-Binary Web Studio & REST API**: Run `--serve --port 8080` to launch an embedded Single-Page Application (SPA) dashboard and HTTP JSON API.
+  - **Single-Binary Web Studio & REST API**: Run `serve [--port PORT]` to launch an embedded Single-Page Application (SPA) dashboard and HTTP JSON API.
 
 ---
 
@@ -89,30 +89,30 @@ The compiled binary will be located at:
 
 ```powershell
 # 1. Inspect GGUF model metadata and tensor graph
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --info
+.\build-win-cuda\examples\timesfm\timesfm.exe info scratch\timesfm3_f16.gguf
 
 # 2. Run automated Doctor health, speed, and accuracy benchmark diagnostics
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --doctor
+.\build-win-cuda\examples\timesfm\timesfm.exe doctor scratch\timesfm3_f16.gguf
 # Or test on CUDA GPU:
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_ud_q4_k_m.gguf --doctor --device cuda
+.\build-win-cuda\examples\timesfm\timesfm.exe doctor scratch\timesfm3_ud_q4_k_m.gguf --device cuda
 
 # 3. List all built-in synthetic & classic presets
-.\build-win-cuda\examples\timesfm\timesfm.exe --list-presets
+.\build-win-cuda\examples\timesfm\timesfm.exe list-presets
 
 # 4. Forecast from freeform pasted numbers and export layered quantile SVG
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --text "12.1, 14.5, 18.2, 22.0, 25.1, 28.4, 31.0, 35.2" --horizon 16 --svg forecast.svg
+.\build-win-cuda\examples\timesfm\timesfm.exe forecast scratch\timesfm3_f16.gguf --text "12.1, 14.5, 18.2, 22.0, 25.1, 28.4, 31.0, 35.2" --horizon 16 --svg forecast.svg
 
 # 5. Forecast on built-in 'weekly_retail' preset with non-negativity clamp
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --preset weekly_retail --horizon 28 --non-negative --svg retail.svg
+.\build-win-cuda\examples\timesfm\timesfm.exe forecast scratch\timesfm3_f16.gguf --preset weekly_retail --horizon 28 --non-negative --svg retail.svg
 
 # 6. Run rolling backtest on classic 'airline_passengers' benchmark
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --preset airline_passengers --backtest --context 72 --horizon 24 --stride 12 --svg airline_bt.svg --output-backtest airline_bt.json
+.\build-win-cuda\examples\timesfm\timesfm.exe backtest scratch\timesfm3_f16.gguf --preset airline_passengers --context 72 --horizon 24 --stride 12 --svg airline_bt.svg --output-backtest airline_bt.json
 
 # 7. Offload to NVIDIA CUDA GPU
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --preset sunspots --device cuda --horizon 64
+.\build-win-cuda\examples\timesfm\timesfm.exe forecast scratch\timesfm3_f16.gguf --preset sunspots --device cuda --horizon 64
 
 # 8. Launch Single-Binary Web Studio & REST API Server
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --serve --port 8080
+.\build-win-cuda\examples\timesfm\timesfm.exe serve scratch\timesfm3_f16.gguf --port 8080
 ```
 
 ## Backtesting Engine & Calibration Metrics
@@ -121,7 +121,7 @@ The compiled binary will be located at:
 
 ```powershell
 # Run rolling backtest across 256 time steps (Context=128, Horizon=64, Stride=32)
-.\build-win-cuda\examples\timesfm\timesfm.exe scratch\timesfm3_f16.gguf --input data.csv --backtest --context 128 --horizon 64 --stride 32 --svg backtest.svg --output-backtest backtest.json
+.\build-win-cuda\examples\timesfm\timesfm.exe backtest scratch\timesfm3_f16.gguf --input data.csv --context 128 --horizon 64 --stride 32 --svg backtest.svg --output-backtest backtest.json
 ```
 
 ### Evaluated Error & Calibration Metrics
@@ -137,7 +137,7 @@ The compiled binary will be located at:
 
 ## REST API Specification
 
-When running with `--serve`, the embedded server exposes:
+When running `serve`, the embedded server exposes:
 
 ### `GET /`
 Serves the responsive dual-tab web studio (Forecast Studio & Backtesting Suite).
