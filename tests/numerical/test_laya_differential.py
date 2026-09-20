@@ -127,7 +127,6 @@ def test_laya_gguf_f16_parity(laya_models):
     if not gguf.exists():
         pytest.skip("scratch/laya_english_f16.gguf not found")
 
-
     _, padded, k = _padded_email(agent, pad_batch)
     with torch.no_grad():
         tl, _ = trunk(*padded)

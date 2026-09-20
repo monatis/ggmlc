@@ -58,7 +58,6 @@ class LayaCleanTrunk(nn.Module):
         d = cfg.hidden_size
         n_heads = cfg.num_attention_heads
         head_dim = d // n_heads
-        n_layers = cfg.num_hidden_layers
         eps = getattr(cfg, "norm_eps", 1e-5)
 
         self.max_len = int(max_len)
