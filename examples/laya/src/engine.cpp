@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "language.h"
 
 #include <algorithm>
 #include <chrono>
@@ -45,7 +46,17 @@ bool DecisionEngine::load_model(const std::string& gguf_path, const EngineOption
     std::cerr << "[laya] loading " << gguf_path << " device=" << device_ << std::endl;
     try {
         graph_ = ggmlc::ModelLoader::load_from_file(gguf_path);
-        executor_ = std::make_unique<ggmlc::ModelExecutor>(graph_, device_);
+        try {
+            executor_ = std::make_unique<ggmlc::ModelExecutor>(graph_, device_);
+        } catch (const std::exception& e) {
+            if (device_ == "auto") {
+                std::cerr << "[laya] auto device failed (" << e.what() << "), falling back to cpu\n";
+                executor_ = std::make_unique<ggmlc::ModelExecutor>(graph_, "cpu");
+            } else {
+                throw;
+            }
+        }
+        device_ = executor_->device();
     } catch (const std::exception& e) {
         std::cerr << "[laya] load failed: " << e.what() << std::endl;
         return false;
@@ -131,6 +142,12 @@ bool DecisionEngine::load_model(const std::string& gguf_path, const EngineOption
 
     if (!tokenizer_.init_from_gguf_file(gguf_path)) {
         std::cerr << "[laya] warning: GGUF has no tokenizer metadata; sequence encoding will fail." << std::endl;
+    }
+
+    model_name_ = meta_str(graph_, "laya.model_name", "laya");
+    family_ = meta_str(graph_, "laya.family", "");
+    if (family_.empty()) {
+        family_ = infer_family(gguf_path, model_name_, meta_str(graph_, "laya.checkpoint"));
     }
 
     // Defer prepare until the first real (B, S). A load-time [1, 512] graph
@@ -416,6 +433,7 @@ DecideResult DecisionEngine::decide(const JsonValue& state, const std::vector<Qu
 
 void DecisionEngine::print_info() const {
     std::cout << "model: " << meta_str(graph_, "general.name", graph_.name) << "\n"
+              << "family: " << family_ << "\n"
               << "checkpoint: " << meta_str(graph_, "laya.checkpoint", "") << "\n"
               << "device: " << device_ << "\n"
               << "max_len: " << seq_.max_len << "  min_seq: " << min_seq_

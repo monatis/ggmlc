@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <set>
 #include <iostream>
+#include <cstdio>
 
 namespace ggmlc {
 namespace pipeline {
@@ -346,6 +347,44 @@ std::vector<std::string> BPETokenizer::bpe(const std::string& token) const {
 
 void BPETokenizer::encode_normal_text(const std::string& subtext, std::vector<int32_t>& out_tokens) const {
     if (subtext.empty()) return;
+
+    if (pre_tokenizer_ == "gemma") {
+        // HuggingFace Metaspace (Gemma / mmBERT): spaces → U+2581, always prepend.
+        const std::string sp = "\xe2\x96\x81";
+        std::string t;
+        t.reserve(subtext.size() + 3);
+        for (unsigned char ch : subtext) {
+            if (ch == ' ') t += sp;
+            else t.push_back(static_cast<char>(ch));
+        }
+        if (t.find(sp) != 0) t = sp + t;
+
+        auto emit_piece = [&](const std::string& piece) {
+            if (piece.empty()) return;
+            auto it = encoder_.find(piece);
+            if (it != encoder_.end()) {
+                out_tokens.push_back(it->second);
+                return;
+            }
+            char buf[16];
+            for (unsigned char b : piece) {
+                std::snprintf(buf, sizeof(buf), "<0x%02X>", b);
+                auto bit = encoder_.find(buf);
+                if (bit != encoder_.end()) out_tokens.push_back(bit->second);
+                else out_tokens.push_back(unk_id_);
+            }
+        };
+
+        size_t pos = 0;
+        while (pos < t.size()) {
+            size_t nxt = t.find(sp, pos + sp.size());
+            if (nxt == std::string::npos) nxt = t.size();
+            const std::string chunk = t.substr(pos, nxt - pos);
+            for (const auto& piece : bpe(chunk)) emit_piece(piece);
+            pos = nxt;
+        }
+        return;
+    }
 
     if (pre_tokenizer_ == "clip") {
         std::string lower_text = subtext;

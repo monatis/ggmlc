@@ -1,4 +1,4 @@
-"""Compile Laya English checkpoint (ModernBERT-large DecisionModel) to GGUF via ggmlc."""
+"""Compile Laya family checkpoints (English / multilingual / typed-decisions) to GGUF."""
 
 from __future__ import annotations
 
@@ -15,13 +15,61 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "examples" / "laya"))
 
-import torch
-import laya
-from laya.common import QTYPES, build_sequence, collate_items
-from laya_trunk import MAX_LEN, MAX_OPTS, LayaCleanTrunk, pad_batch
-
 import ggmlc
+import laya
+import torch
 from ggmlc.pipeline.tokenizer import BPETokenizer
+from ggmlc.transforms.fusion import FusionOptions
+from laya.common import QTYPES, build_sequence, collate_items
+from laya_trunk import MAX_OPTS, LayaCleanTrunk, pad_batch
+
+CHECKPOINTS = {
+    "english": {
+        "repo": "convaiinnovations/laya",
+        "family": "english",
+        "model_name": "laya",
+        "stem": "laya_english",
+        "pre_tokenizer": "gpt2",
+    },
+    "multilingual": {
+        "repo": "convaiinnovations/laya-multilingual",
+        "family": "multilingual",
+        "model_name": "laya-multilingual",
+        "stem": "laya_multilingual",
+        "pre_tokenizer": "gemma",
+    },
+    "typed-decisions": {
+        "repo": "convaiinnovations/laya-typed-decisions",
+        "family": "typed-decisions",
+        "model_name": "laya-typed-decisions",
+        "stem": "laya_typed_decisions",
+        "pre_tokenizer": "gpt2",
+    },
+}
+ALIASES = {
+    "laya": "english",
+    "en": "english",
+    "default": "english",
+    "multi": "multilingual",
+    "ml": "multilingual",
+    "laya-multilingual": "multilingual",
+    "typed": "typed-decisions",
+    "typed_decisions": "typed-decisions",
+    "laya-typed-decisions": "typed-decisions",
+}
+QUANT_CHOICES = ["f32", "f16", "q8_0", "q4_0", "q4_k_m", "ud_q4_k_m"]
+
+
+def _normalize_family(name: str) -> str:
+    key = name.strip().lower()
+    key = ALIASES.get(key, key)
+    if key not in CHECKPOINTS:
+        raise SystemExit(f"unknown family {name!r}; choose {list(CHECKPOINTS)}")
+    return key
+
+
+def _length_buckets(max_len: int) -> list[int]:
+    return [b for b in (64, 128, 256, 512, 1024) if b <= max_len] or [max_len]
 
 
 def _example_batch(agent, seq_len: int = 128) -> tuple[torch.Tensor, ...]:
@@ -60,26 +108,19 @@ def _example_batch(agent, seq_len: int = 128) -> tuple[torch.Tensor, ...]:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", default=str(ROOT / "scratch" / "laya_english_f16.gguf"))
-    parser.add_argument("--quantize", default="f16", choices=["f32", "f16", "q8_0", "q4_0"])
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--max-batch", type=int, default=8)
-    parser.add_argument("--min-seq", type=int, default=64)
-    args = parser.parse_args()
-
-    print("loading laya…")
-    agent = laya.load("convaiinnovations/laya", device="cpu")
-    agent.model.cpu().float().eval()
-
-    print("building clean trunk…")
-    trunk = LayaCleanTrunk(agent).eval()
-    example = _example_batch(agent)
-    print("example shapes", [tuple(t.shape) for t in example], [t.dtype for t in example])
-
-    tok = BPETokenizer.from_huggingface(agent.tok, context_length=int(agent.cfg.get("max_len", MAX_LEN)))
-    # ModernBERT uses [CLS]/[SEP] rather than BOS/EOS.
+def _pipeline_tokenizer(agent, pre_tokenizer: str, max_len: int) -> BPETokenizer:
+    base = BPETokenizer.from_huggingface(agent.tok, context_length=max_len)
+    tok = BPETokenizer(
+        vocab=base.vocab,
+        merges=base.merges,
+        pre_tokenizer=pre_tokenizer,
+        context_length=max_len,
+        bos_token_id=base.bos_token_id,
+        eos_token_id=base.eos_token_id,
+        pad_token_id=base.pad_token_id,
+        unk_token_id=base.unk_token_id,
+        chat_template=base.chat_template,
+    )
     if tok.bos_token_id is None:
         tok.bos_token_id = int(agent.tok.cls_token_id)
     if tok.eos_token_id is None:
@@ -88,37 +129,61 @@ def main() -> None:
         tok.pad_token_id = int(agent.tok.pad_token_id)
     if tok.unk_token_id is None and agent.tok.unk_token_id is not None:
         tok.unk_token_id = int(agent.tok.unk_token_id)
+    print(
+        f"tokenizer pre={tok.pre_tokenizer} vocab={tok.vocab_size} merges={len(tok.merges)} "
+        f"cls={agent.tok.cls_token_id} sep={agent.tok.sep_token_id} "
+        f"pad={agent.tok.pad_token_id} mask={agent.tok.mask_token_id}"
+    )
+    if pre_tokenizer == "gemma" and len(tok.merges) < 1000:
+        raise SystemExit("multilingual tokenizer expected Gemma BPE merges; got too few")
+    return tok
+
+
+def compile_one(family: str, quantize: str, output: Path | None, max_batch: int, min_seq: int) -> Path:
+    spec = CHECKPOINTS[family]
+    print(f"loading {spec['repo']} …")
+    agent = laya.load(spec["repo"], device="cpu")
+    agent.model.cpu().float().eval()
+    max_len = int(agent.cfg.get("max_len", 512))
+    head_max_len = int(agent.cfg.get("head_max_len", 192))
+    min_seq = min(min_seq, max_len)
+    min_seq = max(min_seq, 1)
+
+    print(f"building clean trunk  max_len={max_len} head_max_len={head_max_len}")
+    trunk = LayaCleanTrunk(agent, max_len=max_len).eval()
+    example = _example_batch(agent, seq_len=min(128, max_len))
+    print("example shapes", [tuple(t.shape) for t in example], [t.dtype for t in example])
+
+    tok = _pipeline_tokenizer(agent, spec["pre_tokenizer"], max_len)
     extra = {
-        "laya.max_len": int(agent.cfg.get("max_len", MAX_LEN)),
-        "laya.head_max_len": int(agent.cfg.get("head_max_len", 192)),
+        "laya.max_len": max_len,
+        "laya.head_max_len": head_max_len,
         "laya.max_opts": MAX_OPTS,
-        "laya.max_batch": int(args.max_batch),
-        "laya.min_seq": int(args.min_seq),
-        # Grouping bands only. Runtime pads to max(len_i) in the chunk (Python collate_items).
-        "laya.length_buckets": json.dumps([64, 128, 256, 512]),
+        "laya.max_batch": int(max_batch),
+        "laya.min_seq": int(min_seq),
+        "laya.length_buckets": json.dumps(_length_buckets(max_len)),
         "laya.mask_token_id": int(agent.tok.mask_token_id),
         "laya.cls_token_id": int(agent.tok.cls_token_id),
         "laya.sep_token_id": int(agent.tok.sep_token_id),
         "laya.pad_token_id": int(agent.tok.pad_token_id),
         "laya.temperature": json.dumps(agent.temperature),
         "laya.temperature_by_options": json.dumps(agent.temperature_by_options),
-        "laya.model_name": "laya",
-        "laya.checkpoint": "convaiinnovations/laya",
+        "laya.model_name": spec["model_name"],
+        "laya.family": spec["family"],
+        "laya.checkpoint": spec["repo"],
     }
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"compiling -> {out} quantize={args.quantize}")
-    from ggmlc.transforms.fusion import FusionOptions
+    if output is None:
+        suffix = quantize.replace("-", "_")
+        output = ROOT / "scratch" / f"{spec['stem']}_{suffix}.gguf"
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     fusion = FusionOptions()
-    # Precomputed cos/sin RoPE (two thetas: full vs sliding) must stay as MUL/ADD.
-    # The LLaMA-style ROPE fusion pass would rewrite it to GGML_OP_ROPE with a
-    # bogus position tensor and abort at ggml_rope (ne[2] != n_pos).
     fusion.enable_rope = False
 
-    dim_b = torch.export.Dim("b", min=1, max=int(args.max_batch))
-    dim_s = torch.export.Dim("s", min=int(args.min_seq), max=MAX_LEN)
+    dim_b = torch.export.Dim("b", min=1, max=int(max_batch))
+    dim_s = torch.export.Dim("s", min=int(min_seq), max=max_len)
     dynamic_shapes = (
         {0: dim_b, 1: dim_s},
         {0: dim_b, 1: dim_s},
@@ -126,21 +191,44 @@ def main() -> None:
         {0: dim_b},
         {0: dim_b},
     )
-    print(f"dynamic dims b=1..{args.max_batch}  s={args.min_seq}..{MAX_LEN}")
-
+    print(f"compiling -> {output} family={family} quantize={quantize} b=1..{max_batch} s={min_seq}..{max_len}")
     ggmlc.compile(
         trunk,
         example,
-        output=str(out),
-        model_name="laya_english",
-        quantize=args.quantize,
+        output=str(output),
+        model_name=spec["stem"],
+        quantize=quantize,
         pipeline=tok,
         tasks=["classification"],
         extra_metadata=extra,
         fusion_options=fusion,
         dynamic_shapes=dynamic_shapes,
     )
-    print("wrote", out, "bytes", out.stat().st_size)
+    print("wrote", output, "bytes", output.stat().st_size)
+    del agent, trunk
+    return output
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compile Laya checkpoints to GGUF (English, multilingual, typed-decisions)."
+    )
+    parser.add_argument("--family", default="english", help="english | multilingual | typed-decisions | all")
+    parser.add_argument("--checkpoint", default=None, help="Alias for --family (HF repo or short name)")
+    parser.add_argument("--output", default=None, help="Output GGUF path (single family only)")
+    parser.add_argument("--quantize", default="f16", choices=QUANT_CHOICES)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--max-batch", type=int, default=8)
+    parser.add_argument("--min-seq", type=int, default=64)
+    args = parser.parse_args()
+
+    fam_arg = args.checkpoint or args.family
+    families = list(CHECKPOINTS) if fam_arg.strip().lower() == "all" else [_normalize_family(fam_arg)]
+    if args.output and len(families) > 1:
+        raise SystemExit("--output can only be used with a single --family")
+
+    for fam in families:
+        compile_one(fam, args.quantize, Path(args.output) if args.output else None, args.max_batch, args.min_seq)
 
 
 if __name__ == "__main__":

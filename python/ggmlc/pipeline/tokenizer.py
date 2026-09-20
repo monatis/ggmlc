@@ -275,7 +275,11 @@ class BPETokenizer:
             pre_tok = "clip"
         elif "llama" in cls_name or "smol" in model_name or "llama" in model_name:
             pre_tok = "llama"
-        elif "gemma" in cls_name or "gemma" in model_name:
+        elif (
+            "gemma" in cls_name
+            or "gemma" in model_name
+            or len(vocab) >= 200000
+        ):
             pre_tok = "gemma"
         else:
             pre_tok = "gpt2"

@@ -48,6 +48,8 @@ struct Answer {
 
 struct DecideResult {
     std::string model = "laya";
+    std::string route_family;
+    std::string route_reason;
     std::vector<Answer> answers;
     int input_tokens = 0;
     double latency_ms = 0.0;

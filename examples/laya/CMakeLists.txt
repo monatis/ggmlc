@@ -8,6 +8,8 @@ set(LAYA_SOURCES
     src/questions.cpp
     src/sequence.cpp
     src/presets.cpp
+    src/language.cpp
+    src/router.cpp
     src/engine.cpp
     src/server.cpp
     src/main.cpp

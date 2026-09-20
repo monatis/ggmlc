@@ -25,12 +25,12 @@ h1{font-size:22px;letter-spacing:-.4px}
 h1 span{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;color:transparent}
 .sub{color:var(--muted);font-size:13px;margin-top:4px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
+@media(max-width:960px){.grid{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
 label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:10px 0 6px}
 select,textarea,input,button{font:inherit;color:var(--text)}
 select,textarea,input{width:100%;background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
-textarea{min-height:140px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+textarea{min-height:120px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 button{border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:600}
 .primary{background:linear-gradient(135deg,#0891b2,#7c3aed);color:#fff}
@@ -38,6 +38,9 @@ button{border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
 .chip{font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);background:#0b1220;cursor:pointer;color:var(--muted)}
 .chip.on{border-color:var(--accent);color:var(--accent)}
+.tabs{display:flex;gap:6px;margin:8px 0}
+.tab{font-size:12px;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:#0b1220;cursor:pointer;color:var(--muted)}
+.tab.on{border-color:var(--accent);color:var(--accent)}
 .meta{color:var(--muted);font-size:12px;margin-top:8px}
 .ans{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
 .ans h3{font-size:13px;margin-bottom:8px}
@@ -52,6 +55,11 @@ button{border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:
 .b-score{background:#3b2d14;color:#fde68a}
 .b-noul{background:#3b1d4a;color:#e9d5ff}
 .status{min-height:18px;color:var(--muted);font-size:12px}
+.qcard{border:1px solid var(--line);border-radius:12px;padding:10px;margin:8px 0;background:#0b1220}
+.qhead{display:grid;grid-template-columns:1fr 140px auto;gap:8px;align-items:center}
+.optrow{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-top:6px}
+.tiny{padding:6px 10px;font-size:12px}
+.toast{color:var(--ok);font-size:12px;margin-top:6px}
 </style>
 </head>
 <body>
@@ -59,7 +67,7 @@ button{border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:
 <header>
   <div>
     <h1><span>Laya</span> System 1 Decision Studio</h1>
-    <p class="sub">Non-autoregressive typed decisions — choice, score, noul — compiled with ggmlc. No token generation.</p>
+    <p class="sub">Typed decisions in one pass — build questions as a form, or paste a Jev/Laya schema.</p>
   </div>
   <div class="status" id="health">connecting…</div>
 </header>
@@ -70,25 +78,46 @@ button{border:0;border-radius:10px;padding:10px 16px;cursor:pointer;font-weight:
     <p class="meta" id="blurb"></p>
     <label>State (JSON object or raw text)</label>
     <textarea id="state"></textarea>
-    <label>Questions</label>
-    <textarea id="questions" style="min-height:220px"></textarea>
-    <div class="row">
-      <button class="primary" id="go">Decide</button>
-      <button class="ghost" id="reset">Reset preset</button>
+    <div class="tabs">
+      <button class="tab on" id="tab-form" type="button">Question builder</button>
+      <button class="tab" id="tab-json" type="button">Raw JSON schema</button>
     </div>
+    <div id="form-pane">
+      <div id="qlist"></div>
+      <div class="row">
+        <button class="ghost tiny" id="add-q" type="button">+ Add question</button>
+      </div>
+    </div>
+    <div id="json-pane" style="display:none">
+      <label>Questions (Laya / Jev schema)</label>
+      <textarea id="questions" style="min-height:220px"></textarea>
+    </div>
+    <div class="row">
+      <button class="primary" id="go" type="button">Decide</button>
+      <button class="ghost" id="copy-schema" type="button">Copy Jev schema</button>
+      <button class="ghost" id="reset" type="button">Reset preset</button>
+    </div>
+    <p class="toast" id="copied"></p>
   </div>
   <div class="card" id="out">
-    <p class="meta">Run a preset to see calibrated probabilities. Typical use: guard an LLM, route a ticket, score an invoice — one parallel pass per question.</p>
+    <p class="meta">Build questions on the left (id, type, instructions, choices). Submit to score — or copy the generated schema into another Jev/Laya client.</p>
   </div>
 </div>
 </div>
 <script>
 let PRESETS = [];
 let current = null;
+let mode = 'form';
+let questionsForm = [];
+
+function uid(){ return 'q' + Math.random().toString(36).slice(2,7); }
+
 async function boot(){
   try {
     const h = await fetch('/api/health').then(r=>r.json());
-    document.getElementById('health').textContent = (h.model||'laya') + ' · ' + (h.device||'') + ' · ready';
+    const fam = h.families ? h.families.join(', ') : (h.family||'');
+    document.getElementById('health').textContent =
+      (h.model||'laya') + (fam? ' · '+fam : '') + ' · ' + (h.device||'') + ' · ready';
     PRESETS = await fetch('/api/presets').then(r=>r.json());
     const chips = document.getElementById('chips');
     PRESETS.forEach((p,i)=>{
@@ -103,6 +132,105 @@ async function boot(){
     document.getElementById('health').textContent = 'API unreachable';
   }
 }
+function schemaFromForm(){
+  const o = {};
+  for (const q of questionsForm){
+    const id = (q.id||'').trim() || uid();
+    const item = {type: q.type||'choice', instructions: q.instructions||''};
+    if (q.type === 'choice'){
+      const crit = {};
+      for (const c of (q.criteria||[])){
+        if (!c.key) continue;
+        crit[c.key] = c.desc ? c.desc : null;
+      }
+      item.criteria = crit;
+    } else if (q.type === 'score'){
+      item.criteria = (q.criteria||[]).map(c => c.desc || c.key || '');
+    } else if (q.criteria && q.criteria.length){
+      const crit = {};
+      for (const c of q.criteria) if (c.key) crit[c.key] = c.desc||'';
+      if (Object.keys(crit).length) item.criteria = crit;
+    }
+    o[id] = item;
+  }
+  return o;
+}
+function formFromSchema(obj){
+  questionsForm = [];
+  if (!obj || typeof obj !== 'object') return;
+  for (const [id, q] of Object.entries(obj)){
+    const t = (q && q.type) || 'choice';
+    const row = {id, type:t, instructions:(q&&q.instructions)||'', criteria:[]};
+    const crit = q && q.criteria;
+    if (t === 'score' && Array.isArray(crit)){
+      row.criteria = crit.map((d,i)=>({key:String(i), desc: String(d??'')}));
+    } else if (crit && typeof crit === 'object' && !Array.isArray(crit)){
+      row.criteria = Object.entries(crit).map(([k,v])=>({key:k, desc: v==null?'':String(v)}));
+    } else if (t === 'choice'){
+      row.criteria = [{key:'option_a', desc:''},{key:'option_b', desc:''}];
+    }
+    questionsForm.push(row);
+  }
+}
+function renderForm(){
+  const box = document.getElementById('qlist');
+  box.innerHTML = '';
+  questionsForm.forEach((q, qi)=>{
+    const card = document.createElement('div');
+    card.className = 'qcard';
+    const typeHint = q.type==='choice' ? 'label + description per choice'
+      : q.type==='score' ? 'one row per score level (text)'
+      : 'optional false/true descriptions';
+    card.innerHTML = `
+      <div class="qhead">
+        <input data-k="id" placeholder="question id" value="${esc(q.id||'')}">
+        <select data-k="type">
+          <option value="choice"${q.type==='choice'?' selected':''}>choice</option>
+          <option value="score"${q.type==='score'?' selected':''}>score</option>
+          <option value="noul"${q.type==='noul'?' selected':''}>noul (yes/no)</option>
+        </select>
+        <button class="ghost tiny" data-rm type="button">Remove</button>
+      </div>
+      <label>Instructions</label>
+      <input data-k="instructions" placeholder="What should this question decide?" value="${esc(q.instructions||'')}">
+      <label>${typeHint}</label>
+      <div data-opts></div>
+      <button class="ghost tiny" data-add type="button" style="margin-top:8px">+ Option / level</button>
+    `;
+    const opts = card.querySelector('[data-opts]');
+    (q.criteria||[]).forEach((c, ci)=>{
+      const row = document.createElement('div');
+      row.className = 'optrow';
+      row.innerHTML = `
+        <input data-ok="key" placeholder="${q.type==='score'?'level '+ci:'label'}" value="${esc(c.key||'')}">
+        <input data-ok="desc" placeholder="description" value="${esc(c.desc||'')}">
+        <button class="ghost tiny" data-del type="button">×</button>`;
+      row.querySelector('[data-ok=key]').oninput = e=>{ q.criteria[ci].key = e.target.value; syncJson(); };
+      row.querySelector('[data-ok=desc]').oninput = e=>{ q.criteria[ci].desc = e.target.value; syncJson(); };
+      row.querySelector('[data-del]').onclick = ()=>{ q.criteria.splice(ci,1); renderForm(); syncJson(); };
+      opts.appendChild(row);
+    });
+    card.querySelector('[data-k=id]').oninput = e=>{ q.id = e.target.value; syncJson(); };
+    card.querySelector('[data-k=instructions]').oninput = e=>{ q.instructions = e.target.value; syncJson(); };
+    card.querySelector('[data-k=type]').onchange = e=>{
+      q.type = e.target.value;
+      if (q.type==='noul' && (!q.criteria||!q.criteria.length))
+        q.criteria = [{key:'false',desc:''},{key:'true',desc:''}];
+      renderForm(); syncJson();
+    };
+    card.querySelector('[data-rm]').onclick = ()=>{ questionsForm.splice(qi,1); renderForm(); syncJson(); };
+    card.querySelector('[data-add]').onclick = ()=>{
+      q.criteria = q.criteria||[];
+      q.criteria.push({key: q.type==='score'? String(q.criteria.length): '', desc:''});
+      renderForm(); syncJson();
+    };
+    box.appendChild(card);
+  });
+}
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function syncJson(){
+  document.getElementById('questions').value = JSON.stringify(schemaFromForm(), null, 2);
+}
 function select(name){
   current = PRESETS.find(p=>p.name===name) || current;
   document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on', c.textContent===name));
@@ -110,20 +238,22 @@ function select(name){
   document.getElementById('blurb').textContent = current.title + ' — ' + current.blurb;
   document.getElementById('state').value = JSON.stringify(current.state, null, 2);
   document.getElementById('questions').value = JSON.stringify(current.questions, null, 2);
+  formFromSchema(current.questions);
+  renderForm();
 }
 function parseMaybe(text){
   const t = text.trim();
   if (!t) return {};
   try { return JSON.parse(t); } catch { return t; }
 }
-function bar(p){
-  const pct = Math.round(p*1000)/10;
-  return `<div class="bar"><span class="lab"></span><div class="track"><div class="fill" style="width:${Math.max(1,pct)}%"></div></div><span class="pct">${pct.toFixed(1)}%</span></div>`;
+function barRow(lab,p){
+  const pct = Math.round((p||0)*1000)/10;
+  return `<div class="bar"><span class="lab" title="${lab}">${lab}</span><div class="track"><div class="fill" style="width:${Math.max(1,pct)}%"></div></div><span class="pct">${pct.toFixed(1)}%</span></div>`;
 }
 function render(res){
   const box = document.getElementById('out');
   const u = res.usage||{};
-  let html = `<p class="meta">${res.model||'laya'} · ${u.input_tokens||0} tokens · ${(u.latency_ms||0).toFixed(1)} ms · 0 output tokens</p>`;
+  let html = `<p class="meta">${res.model||'laya'}${res.family?' · '+res.family:''}${res.route?' · '+res.route:''} · ${u.input_tokens||0} tokens · ${(u.latency_ms||0).toFixed(1)} ms · 0 output tokens</p>`;
   const answers = res.answers||{};
   for (const [id,a] of Object.entries(answers)){
     const badge = a.type==='choice'?'b-choice':a.type==='score'?'b-score':'b-noul';
@@ -146,11 +276,38 @@ function render(res){
   }
   box.innerHTML = html;
 }
-function barRow(lab,p){
-  const pct = Math.round((p||0)*1000)/10;
-  return `<div class="bar"><span class="lab" title="${lab}">${lab}</span><div class="track"><div class="fill" style="width:${Math.max(1,pct)}%"></div></div><span class="pct">${pct.toFixed(1)}%</span></div>`;
+function setMode(m){
+  mode = m;
+  document.getElementById('tab-form').classList.toggle('on', m==='form');
+  document.getElementById('tab-json').classList.toggle('on', m==='json');
+  document.getElementById('form-pane').style.display = m==='form'?'block':'none';
+  document.getElementById('json-pane').style.display = m==='json'?'block':'none';
+  if (m==='form'){
+    try { formFromSchema(JSON.parse(document.getElementById('questions').value||'{}')); renderForm(); } catch(e){}
+  } else {
+    syncJson();
+  }
 }
+document.getElementById('tab-form').onclick = ()=>setMode('form');
+document.getElementById('tab-json').onclick = ()=>setMode('json');
+document.getElementById('add-q').onclick = ()=>{
+  questionsForm.push({id:'question_'+ (questionsForm.length+1), type:'choice', instructions:'',
+    criteria:[{key:'option_a',desc:''},{key:'option_b',desc:''}]});
+  renderForm(); syncJson();
+};
+document.getElementById('copy-schema').onclick = async ()=>{
+  if (mode==='form') syncJson();
+  const schema = document.getElementById('questions').value;
+  try {
+    await navigator.clipboard.writeText(schema);
+    document.getElementById('copied').textContent = 'Copied Laya/Jev question schema to clipboard.';
+  } catch(e) {
+    document.getElementById('copied').textContent = 'Could not copy — select the JSON tab and copy manually.';
+  }
+  setTimeout(()=>document.getElementById('copied').textContent='', 2500);
+};
 document.getElementById('go').onclick = async ()=>{
+  if (mode==='form') syncJson();
   const body = {
     state: parseMaybe(document.getElementById('state').value),
     questions: parseMaybe(document.getElementById('questions').value)

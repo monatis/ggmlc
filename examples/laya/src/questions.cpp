@@ -182,9 +182,11 @@ JsonValue answer_to_json(const Answer& a) {
     return o;
 }
 
-std::string format_answer_json(const DecideResult& result, bool pretty) {
+    std::string format_answer_json(const DecideResult& result, bool pretty) {
     JsonValue root = JsonValue::object();
     root.set("model", JsonValue::string(result.model));
+    if (!result.route_family.empty()) root.set("family", JsonValue::string(result.route_family));
+    if (!result.route_reason.empty()) root.set("route", JsonValue::string(result.route_reason));
     JsonValue answers = JsonValue::object();
     for (const auto& a : result.answers) answers.set(a.id, answer_to_json(a));
     root.set("answers", answers);
@@ -206,9 +208,11 @@ static std::string bar(float p, int width = 24) {
 std::string format_answer_cli(const DecideResult& result) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(4);
-    oss << "model: " << result.model
-        << "   tokens: " << result.input_tokens
+    oss << "model: " << result.model;
+    if (!result.route_family.empty()) oss << "   family: " << result.route_family;
+    oss << "   tokens: " << result.input_tokens
         << "   latency: " << std::setprecision(1) << result.latency_ms << " ms\n";
+    if (!result.route_reason.empty()) oss << "route: " << result.route_reason << "\n";
     for (const auto& a : result.answers) {
         oss << "\n[" << a.id << "] " << qtype_name(a.type);
         oss << "   conf=" << std::setprecision(4) << a.confidence

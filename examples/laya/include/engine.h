@@ -13,7 +13,7 @@
 namespace laya {
 
 struct EngineOptions {
-    std::string device = "cpu";
+    std::string device = "auto";
     int n_threads = 4;
     bool cuda_graph = false;
     int max_batch = 0;  // 0 = GGUF metadata / default 8
@@ -27,6 +27,8 @@ public:
     bool load_model(const std::string& gguf_path, const EngineOptions& opt);
     bool is_loaded() const { return loaded_; }
     const std::string& device() const { return device_; }
+    const std::string& family() const { return family_; }
+    const std::string& model_name() const { return model_name_; }
     const SequenceConfig& seq_config() const { return seq_; }
     const ggmlc::SerializedModelGraph& graph() const { return graph_; }
     const ggmlc::pipeline::BPETokenizer& tokenizer() const { return tokenizer_; }
@@ -40,7 +42,9 @@ public:
 private:
     bool loaded_ = false;
     std::string model_path_;
-    std::string device_ = "cpu";
+    std::string device_ = "auto";
+    std::string family_ = "english";
+    std::string model_name_ = "laya";
     int n_threads_ = 4;
     bool cuda_graph_ = false;
 

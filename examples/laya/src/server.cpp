@@ -2,12 +2,14 @@
 #include "web_assets.h"
 #include "presets.h"
 #include "questions.h"
+#include "router.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -66,9 +68,22 @@ static std::string http_html(const std::string& body) {
     return oss.str();
 }
 
-Server::Server(DecisionEngine& engine, int port) : engine_(engine), port_(port), running_(false) {}
+Server::Server(DecisionEngine& engine, int port) : engine_(&engine), port_(port), running_(false) {}
+Server::Server(DecisionRouter& router, int port) : router_(&router), port_(port), running_(false) {}
 Server::~Server() { stop(); }
 void Server::stop() { running_ = false; }
+
+std::string Server::device() const {
+    if (router_) return router_->device();
+    if (engine_) return engine_->device();
+    return "";
+}
+
+DecideResult Server::decide(const JsonValue& state, const std::vector<Question>& qs) {
+    if (router_) return router_->decide(state, qs);
+    if (engine_) return engine_->decide(state, qs);
+    throw std::runtime_error("no decision engine");
+}
 
 std::string Server::handle_request(const std::string& method, const std::string& path, const std::string& body) {
     std::string p = path;
@@ -89,10 +104,12 @@ std::string Server::handle_request(const std::string& method, const std::string&
         return http_html(get_index_html());
     }
     if (method == "GET" && p == "/api/health") {
+        if (router_) return http_json(200, json_dumps(router_->health_json()) + "\n");
         JsonValue o = JsonValue::object();
         o.set("status", JsonValue::string("ok"));
-        o.set("model", JsonValue::string("laya"));
-        o.set("device", JsonValue::string(engine_.device()));
+        o.set("model", JsonValue::string(engine_ ? engine_->model_name() : "laya"));
+        o.set("device", JsonValue::string(device()));
+        if (engine_) o.set("family", JsonValue::string(engine_->family()));
         return http_json(200, json_dumps(o) + "\n");
     }
     if (method == "GET" && p == "/api/presets") {
@@ -119,25 +136,22 @@ std::string Server::handle_request(const std::string& method, const std::string&
             return http_json(400, json_dumps(err) + "\n", "Bad Request");
         }
         JsonValue state = JsonValue::object();
+        const bool had_state = req.get("state") != nullptr;
         if (const JsonValue* s = req.get("state")) state = *s;
         std::vector<Question> qs;
         if (const JsonValue* q = req.get("questions")) qs = questions_from_json(*q);
+        const Preset* pr = nullptr;
         if (const JsonValue* pn = req.get("preset")) {
-            if (pn->is_string()) {
-                const Preset* pr = find_preset(pn->s);
-                if (pr) {
-                    if (qs.empty()) qs = pr->questions;
-                    if (state.is_object() && state.obj.empty()) state = pr->default_state;
-                }
-            }
+            if (pn->is_string()) pr = find_preset(pn->s);
+        }
+        if (pr) {
+            if (qs.empty()) qs = pr->questions;
+            if (!had_state && req.get("text") == nullptr) state = pr->default_state;
         }
         if (const JsonValue* t = req.get("text")) {
             if (t->is_string()) {
-                const Preset* pr = nullptr;
-                if (const JsonValue* pn = req.get("preset")) {
-                    if (pn->is_string()) pr = find_preset(pn->s);
-                }
-                state = apply_text_to_state(pr, state, t->s);
+                JsonValue base = had_state ? state : JsonValue::object();
+                state = apply_text_to_state(pr, base, t->s);
             }
         }
         if (qs.empty()) {
@@ -145,7 +159,7 @@ std::string Server::handle_request(const std::string& method, const std::string&
             err.set("error", JsonValue::string("missing questions"));
             return http_json(400, json_dumps(err) + "\n", "Bad Request");
         }
-        DecideResult r = engine_.decide(state, qs);
+        DecideResult r = decide(state, qs);
         return http_json(200, format_answer_json(r, true) + "\n");
     }
 
