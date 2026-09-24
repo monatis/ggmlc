@@ -30,6 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+hub = [
+    "huggingface_hub>=0.20.0",
+]
 torch = [
     "torch>=2.2.0",
     "mermaidx>=0.9.0",
@@ -50,6 +53,7 @@ docs = [
     "sphinx-copybutton>=0.5.0",
 ]
 all = [
+    "huggingface_hub>=0.20.0",
     "torch>=2.2.0",
     "jax>=0.4.20",
     "jaxlib>=0.4.20",
@@ -69,6 +73,7 @@ dev = [
     "ruff>=0.3.0",
     "nanobind>=2.0.0",
     "scikit-build-core>=0.9.0",
+    "huggingface_hub>=0.20.0",
     "torch>=2.2.0",
     "jax>=0.4.20",
     "jaxlib>=0.4.20",

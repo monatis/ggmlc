@@ -34,6 +34,10 @@ Pre-compiled GGUFs (F16, Q8_0, UD_Q4_K_M) are published under:
 - Kev 4B (Qwen3.5 Gated DeltaNet): [mys/kev-4b-GGUF](https://huggingface.co/mys/kev-4b-GGUF)
 
 ```powershell
+# One-command cache via ggmlc (recommended)
+ggmlc download mys/laya-GGUF:laya_english_f16.gguf
+
+# Or huggingface-cli into a local folder for --models-dir routing
 # huggingface-cli download mys/laya-GGUF laya_english_f16.gguf --local-dir scratch
 ```
 

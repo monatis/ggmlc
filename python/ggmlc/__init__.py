@@ -48,16 +48,19 @@ __all__ = [
     "codegen",
     "compile",
     "compile_to_bytes",
+    "download",
+    "from_pretrained",
     "generate_cpp_project",
     "get_available_devices",
     "graph_to_mermaid",
+    "list_gguf_files",
     "load",
     "visualize",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy-loads compiler, IR, codegen, and visualization modules on demand."""
+    """Lazy-loads compiler, IR, codegen, hub, and visualization modules on demand."""
     if name in ("compile", "compile_to_bytes", "codegen"):
         import ggmlc.compiler as compiler_mod
 
@@ -66,6 +69,10 @@ def __getattr__(name: str) -> Any:
         import ggmlc.codegen as codegen_mod
 
         return getattr(codegen_mod, name)
+    if name in ("download", "from_pretrained", "list_gguf_files"):
+        import ggmlc.hub as hub_mod
+
+        return getattr(hub_mod, name)
     if name in ("visualize", "graph_to_mermaid"):
         import ggmlc.visualization as viz_mod
 

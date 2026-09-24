@@ -104,7 +104,32 @@ graph TD
 
 ## ⚡ 3-Line Quickstarts
 
-### 1. Compile and Run on CPU or GPU (CUDA)
+### 1. Download a Hub-published ggmlc GGUF (one command)
+Pre-compiled models on Hugging Face (for example [mys/laya-GGUF](https://huggingface.co/mys/laya-GGUF)) download into the standard Hub cache and open as a runner:
+
+```bash
+pip install "ggmlc[hub]" --extra-index-url https://monatis.github.io/ggmlc-index/
+
+# Cache + print local path
+ggmlc download mys/laya-GGUF:laya_english_q8_0.gguf
+
+# Cache + load into the native runtime
+ggmlc load mys/laya-GGUF:laya_english_q8_0.gguf --device auto
+```
+
+```python
+import ggmlc
+
+# Downloads once, reuses ~/.cache/huggingface on later calls
+runner = ggmlc.from_pretrained(
+    "mys/laya-GGUF",
+    filename="laya_english_q8_0.gguf",
+    device="auto",
+)
+# or: path = ggmlc.download("mys/laya-GGUF", filename="laya_english_q8_0.gguf")
+```
+
+### 2. Compile and Run on CPU or GPU (CUDA)
 ```python
 import ggmlc
 import torch
@@ -128,7 +153,7 @@ output = runner_gpu(example_x.numpy())
 print("Output shape:", output.shape)
 ```
 
-### 2. Compile and Run JAX / Flax
+### 3. Compile and Run JAX / Flax
 ```python
 import ggmlc
 import jax
@@ -148,7 +173,7 @@ runner = ggmlc.load(model_path, device="auto")
 out = runner(x_sample)
 ```
 
-### 3. Generate Standalone C++ Project (CPU & CUDA)
+### 4. Generate Standalone C++ Project (CPU & CUDA)
 ```python
 # Emit a complete, standalone C++ project linking against GGML
 ggmlc.codegen(
@@ -163,7 +188,7 @@ Generates:
 - `ggmlc_main.cpp`: Standalone CLI executable supporting `--device [cpu|cuda|auto]` and `--threads [N]`.
 - `CMakeLists.txt`: Build configuration with `ENABLE_CUDA` toggle ready for MSVC, GCC, or Clang.
 
-### 4. Graph & Pass Visualization (`ggmlc.visualize`)
+### 5. Graph & Pass Visualization (`ggmlc.visualize`)
 ```python
 from ggmlc.frontend.pytorch import export_torch_model
 
@@ -171,7 +196,7 @@ from ggmlc.frontend.pytorch import export_torch_model
 ggmlc.visualize(graph, output="resnet18.html")
 ```
 
-### 5. Automatic Reference Vision Preprocessing & Tokenizers
+### 6. Automatic Reference Vision Preprocessing & Tokenizers
 ```python
 import torchvision.models as models
 from PIL import Image
@@ -197,7 +222,7 @@ runner = ggmlc.load("clip_model.gguf", device="cuda")
 similarity_logits = runner(pixel_values, input_ids)
 ```
 
-### 6. Fast Autoregressive Text Generation (`GGMLCGenerator`)
+### 7. Fast Autoregressive Text Generation (`GGMLCGenerator`)
 `GGMLCGenerator` integrates dynamic hardware KV caching to provide flat $O(1)$ inter-token decode latency:
 
 ```python
@@ -215,7 +240,7 @@ text = generator.generate("Artificial intelligence will", max_new_tokens=128, gr
 print("Generated text:", text)
 ```
 
-### 7. Standalone Native CLI Runner (`ggmlc-run`)
+### 8. Standalone Native CLI Runner (`ggmlc-run`)
 `ggmlc` compiles into a zero-dependency C++ executable (`ggmlc-run`) capable of executing any compiled GGUF model with hardware KV caching:
 
 ```bash
@@ -262,7 +287,7 @@ python examples/benchmarks/compare_ggmlc_vs_llama_cpp.py --backend cuda --cuda-g
 
 ---
 
-### 8. GGMLC vs. `llama.cpp`: Computation Graph & Architectural Comparison
+### 9. GGMLC vs. `llama.cpp`: Computation Graph & Architectural Comparison
 
 A comprehensive comparison across shared architectures (`SmolLM2-135M`, `SmolLM2-360M`, `Qwen 2.5 0.5B`, `Qwen 2.5 1.5B`, `GPT-2`, and `BERT-Base`) using native standalone C++ benchmark tools (`ggml-bench` vs `llama-bench`):
 
@@ -438,6 +463,9 @@ Pre-built binary wheels (~130 MB each due to bundled CUDA runtime and C++ librar
 ```bash
 # Lightweight runtime (Inference only)
 pip install ggmlc --extra-index-url https://monatis.github.io/ggmlc-index/
+
+# Hub download / from_pretrained (Hugging Face GGUF cache)
+pip install "ggmlc[hub]" --extra-index-url https://monatis.github.io/ggmlc-index/
 
 # With PyTorch compiler frontend
 pip install "ggmlc[torch]" --extra-index-url https://monatis.github.io/ggmlc-index/

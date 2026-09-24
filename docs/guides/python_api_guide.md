@@ -110,6 +110,34 @@ runner_gpu = ggmlc.load("model.gguf", device="cuda")
 runner_auto = ggmlc.load("model.gguf", device="auto")
 ```
 
+### `ggmlc.download` / `ggmlc.from_pretrained`
+Fetch a **pre-compiled** ggmlc GGUF from the Hugging Face Hub, cache it locally (standard `HF_HOME` cache), and optionally open it:
+
+```python
+# Requires: pip install "ggmlc[hub]"  (or huggingface_hub)
+
+# Download + cache → local Path (idempotent)
+path = ggmlc.download("mys/laya-GGUF", filename="laya_english_q8_0.gguf")
+
+# Download + cache + load in one call
+runner = ggmlc.from_pretrained(
+    "mys/laya-GGUF",
+    filename="laya_english_q8_0.gguf",  # or glob: "*q8_0.gguf"
+    device="auto",
+)
+
+# Combined Hub refs also work:
+path = ggmlc.download("mys/laya-GGUF:laya_english_q8_0.gguf")
+```
+
+CLI equivalents:
+
+```bash
+ggmlc list mys/laya-GGUF
+ggmlc download mys/laya-GGUF:laya_english_q8_0.gguf
+ggmlc load mys/laya-GGUF:laya_english_q8_0.gguf --device auto
+```
+
 ### `ModelRunner` Invocation
 ```python
 # Positional call
