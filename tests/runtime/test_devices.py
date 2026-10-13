@@ -52,7 +52,7 @@ def test_auto_device_execution():
         ggmlc.compile(model, (x,), output=model_path, model_name="Tiny")
 
         runner = ggmlc.load(model_path, device="auto")
-        assert runner.device in ("cpu", "cuda:0", "cuda")
+        assert runner.device in ggmlc.get_available_devices()
         out = runner(x.numpy())
         assert out.squeeze().shape == (4,)
 

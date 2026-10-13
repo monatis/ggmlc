@@ -76,7 +76,7 @@ static void print_help(const char* prog_name) {
               << "                                        use -p 0 -n 0 to skip separate pp/tg tests)\n"
               << "  -r, --repetitions <n>                 Number of repetitions per test (default: 5)\n"
               << "  -o, --output <json|md|csv>            Output format printed to stdout (default: json)\n"
-              << "  -d, --device <cpu|cuda>               Target execution backend (default: cpu)\n"
+              << "  -d, --device <NAME>                  cpu | cuda | metal | amdxdna | auto (default: cpu)\n"
               << "  -t, --threads <n>                     CPU execution worker threads (default: 4)\n"
               << "  -ub, --ubatch <n>                     Prompt prefill physical chunk size (default: 512)\n"
               << "  --no-warmup                           Skip initial warmup passes\n"

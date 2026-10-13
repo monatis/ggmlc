@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(ggmlc LANGUAGES C CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
@@ -8,6 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(GGMLC_ENABLE_CUDA "Enable CUDA backend in ggmlc" OFF)
 option(GGMLC_ENABLE_METAL "Enable Metal backend in ggmlc" OFF)
+option(GGMLC_ENABLE_AMDXDNA "Enable AMD XDNA2 NPU offload via bundled GEMM and system XRT (Linux)" OFF)
 option(GGMLC_BUILD_EXAMPLES "Build downstream application examples" ON)
 option(GGMLC_BUILD_TESTS "Build native runtime tests" OFF)
 

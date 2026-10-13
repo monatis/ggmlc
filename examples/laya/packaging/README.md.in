@@ -1,0 +1,62 @@
+# Laya for Linux x86_64 with AMD XDNA2
+
+This prebuilt package contains Laya, its shared GEMM library, the matching
+XDNA2 NPU kernel, and license notices. It reads Laya GGUF models directly.
+
+Built on: @BUILD_HOST@. CPU native optimization: @GGML_NATIVE@.
+
+## Requirements
+
+- Linux x86_64 with AVX2 and an AMD XDNA2 NPU. Tested on Ryzen AI 9 HX370.
+- glibc providing GLIBC_@GLIBC_REQUIRED@ or later.
+- libstdc++ providing GLIBCXX_@GLIBCXX_REQUIRED@ and CXXABI_@CXXABI_REQUIRED@.
+- Installed XRT NPU runtime (`libxrt_coreutil.so.2`) with its AMD XDNA plugin.
+  The integration was tested with XRT 2.21.75.
+- Loaded amdxdna driver, compatible firmware and access to `/dev/accel/accel0`.
+- A Laya GGUF model, downloaded separately, and sufficient memory/memlock
+  allowance for the original weights and BF16 NPU buffers.
+
+XRT, its plugin, the driver, glibc and libstdc++ are system dependencies.
+They are not included in this archive. Build-machine ABI requirements are
+recorded from the bundled ELF files in `BUILD-INFO.txt`; this package does
+not promise compatibility with older Ubuntu releases.
+
+## Run after extraction
+
+```bash
+tar -xzf @PACKAGE_NAME@.tar.gz
+cd @PACKAGE_NAME@
+sha256sum -c SHA256SUMS
+./@INSTALL_BINDIR@/laya help
+./@INSTALL_BINDIR@/laya decide /path/to/laya_english_q8_0.gguf \
+  --preset email --device amdxdna --threads 8 --json
+```
+
+`@INSTALL_BINDIR@/laya` resolves `@INSTALL_LIBDIR@/libgemm.so` and
+`@INSTALL_DATADIR@/laya/amdxdna/mm.xclbin` relative to its own location. The complete
+directory can be moved; it runs without `LD_LIBRARY_PATH` or a FastFlowLM
+checkout. Keep `bin`, `lib` and `share` together.
+
+To install in `/opt/laya` after extraction:
+
+```bash
+sudo mkdir -p /opt/laya
+sudo cp -a . /opt/laya/
+/opt/laya/@INSTALL_BINDIR@/laya help
+```
+
+Verify device detection with `xrt-smi examine`. Set
+`GGMLC_AMDXDNA_TRACE=1` when running Laya to log each forward; a positive
+`npu_matmuls` count records successfully completed NPU GEMMs. Other operators
+run on CPU. An explicit `GGMLC_AMDXDNA_XCLBIN` overrides the bundled kernel.
+
+## Precision and notices
+
+The NPU backend is experimental and uses BF16. Model probabilities and
+decisions can differ from CPU inference; validate your workload before use.
+
+Bundled NPU components retain their original proprietary binary terms in
+`@INSTALL_DATADIR@/laya/amdxdna/licenses/FastFlowLM-TERMS.md`. Other license notices and
+provenance are under `@INSTALL_DATADIR@/laya/amdxdna` and `@INSTALL_DATADIR@/laya/licenses`.
+
+GGUF models: https://huggingface.co/mys/laya-GGUF

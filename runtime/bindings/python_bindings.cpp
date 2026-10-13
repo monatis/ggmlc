@@ -213,6 +213,7 @@ NB_MODULE(_runtime, m) {
         .def("set_logits_last_only", &ggmlc::ModelExecutor::set_logits_last_only, "enable"_a)
         .def("logits_last_only", &ggmlc::ModelExecutor::logits_last_only)
         .def("runtime_graph_summary", &ggmlc::ModelExecutor::runtime_graph_summary)
+        .def("amdxdna_summary", &ggmlc::ModelExecutor::amdxdna_summary)
         .def("runtime_mul_mat_shape_summary", &ggmlc::ModelExecutor::runtime_mul_mat_shape_summary)
         .def_static("ggml_cuda_graphs_compiled", &ggmlc::ModelExecutor::ggml_cuda_graphs_compiled);
 

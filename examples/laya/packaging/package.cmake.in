@@ -1,0 +1,86 @@
+# Generate a local archive from the Laya install component. No GitHub access.
+set(PACKAGE_NAME "@GGMLC_LAYA_PACKAGE_NAME@")
+set(_stage_parent "@CMAKE_BINARY_DIR@/laya-package-stage")
+set(_stage "${_stage_parent}/${PACKAGE_NAME}")
+set(_output "@GGMLC_LAYA_PACKAGE_OUTPUT_DIR@")
+set(INSTALL_BINDIR "@CMAKE_INSTALL_BINDIR@")
+set(INSTALL_LIBDIR "@CMAKE_INSTALL_LIBDIR@")
+set(INSTALL_DATADIR "@CMAKE_INSTALL_DATADIR@")
+foreach (_directory "${INSTALL_BINDIR}" "${INSTALL_LIBDIR}" "${INSTALL_DATADIR}")
+    if (IS_ABSOLUTE "${_directory}")
+        message(FATAL_ERROR "Laya packaging requires relative install directories: ${_directory}")
+    endif()
+endforeach()
+file(REMOVE_RECURSE "${_stage}")
+file(MAKE_DIRECTORY "${_stage}" "${_output}")
+
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_BINARY_DIR@"
+        --prefix "${_stage}" --component Laya --config "${BUILD_CONFIG}"
+    RESULT_VARIABLE _install_result)
+if (NOT _install_result EQUAL 0)
+    message(FATAL_ERROR "Laya staging installation failed")
+endif()
+
+# Record symbol requirements from the actual distributed ELF files. Do not
+# claim compatibility with an older libc merely from the compiler flags.
+set(GLIBC_REQUIRED "unknown")
+set(GLIBCXX_REQUIRED "unknown")
+set(CXXABI_REQUIRED "unknown")
+foreach (_elf "${_stage}/@CMAKE_INSTALL_BINDIR@/laya" "${_stage}/@CMAKE_INSTALL_LIBDIR@/libgemm.so")
+    execute_process(COMMAND "@CMAKE_READELF@" --version-info "${_elf}"
+        RESULT_VARIABLE _readelf_result OUTPUT_VARIABLE _versions)
+    if (NOT _readelf_result EQUAL 0)
+        message(FATAL_ERROR "Could not inspect ELF dependencies: ${_elf}")
+    endif()
+    foreach (_abi GLIBC GLIBCXX CXXABI)
+        string(REGEX MATCHALL "${_abi}_[0-9]+(\\.[0-9]+)+" _matches "${_versions}")
+        foreach (_match IN LISTS _matches)
+            string(REPLACE "${_abi}_" "" _version "${_match}")
+            if (${_abi}_REQUIRED STREQUAL "unknown" OR _version VERSION_GREATER ${_abi}_REQUIRED)
+                set(${_abi}_REQUIRED "${_version}")
+            endif()
+        endforeach()
+    endforeach()
+endforeach()
+
+set(BUILD_HOST "@_laya_build_host@")
+set(GGML_NATIVE "@GGML_NATIVE@")
+file(READ "@CMAKE_CURRENT_SOURCE_DIR@/packaging/README.md.in" _readme)
+string(CONFIGURE "${_readme}" _readme @ONLY)
+file(WRITE "${_stage}/README.md" "${_readme}")
+file(WRITE "${_stage}/BUILD-INFO.txt"
+    "Build host: ${BUILD_HOST}\n"
+    "Architecture: @CMAKE_SYSTEM_PROCESSOR@\n"
+    "Compiler: @CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@\n"
+    "Configuration: ${BUILD_CONFIG}\n"
+    "GGML_NATIVE: ${GGML_NATIVE}\n"
+    "GLIBC required by bundled ELF files: ${GLIBC_REQUIRED}\n"
+    "GLIBCXX required by bundled ELF files: ${GLIBCXX_REQUIRED}\n"
+    "CXXABI required by bundled ELF files: ${CXXABI_REQUIRED}\n"
+    "System NPU runtime: libxrt_coreutil.so.2 and the XDNA plugin\n"
+    "Kernel asset: ${INSTALL_DATADIR}/laya/amdxdna/mm.xclbin\n")
+
+# Include per-file checksums, plus a checksum beside the release archive.
+file(GLOB_RECURSE _files LIST_DIRECTORIES false RELATIVE "${_stage}" "${_stage}/*")
+list(SORT _files)
+set(_checksums "")
+foreach (_file IN LISTS _files)
+    file(SHA256 "${_stage}/${_file}" _hash)
+    string(APPEND _checksums "${_hash}  ${_file}\n")
+endforeach()
+file(WRITE "${_stage}/SHA256SUMS" "${_checksums}")
+
+set(_archive "${_output}/${PACKAGE_NAME}.tar.gz")
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" -E tar czf "${_archive}" --format=gnutar "${PACKAGE_NAME}"
+    WORKING_DIRECTORY "${_stage_parent}"
+    RESULT_VARIABLE _archive_result)
+if (NOT _archive_result EQUAL 0)
+    message(FATAL_ERROR "Could not create ${_archive}")
+endif()
+file(SHA256 "${_archive}" _archive_hash)
+file(WRITE "${_archive}.sha256" "${_archive_hash}  ${PACKAGE_NAME}.tar.gz\n")
+message(STATUS "Release archive: ${_archive}")
+message(STATUS "SHA-256: ${_archive_hash}")
+message(STATUS "Bundled ELF requirements: GLIBC ${GLIBC_REQUIRED}, GLIBCXX ${GLIBCXX_REQUIRED}, CXXABI ${CXXABI_REQUIRED}")

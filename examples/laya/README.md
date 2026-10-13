@@ -32,6 +32,37 @@ Pre-compiled GGUFs (F16, Q8_0, UD_Q4_K_M) are published under:
 
 Put the files you need in one directory if you want `--models-dir` routing.
 
+Linux Ryzen AI XDNA2 (including Ryzen AI 9 HX370) has an experimental
+`amdxdna` build option. It uses the bundled BF16 GEMM through system XRT and the
+installed amdxdna driver, without a FastFlowLM installation or checkout.
+Build and run with `GGMLC_ENABLE_AMDXDNA=ON` and
+`--device amdxdna`; see [setup, verification and accuracy limits](../../docs/guides/amdxdna.md).
+
+To install the executable with its NPU library, kernel and license notices:
+
+```bash
+cmake --build build/amdxdna --target laya -j8
+sudo cmake --install build/amdxdna --prefix /opt/laya --component Laya
+/opt/laya/bin/laya help
+```
+
+This installs `bin/laya`, `lib/libgemm.so`, and `share/laya/amdxdna/mm.xclbin`
+under the prefix using the default install directories. The executable finds
+them relative to its location; copy the complete installed tree to relocate it.
+XRT and the amdxdna driver must be available on the target system.
+
+For a local NPU release archive, build `laya-package` instead of copying only
+the executable. It creates a `.tar.gz` and SHA-256 file under `<build>/dist`:
+
+```bash
+cmake --build build/amdxdna --target laya-package -j8
+```
+
+The archive includes the library, NPU kernel, licenses, README, build/ABI
+requirements and file checksums. Configure `GGMLC_LAYA_PACKAGE_NAME` and
+`GGMLC_LAYA_PACKAGE_OUTPUT_DIR` to change its name and destination. Packaging
+does not upload files or create commits.
+
 ### Binaries (`laya.exe` / `laya`)
 
 GitHub Release artifacts from the **`latest`** tag: [monatis/ggmlc releases](https://github.com/monatis/ggmlc/releases/latest)

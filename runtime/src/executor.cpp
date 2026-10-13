@@ -180,6 +180,9 @@ std::vector<std::string> ModelExecutor::get_available_devices() {
 #if defined(GGML_USE_METAL)
     devices.push_back("metal");
 #endif
+#if defined(GGMLC_USE_AMDXDNA)
+    if (AmdxdnaExecutor::is_available()) devices.push_back("amdxdna");
+#endif
     return devices;
 }
 
@@ -203,6 +206,12 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
 #else
         dev_lower = "cpu";
         device_ = "cpu";
+#endif
+#if defined(GGMLC_USE_AMDXDNA)
+        if (dev_lower == "cpu" && AmdxdnaExecutor::is_available()) {
+            dev_lower = "amdxdna";
+            device_ = "amdxdna";
+        }
 #endif
     }
 
@@ -232,13 +241,26 @@ ModelExecutor::ModelExecutor(const SerializedModelGraph& graph, const std::strin
         is_cuda_ = false;
     }
 #endif
-    else {
+    else if (dev_lower == "amdxdna") {
+#if defined(GGMLC_USE_AMDXDNA)
+        amdxdna_ = std::make_unique<AmdxdnaExecutor>();
+        backend_ = ggml_backend_cpu_init();
+        if (!backend_) throw std::runtime_error("Failed to initialize amdxdna CPU fallback backend.");
+        device_ = "amdxdna";
+#else
+        throw std::runtime_error("amdxdna was requested, but ggmlc was compiled without GGMLC_ENABLE_AMDXDNA=ON.");
+#endif
+    }
+    else if (dev_lower == "cpu") {
         backend_ = ggml_backend_cpu_init();
         if (!backend_) {
             throw std::runtime_error("Failed to initialize GGML CPU backend.");
         }
         device_ = "cpu";
         is_cuda_ = false;
+    }
+    else {
+        throw std::invalid_argument("Unknown execution device: '" + device + "'");
     }
 }
 
@@ -351,6 +373,7 @@ void ModelExecutor::init_weights() {
     if (!weight_buffer_) {
         throw std::runtime_error("Failed to allocate weight buffer on backend (" + device_ + ")");
     }
+    ggml_backend_buffer_set_usage(weight_buffer_, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
     for (const auto& pair : model_graph_.tensors) {
         uint32_t tid = pair.first;
@@ -2877,6 +2900,12 @@ void ModelExecutor::run(int n_threads) {
     // Outer CUDAGraphManager capture nests with ggml_backend_cuda_graph_compute and
     // aborts on bucket switches; pad-stable SET_ROWS graphs make that wrapper unnecessary.
 
+#if defined(GGMLC_USE_AMDXDNA)
+    if (amdxdna_) {
+        amdxdna_->run(cgraph_, backend_);
+        return;
+    }
+#endif
     enum ggml_status status = ggml_backend_graph_compute(backend_, cgraph_);
     if (status != GGML_STATUS_SUCCESS) {
         throw std::runtime_error("GGML backend graph compute failed with status: " + std::to_string(status));
@@ -2889,6 +2918,13 @@ void ModelExecutor::synchronize() {
     if (backend_) {
         ggml_backend_synchronize(backend_);
     }
+}
+
+std::string ModelExecutor::amdxdna_summary() const {
+#if defined(GGMLC_USE_AMDXDNA)
+    if (amdxdna_) return amdxdna_->summary();
+#endif
+    return "{}";
 }
 
 void ModelExecutor::set_state(uint32_t tensor_id, const void* data, size_t size_bytes) {

@@ -326,7 +326,7 @@ def load(
     Args:
         model_source: Path to .gguf file or raw GGUF bytes.
         n_threads: Number of CPU threads to use during execution.
-        device: Hardware device to execute on ("cpu", "cuda", "cuda:0", "auto").
+        device: Hardware device to execute on ("cpu", "cuda", "cuda:0", "metal", "amdxdna", "auto").
 
     Returns:
         Instantiated ModelRunner instance.

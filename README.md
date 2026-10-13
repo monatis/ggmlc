@@ -480,6 +480,12 @@ CPU-only GCC/Clang builds optimize for the build machine by default. Use
 when cross-compiling. Each CPU executor reuses its worker threads across inference
 calls; set `n_threads` in Python or `--threads` in the CLI for your workload.
 
+Linux Ryzen AI XDNA2 users can enable experimental NPU matrix-multiply offload
+with `-DGGMLC_ENABLE_AMDXDNA=ON`, then select `--device amdxdna`.
+The required GEMM headers, libraries and kernel are included in this repository;
+no FastFlowLM installation or checkout is needed. See [AMD XDNA2 setup and Laya validation](docs/guides/amdxdna.md)
+for XRT dependencies, build commands, and BF16 accuracy limitations.
+
 To run the native CPU regression test, configure with `-DGGMLC_BUILD_TESTS=ON`,
 build the `test-executor-cpu` target, then run `ctest --test-dir build --output-on-failure`.
 `build/runtime/test-executor-cpu --benchmark` measures a small MLP through the

@@ -11,6 +11,9 @@
 #include "ggmlc/types.h"
 #include "ggmlc/cuda_graph.h"
 #include "ggmlc/vmm_pool.h"
+#if defined(GGMLC_USE_AMDXDNA)
+#include "ggmlc/amdxdna.h"
+#endif
 
 namespace ggmlc {
 
@@ -117,6 +120,8 @@ public:
     std::string runtime_graph_summary() const;
     // Unique MUL_MAT (and FA) shape histogram for tile/layout diagnosis.
     std::string runtime_mul_mat_shape_summary() const;
+    // Last-run NPU offload counters; {} when amdxdna is not selected.
+    std::string amdxdna_summary() const;
     static bool ggml_cuda_graphs_compiled();
 
     // Match llama.cpp n_outputs=1: gather last token before graph-output MUL_MAT (lm_head).
@@ -130,6 +135,9 @@ public:
     bool is_cuda_graph_bucket_captured(int batch_size) const;
 
 private:
+#if defined(GGMLC_USE_AMDXDNA)
+    std::unique_ptr<AmdxdnaExecutor> amdxdna_;
+#endif
     void init_weights();
     void init_states(const std::unordered_map<std::string, int64_t>& symbol_env);
     bool has_state_tensors() const;

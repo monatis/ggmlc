@@ -14,6 +14,12 @@ else()
     set(CUDA_GRAPH_SOURCES src/cuda_graph_stub.cpp src/vmm_pool_stub.cpp)
 endif()
 
+if (GGMLC_ENABLE_AMDXDNA)
+    add_subdirectory(amdxdna)
+    target_compile_definitions(ggmlc_amdxdna INTERFACE GGMLC_USE_AMDXDNA)
+    list(APPEND GGML_BACKEND_LIBS ggmlc_amdxdna)
+endif()
+
 add_library(ggmlc_runtime STATIC
     src/loader.cpp
     src/executor.cpp
@@ -59,6 +65,12 @@ if (GGMLC_BUILD_TESTS)
     add_executable(test-executor-cpu ../tests/runtime/test_executor_cpu.cpp)
     target_link_libraries(test-executor-cpu PRIVATE ggmlc_runtime)
     add_test(NAME executor-cpu COMMAND test-executor-cpu)
+    if (GGMLC_ENABLE_AMDXDNA)
+        add_executable(test-amdxdna ../tests/runtime/test_amdxdna.cpp)
+        target_link_libraries(test-amdxdna PRIVATE ggmlc_runtime)
+        add_test(NAME amdxdna COMMAND test-amdxdna)
+        set_tests_properties(amdxdna PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 endif()
 
 # Shared library for C-FFI

@@ -24,3 +24,6 @@ benchmark*.md
 benchmark*.json
 project.md
 notes.md
+
+# Required, pinned AMD XDNA2 runtime library.
+!third_party/amdxdna/lib/libgemm.so
